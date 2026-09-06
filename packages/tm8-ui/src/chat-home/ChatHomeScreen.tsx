@@ -1991,12 +1991,7 @@ export function ChatHomeScreen({
                 <TriggerPopover
                   popover={rich.popover}
                   label="Available skills"
-                  renderOption={(option) => (
-                    <>
-                      <span className="ri-popover__name">{`/${option.display}`}</span>
-                      {option.meta ? <span className="ri-popover__meta">{option.meta}</span> : null}
-                    </>
-                  )}
+                  prefix="/"
                   emptyText="No matching skills"
                   testId="tch-skill-picker"
                 />

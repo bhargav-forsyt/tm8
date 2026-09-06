@@ -121,7 +121,7 @@ function type(text: string) {
 }
 
 describe('triggers through the textarea', () => {
-  it('typing the sigil opens the picker; typing filters it; typing past the word closes it', () => {
+  it('typing the sigil opens the picker; typing RANKS it (was: prefix-filtered); typing past the word closes it', () => {
     render(<Host triggers={[PEOPLE]} />);
     type('@');
     expect(screen.getByRole('listbox')).toBeTruthy();
@@ -207,6 +207,82 @@ describe('triggers through the textarea', () => {
     render(<Host triggers={[{ ...PEOPLE, options: [] }]} />);
     type('@');
     expect(screen.getByRole('status').textContent).toContain('No matches');
+  });
+});
+
+/**
+ * THE RANKED PICKER (U1). The hook ranks with `rankTriggerOptions` for EVERY
+ * trigger — `@` and `/` alike — and the view is handed the offsets that
+ * matched so it can say WHY each row is on screen. These tests are at the
+ * seam a user touches: what the listbox actually contains.
+ */
+describe('the ranked picker', () => {
+  const RANKED: RichInputTriggerSpec = {
+    sigil: '/',
+    options: [
+      { id: 'preview', display: 'preview' },
+      { id: 'rev', display: 'rev', meta: 'the short one', group: 'project · Claude Code' },
+    ],
+    onSelect: (option) => ({ insert: `/${option.display} ` }),
+  };
+
+  it('an exact name is the first row, above a better-scoring fuzzy hit', () => {
+    render(<Host triggers={[RANKED]} />);
+    type('/rev');
+    const rows = screen.getAllByRole('option');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.textContent).toContain('rev');
+    expect(rows[0]!.getAttribute('data-active')).toBe('true');
+    expect(rows[1]!.textContent).toContain('preview');
+  });
+
+  it('bolds the characters that matched — the only honest account of a fuzzy row', () => {
+    render(<Host triggers={[PEOPLE]} />);
+    type('@bo');
+    const hit = screen.getByRole('option').querySelector('strong');
+    expect(hit?.textContent).toBe('Bo');
+  });
+
+  it('draws `group` as a trailing label — the source a row came from', () => {
+    render(<Host triggers={[RANKED]} />);
+    type('/rev');
+    expect(screen.getAllByRole('option')[0]!.textContent).toContain('project · Claude Code');
+  });
+
+  it('the `/` picker still opens after a settled `@` word — `@alice /rev`', () => {
+    // The regression this guards: a matcher that reached back past the `/`
+    // would rank the mention list against `rev` and show the wrong catalog.
+    render(<Host triggers={[PEOPLE, RANKED]} />);
+    type('@Alice Chen /rev');
+    const rows = screen.getAllByRole('option');
+    expect(rows[0]!.textContent).toContain('rev');
+    expect(screen.queryByText('Alice Chen')).toBeNull();
+  });
+
+  it('builds at most 8 rows, and the window follows the highlight past the 8th', () => {
+    const many: RichInputTriggerSpec = {
+      sigil: '@',
+      options: Array.from({ length: 12 }, (_, i) => ({ id: `p${i}`, display: `Person ${i}` })),
+      onSelect: (option) => ({ insert: `@${option.display} ` }),
+    };
+    render(<Host triggers={[many]} />);
+    type('@');
+    expect(screen.getAllByRole('option')).toHaveLength(8);
+    expect(screen.getByText('Person 0')).toBeTruthy();
+
+    // Nine steps down: the highlight is on row 8, which MUST be in the DOM —
+    // `aria-activedescendant` pointing at a row that was never rendered is a
+    // listbox that goes silent for a screen reader.
+    for (let step = 0; step < 8; step += 1) {
+      fireEvent.keyDown(screen.getByLabelText('draft'), { key: 'ArrowDown' });
+    }
+    const rows = screen.getAllByRole('option');
+    expect(rows).toHaveLength(8);
+    expect(rows[rows.length - 1]!.textContent).toContain('Person 8');
+    expect(rows[rows.length - 1]!.getAttribute('data-active')).toBe('true');
+    expect(screen.queryByText('Person 0')).toBeNull();
+    expect(screen.getByLabelText('draft').getAttribute('aria-activedescendant'))
+      .toBe(rows[rows.length - 1]!.getAttribute('id'));
   });
 });
 

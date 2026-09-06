@@ -33,8 +33,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type React from 'react';
 import type { FileUploadTask, UploadedFile } from '../files/upload';
 import { safeUploadReason } from '../files/upload';
-import { activeTrigger, commitTrigger, filterTriggerOptions } from './triggers';
-import type { ActiveTrigger, TriggerOption } from './triggers';
+import { activeTrigger, commitTrigger, rankTriggerOptions } from './triggers';
+import type { ActiveTrigger, RankedTriggerOption, TriggerOption } from './triggers';
 import { extractReadableFiles } from './clipboardFiles';
 import { fileReference, spliceInto } from './caretInsert';
 
@@ -118,7 +118,8 @@ export interface RichInputAttachments {
 export interface RichInputPopover {
   sigil: string;
   query: string;
-  options: readonly TriggerOption[];
+  /** Best first, each carrying `matchIndices` into its own `display`. */
+  options: readonly RankedTriggerOption[];
   activeIndex: number;
   setActive(index: number): void;
   /** Commit an option (default: the active one) through its trigger's `onSelect`. */
@@ -197,8 +198,12 @@ export function useRichInput({
 
   const liveSigils = triggers.filter((spec) => spec.options !== undefined).map((spec) => spec.sigil);
   const spec = trigger ? triggers.find((candidate) => candidate.sigil === trigger.sigil) : undefined;
-  const filtered = trigger && spec?.options !== undefined
-    ? filterTriggerOptions(spec.options, trigger.query)
+  /* RANKED, not filtered: the picker answers with the best matches first
+     (exact › prefix › word start › fuzzy › description) and each row carries
+     the offsets of the characters that matched, so the view can bold them
+     without re-deriving the match it was never shown. */
+  const filtered: RankedTriggerOption[] = trigger && spec?.options !== undefined
+    ? rankTriggerOptions(spec.options, trigger.query)
     : [];
 
   /**

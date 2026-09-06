@@ -226,8 +226,36 @@
 }
 
 .ri-popover__name {
+  flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/**
+ * THE MATCHED LETTERS. A ranked list that also matches fuzzily looks
+ * arbitrary — "why is THAT row here?" — until the characters the query hit
+ * are visible. Toned with the brand accent AND bolded: colour alone would
+ * carry the whole message, which is exactly what a colour-blind reader does
+ * not receive (§ contrast is not a decoration).
+ */
+.ri-popover__hit {
+  color: var(--pn-brand);
+  font-weight: 650;
+}
+
+/**
+ * The SOURCE label — where an option comes from. Kept as its own trailing
+ * slot rather than folded into `__meta` so a row can carry both a
+ * description and a provenance without one silently replacing the other.
+ */
+.ri-popover__group {
+  flex: 0 0 auto;
+  color: var(--pn-ink-4);
+  font: 9px var(--pn-mono);
+  white-space: nowrap;
+  border: 1px solid var(--pn-line);
+  border-radius: var(--pn-r-sm);
+  padding: 1px 5px;
 }
 
 .ri-popover__meta {
