@@ -3,7 +3,16 @@ import type { EntityId, MessageView } from '@tm8/contract';
 import type { ConnectionState } from '../data/seam';
 import { Avatar } from '../kit';
 import { DisabledAction, DisabledIconControl } from '../panels/honesty/DisabledWithReason';
-import { AttachmentChips, ComposerCard, skillReference, useRichInput, type TriggerOption } from '../rich-input';
+import {
+  AttachmentChips,
+  ComposerCard,
+  highlightMatch,
+  popoverWindow,
+  skillReference,
+  useRichInput,
+  type RankedTriggerOption,
+  type TriggerOption,
+} from '../rich-input';
 import type { ChannelPostInput } from './feed-model';
 import type { ComposerMentionOption } from './channel-tags';
 import type { ChatAttachmentUploadTask } from './chat-attachments';
@@ -249,6 +258,10 @@ export function Composer({
   }, [attachOpen, attachActiveIndex]);
 
   const mentionListbox = useRef<HTMLDivElement>(null);
+  /* At most 8 rows are BUILT; the window follows the highlight so ↓ never
+     lands on a row that is not in the DOM. Every match stays in
+     `popover.options` — this is a render limit, never a second filter. */
+  const pickerWindow = popoverWindow(popover?.options.length ?? 0, popover?.activeIndex ?? 0);
   useEffect(() => {
     if (!popover) return;
     const active = mentionListbox.current?.querySelector('[data-active="true"]');
@@ -502,34 +515,45 @@ export function Composer({
             role="listbox"
             aria-label={popover.sigil === '/' ? 'Available skills' : 'Available @Tag options'}
           >
-            {popover.options.map((option, index) => (
-              <button
-                key={option.id}
-                id={popover.optionDomId(option)}
-                type="button"
-                role="option"
-                data-active={index === popover.activeIndex}
-                aria-selected={popover.sigil === '@'
-                  && selectedMentions.some((item) => item.id === option.id)}
-                /* Pointer hover moves the highlight so the mouse and the arrow
-                   keys never disagree about which row Enter would take. */
-                onMouseEnter={() => popover.setActive(index)}
-                onClick={() => popover.select(option)}
-              >
-                <span className="chs-mention-picker__identity">
-                  {popover.sigil === '@' ? <MentionFace option={option as ComposerMentionOption} /> : null}
-                  <span className="chs-mention-picker__name">
-                    {popover.sigil === '/' ? `/${option.display}` : option.display}
+            {popover.options.slice(pickerWindow.from, pickerWindow.to).map((option, offset) => {
+              const index = pickerWindow.from + offset;
+              return (
+                <button
+                  key={option.id}
+                  id={popover.optionDomId(option)}
+                  type="button"
+                  role="option"
+                  data-active={index === popover.activeIndex}
+                  aria-selected={popover.sigil === '@'
+                    && selectedMentions.some((item) => item.id === option.id)}
+                  /* Pointer hover moves the highlight so the mouse and the arrow
+                     keys never disagree about which row Enter would take. */
+                  onMouseEnter={() => popover.setActive(index)}
+                  onClick={() => popover.select(option)}
+                >
+                  <span className="chs-mention-picker__identity">
+                    {popover.sigil === '@'
+                      ? <MentionFace option={option as RankedTriggerOption<ComposerMentionOption>} />
+                      : null}
+                    <span className="chs-mention-picker__name">
+                      {popover.sigil === '/' ? '/' : null}
+                      {highlightMatch(option.display, option.matchIndices, 'chs-mention-picker__hit')}
+                    </span>
                   </span>
-                </span>
-                <span className="chs-mention-picker__meta">
-                  {option.meta ?? option.group
-                    ?? ((option as ComposerMentionOption).kind === 'team_member' ? 'agent'
-                      : (option as ComposerMentionOption).kind === 'member' ? 'member'
-                        : 'skill')}
-                </span>
-              </button>
-            ))}
+                  <span className="chs-mention-picker__meta">
+                    {option.meta
+                      ?? (mentionKind(option) === 'team_member' ? 'agent'
+                        : mentionKind(option) === 'member' ? 'member'
+                          : 'skill')}
+                  </span>
+                  {/* The source label (U2 fills it): where a skill comes from,
+                      kept OUTSIDE the description slot so a row can say both. */}
+                  {option.group ? (
+                    <span className="chs-mention-picker__group">{option.group}</span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
           {popover.options.length ? null : (
             <p className="chs-mention-picker__empty" role="status">
@@ -649,6 +673,16 @@ export function Composer({
 }
 
 /** Task/doc/session options are entities; only member rows carry actor faces. */
+/**
+ * The row's kind, read off a RANKED option. Ranked rows carry `matchIndices`
+ * on top of the host's own option type, which no longer overlaps
+ * `ComposerMentionOption` structurally — so the narrowing is stated once,
+ * here, rather than cast three times inside the markup.
+ */
+function mentionKind(option: RankedTriggerOption): ComposerMentionOption['kind'] | undefined {
+  return (option as RankedTriggerOption<ComposerMentionOption>).kind;
+}
+
 function MentionFace({ option }: { option: ComposerMentionOption }) {
   if (option.kind !== 'member' && option.kind !== 'team_member') return null;
   return (
