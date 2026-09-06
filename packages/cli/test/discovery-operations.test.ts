@@ -67,7 +67,9 @@ import { createOutput } from '../src/output.js';
 // containers.stream and containers.proxy — are deliberately commandless, which
 // is why the commandless subtraction below moves 25 -> 27. MEASURED on this
 // tree, not carried from the design.
-const EXPECTED_ROWS = 197;
+// 197 -> 198 (2026-09-07, skills integration U2): skills.catalog, with the
+// `skill list` command — so the commandless subtraction below is unchanged.
+const EXPECTED_ROWS = 198;
 
 const MANIFEST_PATH = fileURLToPath(
   new URL('../../../tools/conformance/generated/w1-conformance-manifest.json', import.meta.url),
@@ -181,7 +183,8 @@ describe('the exposure histogram is the one the catalog freeze specifies', () =>
     // refusal — a human `cli` session is admitted by the R2 guard.
     // +3 (W4/132): the taskWorkflows three, all public. MEASURED from the run.
     // 165 -> 168 (148): all three spaces.workflows ops are public.
-    expect(histogram).toEqual({ public: 193, composite: 1, internal: 1, reserved: 2 });
+    // 193 -> 194 (U2): skills.catalog is public — it has a CLI command.
+    expect(histogram).toEqual({ public: 194, composite: 1, internal: 1, reserved: 2 });
   });
 });
 

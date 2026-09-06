@@ -170,6 +170,7 @@ import type {
   ProjectFileHistory,
   ProjectCreateInput,
   ProjectDirectoryListing,
+  SkillCatalog,
   ProjectFileAttachInput,
   ProjectFileReadResult,
   ProjectFileListing,
@@ -538,6 +539,19 @@ export interface Seam {
    * recorded — consumers must render that as a named absence, never guess.
    */
   projectFileBlame(projectId: string, path: string, opts?: FileBlameOpts): Promise<ProjectFileBlame>;
+  /**
+   * THE `/` TRIGGER'S REAL SUBJECT — every skill reachable in this Space, not
+   * only the ones that are graph entities. The Space's own `skill` rows come
+   * back beside the Claude Code and Codex skill FOLDERS of its linked projects
+   * and of the node user's home, each tagged with where it came from.
+   *
+   * OPTIONAL, and the option is about the SERVER, not about this build: an
+   * older node has no `skills.catalog` row and answers `not_implemented`, which
+   * `loadSkillTriggerOptions` folds back to the entity query rather than
+   * showing an empty picker. A fixture seam that has no filesystem leaves it
+   * undefined and gets the same fallback for the same reason.
+   */
+  skillCatalog?(spaceId: SpaceId, projectId?: ProjectId): Promise<SkillCatalog>;
   /**
    * Node-local onboarding is optional because fixture seams have no filesystem.
    * The real seam exposes the complete contract-backed saga surface; its

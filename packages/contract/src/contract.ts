@@ -4003,6 +4003,89 @@ export interface ProjectFileReadResult {
   truncated: boolean;
 }
 
+/**
+ * WHO PUT THE SKILL THERE — the four authorities a catalog row can come from.
+ *
+ * `tm8` is a `skill` ENTITY in the Space (`public.skills`), addressable by id
+ * and referenced as `tm8://skill/<id>`. The other three are FOLDERS an agent
+ * harness reads directly off the node's disk, so their rows carry a `path` and
+ * are referenced by the plain `/name` token the harness itself resolves.
+ *
+ * `claude-plugin` is declared and has no producer in the v1 root list, and
+ * that is a fact about the roots rather than a gap in the scanner: a plugin's
+ * skills are loadable only while the plugin is INSTALLED, and installation
+ * state lives in Claude Code's `installed_plugins.json` — not in any directory
+ * a root-confined scan can name. Listing a marketplace's cached checkout would
+ * advertise skills the harness would refuse to run. The value stays in the
+ * vocabulary because the namespace (`plugin-name:skill-name`) is Claude Code's
+ * and a catalog that could not SAY "plugin" would have to lie about one.
+ */
+export type SkillCatalogSource = 'tm8' | 'claude-code' | 'codex' | 'claude-plugin';
+
+/**
+ * WHICH ROOT THE ROW WAS FOUND UNDER, in Claude Code's own precedence order:
+ * `admin` (enterprise) ≻ `personal` (the node user's home) ≻ `project` (a
+ * linked project's working directory) ≻ `system` (a harness's own bundled
+ * set). Two folder rows can only compete for one `/name`, and the higher scope
+ * is the one the harness itself would resolve.
+ *
+ * `space` is the tm8 graph and competes with none of them: a tm8 entity row is
+ * never displaced by a folder row of the same name, because the two are
+ * referenced differently and both stay reachable.
+ *
+ * `admin` shares `claude-plugin`'s status — the vocabulary carries it, the v1
+ * root list does not reach `/etc`.
+ */
+export type SkillCatalogScope = 'space' | 'project' | 'personal' | 'system' | 'admin';
+
+/** One skill an agent working in this Space could be pointed at. */
+export interface SkillCatalogEntry {
+  /**
+   * STABLE ACROSS CALLS, and the shape says which reference form to write:
+   * the entity id for a `tm8` row (a uuid — `tm8://skill/<id>`), and
+   * `<source>:<scope>:<name>` for a folder row (a plain `/name` token).
+   */
+  id: string;
+  /** What a caller types after `/`. Frontmatter `name`, else the folder name. */
+  name: string;
+  /** Frontmatter `description`, or `''` when the file declares none. */
+  description: string;
+  source: SkillCatalogSource;
+  scope: SkillCatalogScope;
+  /** Absolute path of the SKILL.md (or legacy command `.md`) — folder rows only. */
+  path?: string;
+  /** The `skill` entity — `source: 'tm8'` rows only, and equal to `id`. */
+  entityId?: EntityId;
+  /** Frontmatter `argument-hint`, when the file declares one. */
+  argumentHint?: string;
+}
+
+/**
+ * GET /v2/spaces/:spaceId/skills — the UNION of everything in this Space that
+ * answers "what skills exist here": the Space's own `skill` entities plus the
+ * Claude Code and Codex skill folders of every project linked to it and of the
+ * node user's home.
+ *
+ * A READ, and root-confined the same way `projects.directories.list` is: the
+ * scan opens only the roots listed in `roots`, never follows a symlinked entry
+ * out of one, and writes nothing. `roots` travels with the answer because the
+ * useful question about a missing skill is "was its folder even looked at",
+ * and a listing that cannot say which directories it opened cannot answer it.
+ *
+ * Rows are deduped twice — by REAL PATH first (a `.agents/skills` symlink onto
+ * `.claude/skills` is one folder, not two catalogs), then by normalized name
+ * under the scope precedence above. `truncated` is true when any one root hit
+ * its per-root ceiling, so a cut is stated rather than silently absorbed.
+ */
+export interface SkillCatalog {
+  spaceId: SpaceId;
+  /** The `?projectId=` narrowing, echoed; null when every linked project was scanned. */
+  projectId: ProjectId | null;
+  /** Absolute roots actually opened, canonical and deduped, in scan order. */
+  roots: string[];
+  entries: SkillCatalogEntry[];
+  truncated: boolean;
+}
 
 /** The wrapper returned by spaces.create after its default member/channel saga. */
 export interface CreateSpaceResult {

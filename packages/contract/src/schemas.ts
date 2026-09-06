@@ -97,6 +97,7 @@ import type {
   RetireInteractionProfileInput, SavedView, SavedViewInput, SendHandoffInput,
   ServerConnection, ServerConnectionCreateInput, ServerConnectionDeleteInput,
   SetDefaultChannelInput, SetSpaceProfileDefaultInput,
+  SkillCatalog, SkillCatalogEntry, SkillCatalogScope, SkillCatalogSource,
   AttentionRequest, AttentionRequestListQuery, AttentionRequestMutationResult,
   CreateAttentionRequestInput, UpdateAttentionRequestInput, ResolveEntityAttentionInput,
   KindCounts, SpaceKindCounts,
@@ -2625,6 +2626,31 @@ export const ProjectFileReadResultSchema: z.ZodType<ProjectFileReadResult> = z.o
   sizeBytes: z.number().int().nonnegative(),
   encoding: z.enum(['utf8', 'base64']),
   content: z.string(),
+  truncated: z.boolean(),
+}).strict();
+
+export const SkillCatalogSourceSchema: z.ZodType<SkillCatalogSource> =
+  z.enum(['tm8', 'claude-code', 'codex', 'claude-plugin']);
+
+export const SkillCatalogScopeSchema: z.ZodType<SkillCatalogScope> =
+  z.enum(['space', 'project', 'personal', 'system', 'admin']);
+
+export const SkillCatalogEntrySchema: z.ZodType<SkillCatalogEntry> = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string(),
+  source: SkillCatalogSourceSchema,
+  scope: SkillCatalogScopeSchema,
+  path: z.string().min(1).optional(),
+  entityId: EntityIdSchema.optional(),
+  argumentHint: z.string().min(1).optional(),
+}).strict();
+
+export const SkillCatalogSchema: z.ZodType<SkillCatalog> = z.object({
+  spaceId: SpaceIdSchema,
+  projectId: ProjectIdSchema.nullable(),
+  roots: z.array(z.string().min(1)),
+  entries: z.array(SkillCatalogEntrySchema),
   truncated: z.boolean(),
 }).strict();
 

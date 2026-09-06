@@ -108,7 +108,7 @@ describe('the registry is composed from per-noun modules, and agrees with the pr
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  it('the projection holds 159 command paths; the registry is an honest subset of them', () => {
+  it('the projection holds 189 command paths; the registry is an honest subset of them', () => {
     // 123 catalog rows − 2 with no command (execution.prompt, bridge.fetchBlob)
     // 121 -> 126 (2026-08-02): auth.* Identity v2 Stage 1 (4 ops, all public, all with commands).
     // 126 -> 127 (2026-08-02): execution.launch (public, with a command).
@@ -154,7 +154,8 @@ describe('the registry is composed from per-noun modules, and agrees with the pr
     // Neither branch's number survives: main counts chat's five and not the
     // container paths, my branch the reverse. Summing them would be arithmetic
     // over two partial views.
-    expect(COMMAND_PATHS).toHaveLength(188);
+    // 188 -> 189 (U2): `skill list`.
+    expect(COMMAND_PATHS).toHaveLength(189);
     const registered = COMMANDS.filter((c) => isCommandPath(c.path));
     expect(registered.length).toBeLessThanOrEqual(COMMAND_PATHS.length);
     expect(registered.length).toBeGreaterThan(0);

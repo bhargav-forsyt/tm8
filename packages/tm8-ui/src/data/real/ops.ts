@@ -102,6 +102,7 @@ import {
   type ProjectFileHistory,
   type ProjectCreateInput,
   type ProjectDirectoryListing,
+  type SkillCatalog,
   type ProjectFileAttachInput,
   type ProjectFileReadResult,
   type ProjectFolderUploadAbortInput,
@@ -475,6 +476,16 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
 
     projectDirectories(path?: string): Promise<ProjectDirectoryListing> {
       return http.call<ProjectDirectoryListing>('projects.directories.list', { query: { path } });
+    },
+
+    /**
+     * The skill catalog union. `projectId` is a NARROWING, not a requirement:
+     * omitted, the server scans every project linked to the Space, which is
+     * what a composer wants — a `/` picker should not depend on which project
+     * a surface happens to have selected.
+     */
+    skillCatalog(spaceId: SpaceId, projectId?: ProjectId): Promise<SkillCatalog> {
+      return http.call<SkillCatalog>('skills.catalog', { params: { spaceId }, query: { projectId } });
     },
 
     projectFiles(projectId: ProjectId, path?: string): Promise<ProjectFileListing> {

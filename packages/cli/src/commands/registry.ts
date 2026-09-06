@@ -47,6 +47,7 @@ import { ACTION_COMMANDS } from './action.js';
 import { EVENT_COMMANDS } from './event.js';
 import { PRESENCE_COMMANDS } from './presence.js';
 import { PROJECT_COMMANDS } from './project.js';
+import { SKILL_COMMANDS } from './skill.js';
 import { FILE_COMMANDS } from './file.js';
 import { MESSAGE_COMMANDS } from './message.js';
 import { CHAT_COMMANDS } from './chat.js';
@@ -123,6 +124,7 @@ export const COMMANDS: CommandModule[] = [
   ...EVENT_COMMANDS,
   ...PRESENCE_COMMANDS,
   ...PROJECT_COMMANDS,
+  ...SKILL_COMMANDS,
   ...FILE_COMMANDS,
   ...MESSAGE_COMMANDS,
   ...CHAT_COMMANDS,

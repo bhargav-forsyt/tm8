@@ -1199,6 +1199,21 @@ const ROWS: Record<OperationName, Row> = {
       'a CLI caller already holds the node filesystem and reaches these bytes with shell tools',
     ],
   },
+  // ── skills ───────────────────────────────────────────────────────────────
+  'skills.catalog': {
+    cmd: ['skill', 'list'],
+    syn: 'tm8 skill list [--space <space-id>] [--project <project-resource-id>]',
+    sum: 'List every skill reachable in a Space — its skill entities plus the Claude Code and Codex skill folders of its linked projects and the node user home',
+    authz: 'space',
+    input: 'none',
+    tags: ['skill', 'catalog', 'claude-code', 'codex', 'agents', 'commands', 'union'],
+    notes: [
+      'a READ over derived roots: every directory opened comes from a linked project row or the node user home, never from the request',
+      'rows are deduped by real path first (a `.agents/skills` symlink onto `.claude/skills` is one folder), then by normalized name — a tm8 entity row is never dropped by a folder row of the same name',
+      'folder rows carry `path` and are referenced by their bare `/name`; tm8 entity rows carry `entityId` and are referenced as `tm8://skill/<id>`',
+    ],
+  },
+
   'projects.files.attach': {
     cmd: null,
     sum: 'Attach one file read from a connected project folder, without a browser byte transfer',
@@ -2417,6 +2432,7 @@ const NOUN_BY_FAMILY: Record<string, string> = {
   commands: 'undo',
   search: 'search',
   projects: 'project',
+  skills: 'skill',
   files: 'file',
   bridge: 'bridge',
   inbox: 'inbox',
@@ -2505,7 +2521,9 @@ export const CATALOG_DIGEST =
   // containers.* rows). RECOMPUTED from JSON.stringify(OPERATIONS), never
   // adjusted from either side of the merge — neither branch's value is
   // correct once both landed.
-  'sha256:3b2b97fc54418ed191f5bd2dbaf48f5176d0fa404b4d6ee397546cf3a1eedafa';
+  // Re-measured for U2 (+ skills.catalog) — read out of the regenerated
+  // conformance manifest, never hand-derived.
+  'sha256:3bc65cb28e4b44140e7e52a92b960607b256267d784c0ee662ff461f8d41ef36';
 
 export const GRAMMAR_VERSION = '2';
 
@@ -3070,6 +3088,7 @@ const NOUN_SUMMARY: Record<string, string> = {
   undo: 'Redeem an undo token a previous mutation returned',
   search: 'Full-text search — reserved, and honestly unavailable',
   project: 'ProjectResources, their Space links, and artifact attribution',
+  skill: 'Every skill reachable in a Space: its skill entities and the agent skill folders on this node',
   file: 'Blob upload and download',
   bridge: 'Reserved Phase-2 cross-node blob path — no public command',
   inbox: 'Notifications and their read state',
