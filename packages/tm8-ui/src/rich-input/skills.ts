@@ -46,12 +46,26 @@ import type { TriggerOption } from './triggers';
 
 export interface SkillTriggerOption extends TriggerOption {
   id: string;
-  /** The skill's name — what `/query` prefix-matches against. */
+  /** The skill's name — what `/query` ranks against. */
   display: string;
-  /** `state.description`, when the projection carries one. */
+  /**
+   * THE DESCRIPTION, AND ONLY THE DESCRIPTION.
+   *
+   * U1's ranker scores a meta word-start tier, so whatever lands here is
+   * MATCHABLE TEXT. Folding the argument hint in would make `<file>` and `[pr]`
+   * into search terms — a `/f` query would surface every skill whose hint
+   * mentions a file, which is not a thing anyone meant to ask.
+   */
   meta?: string;
   /** WHERE IT LIVES — "project · Claude Code", "personal · Codex", "tm8". */
   group?: string;
+  /**
+   * Frontmatter `argument-hint`, its OWN field for the reason above: it is
+   * rendered, never matched. Declared here rather than on `TriggerOption`
+   * because the primitive's option shape is U1's file — a renderer that wants
+   * it typed on the base adds the line there.
+   */
+  argumentHint?: string;
 }
 
 interface SkillReadPort {
@@ -151,12 +165,12 @@ function byDisplay(a: SkillTriggerOption, b: SkillTriggerOption): number {
 }
 
 function fromCatalogEntry(entry: SkillCatalogEntry): SkillTriggerOption {
-  const meta = [entry.argumentHint, entry.description].filter(Boolean).join('  ');
   return {
     id: entry.id,
     display: entry.name,
     group: groupOf(entry),
-    ...(meta ? { meta } : {}),
+    ...(entry.description ? { meta: entry.description } : {}),
+    ...(entry.argumentHint ? { argumentHint: entry.argumentHint } : {}),
   };
 }
 
@@ -165,7 +179,7 @@ function fromCatalogEntry(entry: SkillCatalogEntry): SkillTriggerOption {
  *
  * PAGED TO EXHAUSTION, not one page. A single page of 100 silently
  * truncates a larger catalog, and the picker then says "No matching
- * skills" about a skill that exists — a lie the prefix filter turns into
+ * skills" about a skill that exists — a lie the ranker turns into
  * a bug report. Skills are small rows and real spaces hold few, so the
  * loop almost never runs twice; the ceiling below is a runaway guard, and
  * hitting it drops the OLDEST-activity tail (the sort makes that choice

@@ -79,7 +79,10 @@ describe('loadSkillTriggerOptions', () => {
         id: 'claude-code:project:alpha',
         display: 'alpha',
         group: 'project · Claude Code',
-        meta: '[pr]  a project skill',
+        // `meta` is the DESCRIPTION ONLY — U1's ranker scores a meta word-start
+        // tier, and a hint folded in here would make `[pr]` matchable text.
+        meta: 'a project skill',
+        argumentHint: '[pr]',
       },
       { id: ENTITY, display: 'team review', group: 'tm8', meta: 'How this team reviews' },
       {
