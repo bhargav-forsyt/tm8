@@ -38,7 +38,8 @@ import {
 // neither branch's value survives the merge, because each saw only its own
 // half of the catalog. The CLI's CATALOG_DIGEST and the generated conformance
 // manifest carry the same value and all three must agree.
-const CATALOG_DIGEST = 'sha256:3b2b97fc54418ed191f5bd2dbaf48f5176d0fa404b4d6ee397546cf3a1eedafa';
+// Re-measured for U2 (+ skills.catalog) off the regenerated conformance manifest.
+const CATALOG_DIGEST = 'sha256:3bc65cb28e4b44140e7e52a92b960607b256267d784c0ee662ff461f8d41ef36';
 const FILLER_ID = '00000000-0000-4000-8000-000000000001';
 
 interface DiscoveredOperation {
@@ -111,7 +112,7 @@ describe('G15 reserved and residual honesty, via generated discovery only', () =
     // onboarding read landed without moving it); 128 adds execution.transcript.
     // 129 adds projects.branches.list.
     // 144 -> 150 (2026-08-12, Git UI landing): the six execution.git* rows.
-    expect(root.catalog.total).toBe(197); // +3 141, +3 148, +25 177 containers
+    expect(root.catalog.total).toBe(198); // +3 141, +3 148, +25 177 containers, +1 U2
     expect(root.catalog.reserved).toBe(2);
     expect(root.nouns.length).toBeGreaterThan(0);
 

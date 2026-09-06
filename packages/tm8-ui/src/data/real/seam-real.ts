@@ -348,6 +348,7 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
     graph: (input: GraphQuery): Promise<GraphResult> => ops.graph(input),
     entityKinds: (spaceId: SpaceId): Promise<EntityKindDef[]> => ops.entityKinds(spaceId),
     projects: (spaceId: SpaceId): Promise<ProjectResource[]> => ops.projects(spaceId),
+    skillCatalog: (spaceId, projectId) => ops.skillCatalog(spaceId, projectId),
     projectBranches: (projectId: string, opts?: BranchTopologyOpts): Promise<ProjectBranchTopology> =>
       ops.projectBranches(projectId, opts),
     projectSetup: {

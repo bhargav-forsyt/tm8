@@ -18,6 +18,12 @@ export interface SessionChatSeam extends ChatSyncSeam {
   commands: Pick<Seam['commands'], 'postMessage'>;
   query?: Seam['query'];
   files?: Seam['files'];
+  /**
+   * The skill catalog union, when the seam has it. Optional for the same reason
+   * `query` is: this surface is mounted against fixture seams that carry
+   * neither, and `/` degrades to plain text rather than failing.
+   */
+  skillCatalog?: Seam['skillCatalog'];
 }
 
 export interface SessionChatSurfaceProps {
@@ -125,7 +131,16 @@ export function SessionChatSurface({
       return;
     }
     let current = true;
-    void loadSkillTriggerOptions({ port: { query: seam.query.bind(seam) }, spaceId }).then(
+    void loadSkillTriggerOptions({
+      port: {
+        query: seam.query.bind(seam),
+        // Bound only when the seam HAS it: an absent method and a present one
+        // that throws are different facts, and `loadSkillTriggerOptions` reads
+        // the absence as "no catalog on this seam" rather than as an outage.
+        ...(seam.skillCatalog ? { skillCatalog: seam.skillCatalog.bind(seam) } : {}),
+      },
+      spaceId,
+    }).then(
       (skills) => {
         if (current) setSkillOptions(skills);
       },

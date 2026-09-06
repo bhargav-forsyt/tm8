@@ -382,6 +382,11 @@ const CHAT_NET_NEW_OPERATIONS = [
   'chat.start',
 ] as const;
 
+/** U2: the skill catalog union — one read, its own registration seam. */
+const SKILL_CATALOG_NET_NEW_OPERATIONS = [
+  'skills.catalog',
+] as const;
+
 const EXPECTED_TRANCHE_V3_FACADE_OPERATIONS: readonly string[] = [
   ...EXPECTED_TRANCHE_V2_FACADE_OPERATIONS,
   ...TRANCHE_V3_NET_NEW_OPERATIONS,
@@ -395,6 +400,7 @@ const EXPECTED_TRANCHE_V3_FACADE_OPERATIONS: readonly string[] = [
   ...TASK_WORKFLOW_NET_NEW_OPERATIONS,
   ...WORKFLOW_NET_NEW_OPERATIONS,
   ...CONTAINER_NET_NEW_OPERATIONS,
+  ...SKILL_CATALOG_NET_NEW_OPERATIONS,
 ].sort();
 
 /** Substituted for every `:param` so one probe covers any catalog path shape. */
@@ -531,7 +537,8 @@ describe('W2.I02 tranche-v2 public composition', () => {
     // 125 -> 131 (2026-08-12, Git UI landing): the six execution.git* rows.
     // 139 -> 141 (118): auth.invite.resolve + spaces.members.updateRole, MEASURED
     // 152 -> 176 (177): the 24 HTTP rows of the containers family. MEASURED.
-    expect(registry.size).toBe(176);
+    // 176 -> 177 (U2): skills.catalog. MEASURED.
+    expect(registry.size).toBe(177);
     expect(registry.size).toBe(
       TRANCHE_V1_FACADE_OPERATIONS.length
         + G02_NET_NEW_OPERATIONS.length
@@ -545,7 +552,8 @@ describe('W2.I02 tranche-v2 public composition', () => {
         + MEMBER_ROLES_NET_NEW_OPERATIONS.length
         + TASK_WORKFLOW_NET_NEW_OPERATIONS.length
         + WORKFLOW_NET_NEW_OPERATIONS.length
-        + CONTAINER_NET_NEW_OPERATIONS.length,
+        + CONTAINER_NET_NEW_OPERATIONS.length
+        + SKILL_CATALOG_NET_NEW_OPERATIONS.length,
     );
     expect(registry.has('search.query')).toBe(false);
     expect(registry.has('bridge.fetchBlob')).toBe(false);
@@ -873,8 +881,9 @@ describe.sequential('W2.I02 real production public surface', () => {
     // catalog grew by 25 and the router by 24 — the 25th is the WS alias,
     // which adds a discoverable NAME for the existing socket, not a route.
     // MEASURED off /health.
-    expect(health).toMatchObject({ ok: true, operations: 195, implemented: 193 });
-    expect(harness.production.server.registry.size).toBe(193);
+    // +1 (U2): skills.catalog, registered and mounted. MEASURED off /health.
+    expect(health).toMatchObject({ ok: true, operations: 196, implemented: 194 });
+    expect(harness.production.server.registry.size).toBe(194);
 
     // Residual honesty, derived from the live catalog rather than a literal.
     // This is now ZERO: every registerable v1 HTTP operation is mounted, and the
@@ -895,7 +904,8 @@ describe.sequential('W2.I02 real production public surface', () => {
     // 139 -> 141 (2026-08-12): collections.addItem/removeItem.
     // 141 -> 147 (2026-08-12, Git UI landing): the six execution.git* rows.
     // 169 -> 193 (177): the 24 HTTP container rows. MEASURED.
-    expect(registered.size + residual.length).toBe(193);
+    // 193 -> 194 (U2): skills.catalog. MEASURED.
+    expect(registered.size + residual.length).toBe(194);
     expect(residual).not.toContain('search.query');
     expect(residual).not.toContain('bridge.fetchBlob');
 

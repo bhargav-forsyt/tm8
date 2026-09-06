@@ -19,6 +19,19 @@ export { INPUT_SCHEMAS, UNBOUND_COMMAND_OPERATIONS } from './input-schemas.js';
 export type { FacadeDeps } from './deps.js';
 
 /**
+ * The skill catalog, callable WITHOUT an HTTP request.
+ *
+ * Exported beside the registry because it has a second caller by design: a
+ * spawn-time materializer needs the same rows the `/` picker shows, in the same
+ * transaction as the persona it is describing, and going out through the facade
+ * to fetch them would read the graph at a second instant. It takes a `Querier`
+ * and `DbClaims` and makes the Space membership check ITSELF — an in-process
+ * caller must not be able to reach a node-local directory scan by skipping a
+ * gate the handler happened to hold.
+ */
+export { readSkillCatalog, type SkillCatalogInput } from './services/w2/skill-catalog.js';
+
+/**
  * The single EntitySummary assembler. Exported as a plain function, free of any
  * handler or registry coupling, so the event stream projects entities through
  * the SAME code the REST reads use. Two assemblers would let a WorkspaceEvent
@@ -68,6 +81,7 @@ import {
   type W2ProjectFolderUploadHandlerDeps,
 } from './handlers/w2/project-folder-uploads.js';
 import { registerW2ProjectsAssociationsHandlers } from './handlers/w2/projects-associations.js';
+import { registerW2SkillsHandlers } from './handlers/w2/skills.js';
 import { registerW2ContainerHandlers } from './handlers/w2/containers.js';
 import { registerW2SavedViewsActionsHandlers } from './handlers/w2/saved-views-actions.js';
 import { registerContentionHandlers } from './services/contention.js';
@@ -175,6 +189,11 @@ export function registerFacadeHandlers(
   registerW2EdgesPlacementsHandlers(registry, facade);
   registerW2CollectionsGraphUndoHandlers(registry, facade);
   registerW2ProjectsAssociationsHandlers(registry, facade);
+  // The skill catalog union — the Space's `skill` entities plus the Claude Code
+  // and Codex skill FOLDERS of its linked projects and the node user's home.
+  // Registered beside the project seam because that is where its roots come
+  // from: every path it opens is a linked project's working directory.
+  registerW2SkillsHandlers(registry, facade);
   // Tier 4 git×graph: the read-only file-contention map over active worktrees.
   registerContentionHandlers(registry, facade);
   // Git UI wave: the session git rail — status/diff reads and the #76 verbs

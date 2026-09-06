@@ -115,7 +115,7 @@ describe('W2.G15 catalog and production-handler accounting', () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  it('keeps the exact 197 = 195 v1 + 2 reserved, 195 mounted HTTP + 1 mounted WS boundary (+25 177)', () => {
+  it('keeps the exact 198 = 196 v1 + 2 reserved, 196 mounted HTTP + 1 mounted WS boundary (+25 177, +1 U2)', () => {
     // A21 (execution.liveness), then voice.token.create, are the +1s on every axis they touch.
     // The six artifacts rows (create/publish/revisions.list/preview.start/export/restore) are
     // the latest +6 on OPERATIONS and V1: +4 POST commands, +2 GET reads.
@@ -131,15 +131,16 @@ describe('W2.G15 catalog and production-handler accounting', () => {
     // gitStatus/gitDiff (GET reads), gitCheckpoint/gitRollback/gitCommit/
     // gitMerge (POST commands).
     // 157 -> 158 (2026-08-13, forge write): tracking.pr.merge, one POST command.
-    expect(OPERATIONS).toHaveLength(197); // +25 (177) containers, MEASURED
-    expect(V1_OPERATIONS).toHaveLength(195);
+    // 197 -> 198 (U2): skills.catalog, one GET read. MEASURED.
+    expect(OPERATIONS).toHaveLength(198); // +25 (177) containers +1 (U2), MEASURED
+    expect(V1_OPERATIONS).toHaveLength(196);
     expect(RESERVED_OPERATIONS.map(({ name }) => name)).toEqual([
       'search.query',
       'bridge.fetchBlob',
     ]);
     // TWO WS ROWS now, one mounted socket: `containers.stream` re-declares
     // `events.subscribe`'s binding under the container family's own name.
-    expect(OPERATIONS.filter(({ method }) => method !== 'WS')).toHaveLength(195);
+    expect(OPERATIONS.filter(({ method }) => method !== 'WS')).toHaveLength(196);
     expect(OPERATIONS.filter(({ method }) => method === 'WS')).toEqual([
       expect.objectContaining({ name: 'events.subscribe', path: '/v2/ws', status: 'v1' }),
       // The alias, and it must declare itself as one: `aliasOf` is what keeps
@@ -159,7 +160,7 @@ describe('W2.G15 catalog and production-handler accounting', () => {
     // auth.claim.reissue) — 163 -> 166.
     expect(OPERATIONS.filter(
       ({ method, status }) => method !== 'WS' && status === 'v1',
-    )).toHaveLength(193); // 169 -> 193 (177): the container handlers
+    )).toHaveLength(194); // 169 -> 193 (177): the container handlers; -> 194 (U2)
   });
 
   it('mechanically partitions every mounted handler and every residual v1 HTTP operation', () => {

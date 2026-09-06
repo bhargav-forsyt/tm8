@@ -192,6 +192,13 @@ export const OPERATIONS = [
   { name: 'projects.folderUploads.complete', method: 'POST', path: '/v2/project-folder-uploads/:folderUploadId/complete',  kind: 'command', status: 'v1' },
   { name: 'projects.folderUploads.abort',    method: 'POST', path: '/v2/project-folder-uploads/:folderUploadId/abort',     kind: 'command', status: 'v1' },
 
+  // skills — the catalog UNION: the Space's own `skill` entities plus the
+  // Claude Code and Codex skill folders of its linked projects and of the node
+  // user's home. Space-scoped because that is what bounds the folder half: the
+  // roots are the working directories of the projects linked HERE, so a caller
+  // who cannot read the Space cannot learn what is on the node's disk.
+  { name: 'skills.catalog',          method: 'GET',    path: '/v2/spaces/:spaceId/skills',                  kind: 'read',    status: 'v1' },
+
   // files.* blob lifecycle (AM-2 §2, 03 §6); download returns bytes, not the JSON envelope
   { name: 'files.uploadInit',        method: 'POST',   path: '/v2/files/uploads',                           kind: 'command', status: 'v1' },
   { name: 'files.uploadComplete',    method: 'POST',   path: '/v2/files/uploads/:uploadId/complete',        kind: 'command', status: 'v1' },
