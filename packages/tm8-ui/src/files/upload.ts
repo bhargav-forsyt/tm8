@@ -181,13 +181,41 @@ export async function sha256Hex(blob: Blob): Promise<string> {
 }
 
 /**
+ * A client mutation id where `crypto.randomUUID` exists, and one that still
+ * works where it does not.
+ *
+ * `randomUUID` IS SECURE-CONTEXT-GATED, exactly like `crypto.subtle` above. On
+ * `http://<hostname>` it is `undefined`, so every upload threw
+ * `TypeError: crypto.randomUUID is not a function` on its way to the network —
+ * a SECOND secure-context dependency on the same path, and one the checksum
+ * fallback alone does not rescue. Measured, not assumed: on a real non-secure
+ * origin this page reports `isSecureContext: false`, `crypto.subtle:
+ * undefined`, `crypto.randomUUID: undefined`.
+ *
+ * The fallback shape is `authoring/commands.ts`'s, whose docblock already
+ * named this hazard — "a plain-HTTP LAN page would otherwise crash on its
+ * first create rather than degrade". It is reused rather than restated, and
+ * exported so the file lane has ONE copy instead of the four call sites that
+ * each rolled their own bare `crypto.randomUUID()`.
+ *
+ * A mutation id needs to be unique, not unguessable: the server uses it to
+ * reject a replay, never as a capability. Time plus `Math.random` is
+ * sufficient for that and is what the existing fallbacks already use.
+ */
+export function randomMutationId(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
  * Only used when a caller supplies none. The chat lane passes its own `uuidV7`
  * (time-ordered ids matter to its journal); a panel upload has no journal to
  * order, so a v4 is enough and importing the chat store's module for one
  * function would be a real dependency for a cosmetic gain.
  */
 function defaultMutationId(): string {
-  return crypto.randomUUID();
+  return randomMutationId();
 }
 
 const SAFE_UPLOAD_ERRORS: Readonly<Record<string, string>> = {

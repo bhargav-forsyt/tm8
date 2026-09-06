@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { sha256Hex, safeUploadReason, UploadCancelledError } from './upload';
+import { randomMutationId, sha256Hex, safeUploadReason, UploadCancelledError } from './upload';
 import { sha256HexOfBytes } from './sha256';
 
 /** The three FIPS 180-4 fixtures, so the fallback is checked against the
@@ -84,5 +84,28 @@ describe('safeUploadReason', () => {
   it('never surfaces server prose or a transport path', () => {
     expect(safeUploadReason(new Error('s3://private-bucket/token')))
       .toBe('Upload failed. Try again.');
+  });
+});
+
+describe('randomMutationId', () => {
+  it('uses crypto.randomUUID when the context grants it', () => {
+    expect(randomMutationId()).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it('still returns a unique id when crypto.randomUUID is absent', () => {
+    // The measured non-secure-origin condition: `randomUUID` is secure-context
+    // gated exactly as `subtle` is, and an unguarded call threw a TypeError on
+    // every upload before the first request.
+    const real = Object.getOwnPropertyDescriptor(globalThis.crypto, 'randomUUID');
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { value: undefined, configurable: true });
+    try {
+      const ids = new Set(Array.from({ length: 200 }, () => randomMutationId()));
+      expect(ids.size).toBe(200);
+      for (const id of ids) expect(id.length).toBeGreaterThan(8);
+    } finally {
+      if (real) Object.defineProperty(globalThis.crypto, 'randomUUID', real);
+    }
   });
 });
