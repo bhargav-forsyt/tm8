@@ -1,0 +1,8 @@
+{
+  "name": "architecture-artifact",
+  "description": "Owns and maintains one long-lived, evidence-backed architecture document per project: a system design you drill through from the big picture down to file and line. Project-agnostic — everything project-specific is read from architecture.config.json at run time.",
+  "version": "1.0.0",
+  "author": {
+    "name": "tm8"
+  }
+}
