@@ -1,26 +1,31 @@
-"""Project resolution for the architecture-artifact runtime.
+"""Project resolution for every skill in the big picture family.
 
-The renderer travels between machines, repos and agent clients, so NOTHING about a
-particular project may be baked into it. Everything project-shaped is read at run
-time from `architecture.config.json`, which sits beside `universe.json` in the
-authoring directory.
+These runtimes travel between machines, repos and agent clients, so NOTHING about
+a particular project may be baked into them. Everything project-shaped is read at
+run time from the project's config file, which sits in the authoring directory
+beside `universe.json` and the `tasks/` folder.
+
+The config file is `bigpicture.config.json`. `architecture.config.json` is still
+accepted, and is found first where both exist, because projects were configured
+under that name before the family had one — renaming a live project's config is
+not worth a broken render.
 
 Resolution order for the authoring directory:
-  1. $ARCHITECTURE_DIR
+  1. $BIGPICTURE_DIR, else $ARCHITECTURE_DIR
   2. the directory containing the universe.json passed on the command line
   3. <repo>/architecture, if that repo resolves and the directory exists
   4. cwd, if it holds a universe.json
 
 Resolution order for the source checkout that file:line refs are validated against:
-  1. $ARCHITECTURE_REPO
+  1. $BIGPICTURE_REPO, else $ARCHITECTURE_REPO
   2. config["repo"], resolved relative to the config file when not absolute
   3. the env var named by config["repoEnv"]
   4. walk up from cwd for a .git dir whose tree contains every config["repoMarkers"]
   5. walk up from cwd for any .git dir
 
 A missing config is not an error: the defaults below describe a project whose
-architecture lives in `<repo>/architecture` and whose refs resolve against <repo>.
-`init_project.py` writes a real one.
+documents live in `<repo>/architecture` and whose refs resolve against <repo>.
+`skills/architecture/scripts/init_project.py` writes a real one.
 """
 
 from __future__ import annotations
@@ -29,7 +34,22 @@ import json
 import os
 import pathlib
 
-CONFIG_NAME = "architecture.config.json"
+# Order matters: the first name found wins, and the legacy name is listed second so a
+# project that already has one keeps working without being renamed.
+CONFIG_NAMES = ("bigpicture.config.json", "architecture.config.json")
+
+# Env overrides, newest first. Both are honoured so an existing shell or script that
+# exports the architecture-only names does not silently stop steering the runtime.
+DIR_ENV = ("BIGPICTURE_DIR", "ARCHITECTURE_DIR")
+REPO_ENV = ("BIGPICTURE_REPO", "ARCHITECTURE_REPO")
+
+
+def _env(names: tuple[str, ...]) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 DEFAULTS: dict = {
     "project": None,          # short slug, e.g. "tm8"
@@ -37,6 +57,7 @@ DEFAULTS: dict = {
     "repo": None,             # path to the source checkout, or null to discover
     "repoEnv": None,          # name of an env var that names the checkout
     "repoMarkers": [],        # paths that must exist inside the checkout
+    "tasksDir": None,         # where task artifacts live; default <authoring dir>/tasks
     "publish": {},            # surface -> identity, read by the skill, not the renderer
 }
 
@@ -45,15 +66,16 @@ def load_config(start: pathlib.Path | None = None) -> tuple[dict, pathlib.Path |
     """Return (config, path_to_config). Missing config yields DEFAULTS and None."""
     here = (start or pathlib.Path.cwd()).resolve()
     candidates = [here, *here.parents] if here.is_dir() else [here.parent, *here.parents]
-    env_dir = os.environ.get("ARCHITECTURE_DIR")
+    env_dir = _env(DIR_ENV)
     if env_dir:
         candidates.insert(0, pathlib.Path(env_dir).expanduser().resolve())
     for candidate in candidates:
-        path = candidate / CONFIG_NAME
-        if path.is_file():
-            cfg = dict(DEFAULTS)
-            cfg.update(json.loads(path.read_text()))
-            return cfg, path
+        for name in CONFIG_NAMES:
+            path = candidate / name
+            if path.is_file():
+                cfg = dict(DEFAULTS)
+                cfg.update(json.loads(path.read_text()))
+                return cfg, path
     return dict(DEFAULTS), None
 
 
@@ -61,7 +83,7 @@ def find_repo(start: pathlib.Path | None = None) -> pathlib.Path | None:
     """The source checkout every file:line ref is validated against."""
     cfg, cfg_path = load_config(start)
 
-    env = os.environ.get("ARCHITECTURE_REPO")
+    env = _env(REPO_ENV)
     if env:
         p = pathlib.Path(env).expanduser()
         if (p / ".git").exists():
@@ -95,7 +117,7 @@ def find_repo(start: pathlib.Path | None = None) -> pathlib.Path | None:
 
 def find_authoring_dir(universe_arg: str | None = None) -> pathlib.Path:
     """Where universe.json and architecture.config.json live."""
-    env = os.environ.get("ARCHITECTURE_DIR")
+    env = _env(DIR_ENV)
     if env:
         return pathlib.Path(env).expanduser().resolve()
     if universe_arg:
@@ -108,3 +130,23 @@ def find_authoring_dir(universe_arg: str | None = None) -> pathlib.Path:
     if repo and (repo / "architecture" / "universe.json").is_file():
         return repo / "architecture"
     return pathlib.Path.cwd()
+
+
+def find_tasks_dir(universe_arg: str | None = None) -> pathlib.Path:
+    """Where per-task artifacts live: `<authoring dir>/tasks`.
+
+    The architecture document and the task artifacts share one authoring directory
+    on purpose. They are two views of the same project, they cite the same
+    checkout, and a task artifact that links into the architecture has to be able
+    to find it. `$BIGPICTURE_TASKS` overrides for the unusual case.
+    """
+    env = os.environ.get("BIGPICTURE_TASKS")
+    if env:
+        return pathlib.Path(env).expanduser().resolve()
+    cfg, cfg_path = load_config()
+    if cfg.get("tasksDir"):
+        p = pathlib.Path(str(cfg["tasksDir"])).expanduser()
+        if not p.is_absolute() and cfg_path is not None:
+            p = (cfg_path.parent / p).resolve()
+        return p
+    return find_authoring_dir(universe_arg) / "tasks"

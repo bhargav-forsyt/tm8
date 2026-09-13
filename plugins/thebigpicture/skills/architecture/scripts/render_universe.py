@@ -7,11 +7,12 @@ graph, when present, is retained as an evidence archive.
     python3 render_universe.py [out.html] [--universe path/to/universe.json]
 
 The authoring directory (universe.json + architecture.config.json) is resolved by
-arch_config; nothing about any one project lives in this file.
+the shared config module; nothing about any one project lives in this file.
 """
 from __future__ import annotations
 import json,pathlib,sys,re
-import arch_config
+import bootstrap  # noqa: F401  — puts <plugin>/shared on sys.path; must come first
+import config
 from render_common import esc, find_repo, KIND_COLOR, RESOURCE_LABELS, RESOURCE_SHAPES, REL_STYLE, resource_icon
 from validate_universe import validate
 ROOT=pathlib.Path(__file__).resolve().parent
@@ -87,7 +88,7 @@ def render(data,repo,out):
     assert '{{VOCAB}}' in tpl,'Missing vocabulary placeholder'
     def js(obj):return json.dumps(obj,ensure_ascii=True,separators=(',',':')).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
     vocab=dict(resources={r:resource_icon(r) for r in RESOURCE_TYPES},resourceLabels=RESOURCE_LABELS,kinds=KIND_COLOR)
-    cfg,_=arch_config.load_config(out.parent)
+    cfg,_=config.load_config(out.parent)
     title=data.get('title') or 'Architecture'
     brand=cfg.get('brand') or data.get('brand') or title
     html=(tpl.replace('{{DATA}}',js(data)).replace('{{VOCAB}}',js(vocab))
@@ -101,7 +102,7 @@ def main(argv:list[str])->None:
     args=[a for a in argv if a!='--universe'];explicit=None
     if '--universe' in argv:
         i=argv.index('--universe');explicit=argv[i+1];args=[a for a in argv if a not in ('--universe',explicit)]
-    src=pathlib.Path(explicit).expanduser() if explicit else arch_config.find_authoring_dir()/'universe.json'
+    src=pathlib.Path(explicit).expanduser() if explicit else config.find_authoring_dir()/'universe.json'
     assert src.is_file(),f'no universe.json at {src} — set $ARCHITECTURE_DIR or pass --universe'
     out=pathlib.Path(args[0]).expanduser() if args else src.parent/'index.html'
     repo=find_repo(src.parent)

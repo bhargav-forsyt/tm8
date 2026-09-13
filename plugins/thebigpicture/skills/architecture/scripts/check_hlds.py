@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import copy, json, pathlib, unittest
 
-import arch_config
+import bootstrap  # noqa: F401  — puts <plugin>/shared on sys.path; must come first
+import config
 from render_common import find_repo
 from render_universe import validate_hlds
 
-DIR = arch_config.find_authoring_dir()
+DIR = config.find_authoring_dir()
 REPO = find_repo(DIR)
 SOURCE = DIR / "universe.json"
 

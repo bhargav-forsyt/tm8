@@ -4,7 +4,7 @@
     python3 init_project.py --repo <checkout> [--dir <authoring dir>] [--name "<Title>"]
 
 Writes, and never overwrites:
-  <authoring dir>/architecture.config.json   project resolution + publish surfaces
+  <authoring dir>/bigpicture.config.json     project resolution + publish surfaces
   <authoring dir>/universe.json              a one-scene seed, honest about being empty
   <authoring dir>/publication-status.json    where published identities are recorded
 
@@ -55,7 +55,9 @@ def main() -> int:
     today = datetime.date.today().isoformat()
 
     wrote = []
-    cfg_path = d / "architecture.config.json"
+    # The family name. `architecture.config.json` is still READ by shared/config.py for
+    # projects configured before the family existed, but new projects get this one.
+    cfg_path = d / "bigpicture.config.json"
     if not cfg_path.exists():
         rel = ".." if d.parent == repo else str(repo)
         cfg_path.write_text(json.dumps({
@@ -64,6 +66,7 @@ def main() -> int:
             "repo": rel,
             "repoEnv": None,
             "repoMarkers": [],
+            "tasksDir": None,
             "publish": {
                 "local": {"entrypoint": "index.html"},
                 "claude": {"artifactUrl": None, "title": title},
@@ -120,7 +123,7 @@ def main() -> int:
           f"  echo '{exclude}' >> {repo}/.git/info/exclude\n"
           f"then render:\n"
           f"  python3 {pathlib.Path(__file__).resolve()} --help\n"
-          f"  ARCHITECTURE_DIR={d} python3 {pathlib.Path(__file__).resolve().parent}/render_universe.py")
+          f"  BIGPICTURE_DIR={d} python3 {pathlib.Path(__file__).resolve().parent}/render_universe.py")
     return 0
 
 

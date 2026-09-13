@@ -1,11 +1,16 @@
-"""Shared page chrome for the architecture-artifact renderers.
+"""Shared page chrome for every renderer in the big picture family.
+
+This module is SHARED rather than copied for one reason: it holds the single
+vocabulary both renderers draw from (RESOURCE_SHAPES, KIND_COLOR, REL_STYLE). Two
+copies would drift, and a symbol meaning one thing in the architecture document
+and another in a task artifact is worse than no symbol at all.
 
 Everything emitted here is self-contained: no network, no CDN, no remote fonts,
 no host-specific paths, so the built page renders identically as a local file, as
 a tm8 artifact and as a Claude Artifact.
 
 Nothing here knows which project it is rendering. The source checkout is resolved
-by `arch_config.find_repo()` from `architecture.config.json`, an env var, or a
+by `config.find_repo()` from the project's config file, an env var, or a
 walk up from cwd — never hardcoded, because this runtime travels between repos.
 """
 
@@ -16,7 +21,7 @@ import os
 import pathlib
 import sys
 
-import arch_config
+import config
 
 # --------------------------------------------------------------------------
 # Repo discovery — no hardcoded host path, because these renderers travel.
@@ -24,8 +29,8 @@ import arch_config
 
 
 def find_repo(start: pathlib.Path | None = None) -> pathlib.Path | None:
-    """Delegates to arch_config so there is ONE resolution order, not two."""
-    return arch_config.find_repo(start)
+    """Delegates to config so there is ONE resolution order, not two."""
+    return config.find_repo(start)
 
 
 def fail(message: str) -> None:

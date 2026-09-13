@@ -1,0 +1,8 @@
+{
+  "name": "thebigpicture",
+  "description": "Keeps a project's picture of itself true: one permanent architecture document and one living document per task, every claim backed by file:line, corrections recorded rather than overwritten. Project-agnostic — everything project-specific is read from bigpicture.config.json at run time.",
+  "version": "2.0.0",
+  "author": {
+    "name": "tm8"
+  }
+}

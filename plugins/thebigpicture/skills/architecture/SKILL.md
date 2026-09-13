@@ -1,25 +1,29 @@
 ---
-name: architecture-artifact
+name: architecture
 description: >-
-  Owns and maintains THE architecture of a whole product — one long-lived artifact per project, not
+  Owns and maintains THE architecture of a whole product — one long-lived document per project, not
   one per task: system design, module and submodule diagrams, and a navigable map of how the pieces
   actually connect, every claim backed by file:line. Every task reads it before starting and writes
   back into it: extended modules, deeper submodules, and corrections to what earlier agents got
-  wrong. Works in any repository — everything project-specific is read from architecture.config.json
-  at run time. Trigger on "architecture artifact", "architecture of X", "system design", "flow
-  chart", "how does X work", "diagram our architecture", "add this to the architecture", "correct
-  the architecture", or any task asking how a subsystem actually behaves. For the per-task standup
-  document, use a task-artifact skill instead.
+  wrong. Works in any repository — everything project-specific is read from bigpicture.config.json
+  at run time. A member of the big picture family. Trigger on "architecture", "architecture of X",
+  "system design", "flow chart", "how does X work", "diagram our architecture", "add this to the
+  architecture", "correct the architecture", or any task asking how a subsystem actually behaves.
+  For the per-task standup document, use `task` instead.
 ---
 
-# Architecture Artifact
+# Architecture
 
 **One artifact per project, forever.** Not one per task. Same identity for its entire life. Every
 task reads it before starting and writes back into it afterwards.
 
+A member of the **big picture** family — read `thebigpicture`'s SKILL.md for the laws every member
+obeys (nothing is ground truth, evidence or silence, corrections recorded, depth honesty, probe
+before authoring, verify in a browser). This file is the architecture document's own contract.
+
 Nothing in this skill names a project. The authoring directory, the source checkout and the publish
-identities all come from `architecture.config.json` at run time — see **Resolve the project** below.
-A repository that has no artifact yet gets one from `scripts/init_project.py`.
+identities all come from `bigpicture.config.json` at run time — see **Resolve the project** below.
+A repository that has no document yet gets one from `scripts/init_project.py`.
 
 ## Not ground truth — a set of prior assertions to be tested
 
@@ -114,11 +118,13 @@ SKILL=<this skill directory>              # scripts/ lives beside this file
 python3 $SKILL/scripts/init_project.py --repo <checkout> --name "<Title>"   # first time only
 ```
 
-`architecture.config.json` sits beside `universe.json` in the authoring directory and holds the
-project name, the source checkout, and the publish identities. Resolution order is documented in
-`scripts/arch_config.py`; `$ARCHITECTURE_DIR` and `$ARCHITECTURE_REPO` override it. **Never hardcode
-a host path, an artifact id or a published URL in this skill** — a skill is copied between machines
-and repos; the data is not.
+`bigpicture.config.json` sits beside `universe.json` in the authoring directory and holds the
+project name, the source checkout, where task artifacts live, and the publish identities.
+Resolution order is documented in `<plugin>/shared/config.py`; `$BIGPICTURE_DIR` and
+`$BIGPICTURE_REPO` override it, and the older `$ARCHITECTURE_*` names are still honoured. A project
+that already has `architecture.config.json` keeps working under that name. **Never hardcode a host
+path, an artifact id or a published URL in this skill** — a skill is copied between machines and
+repos; the data is not.
 
 **Resolve the CANONICAL checkout, not the worktree you happen to be in.** `git worktree list
 --porcelain` names it first. Every client — Claude Code, Codex, tm8 — edits that one authoring
@@ -130,7 +136,7 @@ The renderer is the authority on what a field does. Before authoring a field you
 this project, check that something reads it:
 
 ```bash
-grep -rn "resourceType\|moduleEdges\|sceneAliases\|shallow\|gaps" $SKILL/scripts/ | head
+grep -rn "resourceType\|moduleEdges\|sceneAliases\|shallow\|gaps" $SKILL/scripts/ $SKILL/../../shared/ | head
 ```
 
 A field nothing reads is a no-op: setting it gives you silence, not a chip, and a reader who
@@ -188,7 +194,7 @@ If browser tools are unavailable, report the render as generated but visually un
 ## Publish
 
 The full contract — surfaces, identity preservation, lockstep, share pins, the unwrap step and the
-mistakes that have actually cost revisions — is in `references/publishing.md`. Read it before your
+mistakes that have actually cost revisions — is in `../thebigpicture/references/publishing.md`. Read it before your
 first publish in a project. Three rules that are not negotiable:
 
 - **Publish to the ids recorded in the config/status file, never to a fresh one.** A bare publish
@@ -204,7 +210,7 @@ first publish in a project. Three rules that are not negotiable:
 
 ## Searching and reporting: hazards that have cost real results
 
-`references/hazards.md` has the full list with the measurements behind each one. The two that cost
+`../thebigpicture/references/hazards.md` has the full list with the measurements behind each one. The two that cost
 the most:
 
 - **A string probe over a rendered blob is not a content check.** It fails absent (escaping, case,
@@ -229,6 +235,7 @@ Maximum in diagrams. Prose is the exception.
 | File | What it settles |
 |---|---|
 | `references/format.md` | The field-by-field data contract for `universe.json` |
-| `references/publishing.md` | Surfaces, lockstep, share pins, the unwrap step |
-| `references/hazards.md` | Search and verification failures, with their measurements |
-| `scripts/arch_config.py` | Project resolution order |
+| `../thebigpicture/references/publishing.md` | Surfaces, lockstep, share pins, the unwrap step |
+| `../thebigpicture/references/hazards.md` | Search and verification failures, with their measurements |
+| `<plugin>/shared/config.py` | Project resolution order, shared by the whole family |
+| `<plugin>/skills/thebigpicture/SKILL.md` | The family laws and the architecture/task cut |
