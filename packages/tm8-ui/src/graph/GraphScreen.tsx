@@ -214,6 +214,11 @@ export function GraphScreen(props: GraphScreenProps) {
       ctx={{ ...ctx, entityId: selectedId }}
       onAction={primaries.forEntity(selectedId)}
       wiredActions={primaries.wiredActions}
+      /* As in `ChannelView`: a direct panel mount needs the process controls
+         wired by hand. See `auxPanel` for the hole these close. */
+      onResumeSession={() => primaries.resume(selectedId)}
+      resumingSession={primaries.resumingId === selectedId}
+      onMarkSessionExited={() => primaries.terminate(selectedId)}
       membershipAuthoring={membership.authoringFor(detail)}
       launch={props.launch}
       // `data.seam` is optional on this narrow port, so the helper answers

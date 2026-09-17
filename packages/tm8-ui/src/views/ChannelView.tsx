@@ -240,6 +240,12 @@ export function ChannelView({
       ctx={{ spaceId: data.spaceId, entityId: selectedId }}
       onAction={primaries.forEntity(selectedId)}
       wiredActions={primaries.wiredActions}
+      /* The dead-session canvas's controls — this screen mounts the panel
+         directly rather than through `AuxEntityPanel`, so it needed the same
+         three lines. See that file for what their absence was drawing. */
+      onResumeSession={() => primaries.resume(selectedId)}
+      resumingSession={primaries.resumingId === selectedId}
+      onMarkSessionExited={() => primaries.terminate(selectedId)}
       membershipAuthoring={membership.authoringFor(selectedDetail)}
       launch={launchPort}
       mergePr={mergePrPortFor(data.seam)}

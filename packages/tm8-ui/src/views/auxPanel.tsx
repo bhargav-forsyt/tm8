@@ -96,6 +96,31 @@ export function AuxEntityPanel({ host, entityId, onOpenEntity, onClose }: AuxEnt
       controls={host.controls}
       onAction={host.primaries.forEntity(entityId)}
       wiredActions={host.primaries.wiredActions}
+      /**
+       * THE PROCESS CONTROLS ON THE DEAD-SESSION CANVAS, which this mount had
+       * never passed.
+       *
+       * `usePanelPrimaries.resume` exists so that "every surface that can fire
+       * a resume is covered by the same guard" (its own docblock), and it was
+       * reaching exactly one of them: `WorkspaceView` wired these two props and
+       * `AuxEntityPanel` did not — so Home, Entity, Board and every hosted
+       * column drew `SessionFallback`'s Resume button DISABLED, titled "Resume
+       * is not wired on this surface yet". L6 kept that honest, which is also
+       * why it survived: the button looked deliberate rather than forgotten.
+       *
+       * It matters most on the rows 174 files under In Progress. An
+       * interrupted session's whole disposition is "Resume is one click away",
+       * and on these surfaces the one click landed on a refusal.
+       *
+       * `onMarkSessionExited` rides along because it is the SAME hole one card
+       * over — the stale card's chip, unwired here for the same reason — and
+       * because it is the control that actually closes out a session whose
+       * record still claims to be running. Same executor as the row tile's ✕,
+       * which is what keeps the two from drifting.
+       */
+      onResumeSession={() => host.primaries.resume(entityId)}
+      resumingSession={host.primaries.resumingId === entityId}
+      onMarkSessionExited={() => host.primaries.terminate(entityId)}
       membershipAuthoring={host.membership.authoringFor(detail)}
       launch={host.launchPort}
       mergePr={mergePrPortFor(data.seam)}

@@ -2,7 +2,13 @@ import { useCallback, useRef, useState, type ReactNode } from 'react';
 import type { EntityDetail, EntityId, EntityState, SpaceId } from '@tm8/contract';
 import type { SessionLiveness } from '../../data/seam';
 import type { ActionContext, ActionRef, KindConfig, StatusSource } from '../../domain';
-import { KindIcon, processControlFor, resolveAction, titleNormalizerFor } from '../../domain';
+import {
+  KindIcon,
+  processControlFor,
+  resolveAction,
+  sessionStatusOf,
+  titleNormalizerFor,
+} from '../../domain';
 import { InlineTitleEditor } from '../../authoring';
 import { Avatar, IconBtn, Pill, type PillTone } from '../../kit';
 import { useMobileSurface } from '../../mobile';
@@ -372,6 +378,11 @@ export function panelActionContext(
     capabilities: ctx.capabilities ?? detail.capabilities,
     liveness: ctx.liveness ?? liveness,
     category: ctx.category ?? detail.category,
+    /* The RUN's status, which since 174 is a different fact from the category
+       above — `EntityDetail` extends `EntitySummary`, so the panel reads it off
+       exactly the same member a row does, and the panel's process control can
+       stop asking the work question. See `hasEnded`. */
+    sessionStatus: ctx.sessionStatus ?? sessionStatusOf(detail),
   };
 }
 

@@ -13,6 +13,7 @@ import {
   channelDesign,
   sessionLive,
   sessionStale,
+  sessionExited,
   docLayoutSpec,
   taskGuideLines,
   taskTombstone,
@@ -791,10 +792,23 @@ describe('EntityListPanel — behaviour is registry DATA', () => {
   });
 
   it('renders a spark character, compact model, and hover actions; details reveal linked tasks', () => {
+    /**
+     * A GHOST — the record still claims `running` while the seam answers
+     * `not-running` below, and the envelope still files it under In Progress.
+     *
+     * IT USED TO SAY `status: 'exited'`, which made it a state the database
+     * does not produce: 155's trigger and 156's backfill keep an `exited`
+     * session's category at `done`, so "exited AND in_progress" existed only
+     * here. That went unnoticed while the tail slot read the CATEGORY, because
+     * the status was then decoration. It is now an input (see `hasEnded`), so
+     * the fixture has to be a row a server could actually send — and the row
+     * this test's Terminate assertion is about was always the ghost, which is
+     * a session whose RECORD says running and whose process is gone.
+     */
     const exited = {
       ...sessionLive,
       id: 'session-codex-exited',
-      state: { ...sessionLive.state, agentTool: 'codex', model: 'gpt-5.6-sol', status: 'exited' },
+      state: { ...sessionLive.state, agentTool: 'codex', model: 'gpt-5.6-sol', status: 'running' },
     } as EntitySummary;
     const onTerminate = vi.fn();
     const { getByTestId, getByRole, queryByText } = render(
@@ -818,12 +832,18 @@ describe('EntityListPanel — behaviour is registry DATA', () => {
     /**
      * TERMINATE IS OFFERED HERE, AND *THAT* IS THE FIX — 2026-08-19.
      *
-     * Read what this row actually is: `state.status = 'exited'` and
-     * `livenessOf → 'not-running'`, but its `category` is still `in_progress`,
-     * because it is `sessionLive` with the status field overwritten. That is
-     * not an artificial fixture — it is exactly the GHOST the user reported:
-     * a row whose process is gone while the envelope still files it under
-     * In Progress.
+     * Read what this row actually is: `state.status = 'running'` and
+     * `livenessOf → 'not-running'`, with its `category` still `in_progress`.
+     * That is not an artificial fixture — it is exactly the GHOST the user
+     * reported: a row whose process is gone while both the record and the
+     * envelope still say it is working.
+     *
+     * AND THE RECORD SAYING `running` IS WHY TERMINATE IS RIGHT HERE, not
+     * incidental to it. `work_session_transition` accepts `running -> exited`;
+     * it is only from `exited`/`failed` that it refuses, and `execution_resume`
+     * accepts only those two. So on this row Terminate is the verb both the
+     * node and the database will honour, and Resume is the one they would
+     * throw out — the exact inverse of an interrupted session.
      *
      * This block used to assert `hon-disabled`, on the reasoning that there is
      * no process left to kill so the control should say so. The reasoning was
@@ -1540,10 +1560,17 @@ describe('EntityListPanel — behaviour is registry DATA', () => {
      * slot on exactly complementary gates, so this state shows a LIVE verb
      * rather than a well-explained dead one.
      *
-     * `liveness="exited"` and the `done` category are the same fixture as
-     * before; only the expected control changed.
+     * THE SUBJECT IS NOW `sessionExited`, NOT `sessionStale` WITH A FORCED
+     * CATEGORY. `hasEnded` reads the RUN's status, so a row whose record still
+     * says `running` is no longer ended merely because somebody filed it under
+     * Done — and that is the point of the change, not a detail of it: the node
+     * refuses `execution.resume` on anything but `exited`/`failed`, so a
+     * Resume drawn over a stale row was a button the server would have thrown
+     * out. `sessionExited` is the row this assertion was always describing and
+     * it needs no doctoring: status `exited`, category `done`, already in the
+     * fixtures.
      */
-    const source = fixtureDetails[sessionStale.id]!;
+    const source = fixtureDetails[sessionExited.id]!;
     const detail = { ...source, category: 'done' as const };
     const dispatched: string[] = [];
     const { getByTestId } = render(

@@ -73,6 +73,7 @@ import {
   offWorkflowType,
   processControlFor,
   resolveAction,
+  sessionStatusOf,
   workflowRefusalText,
   workflowTypeOf,
   workflowVocabularyOf,
@@ -458,7 +459,15 @@ export function RowActionCluster({
    * The 2→1 jitter when a hovered row dies is ACCEPTED, not designed around:
    * the shift is a welcome signal that the session just ended.
    */
-  const rowProcess = { category: row.category, liveness: props.livenessOf?.(row.id) };
+  /* `sessionStatusOf` is what makes this the PROCESS question rather than the
+     work one — see `hasEnded`. It reads the status off the row the cluster is
+     already holding, through the registry's declared state source, so no kind
+     literal enters this file and a row without a run simply answers nothing. */
+  const rowProcess = {
+    category: row.category,
+    liveness: props.livenessOf?.(row.id),
+    sessionStatus: sessionStatusOf(row),
+  };
   const endedRun = declared.includes(PROCESS_CONTROL.running) && hasEnded(rowProcess);
 
   /* `sort` is stable in every engine this ships to (ES2019 requires it), which
@@ -1797,6 +1806,7 @@ export function RowStateControl({
     kind: row.kind,
     capabilities: props.capabilitiesOf?.(row.id) ?? null,
     liveness: props.livenessOf?.(row.id),
+    ...(sessionStatusOf(row) ? { sessionStatus: sessionStatusOf(row) } : {}),
   });
 
   if (availability.kind === 'disabled') {
@@ -2052,6 +2062,7 @@ export function RowAction({
   const def = resolveAction(ref_);
   const wide = variant === 'wide';
   const mark = glyph ?? def.icon;
+  const runStatus = sessionStatusOf(row);
   const ctx: ActionContext = {
     ...props.ctx,
     entityId: row.id,
@@ -2061,6 +2072,10 @@ export function RowAction({
     /* The row's OWN tab, so a verb can refuse itself on a finished row without
        a second seam question. See `ControlSubject.category`. */
     ...(row.category ? { category: row.category } : {}),
+    /* And the row's own RUN, which is a different question from its tab since
+       174 — `endableGate` and `resumableGate` both need this one, or a verb
+       resolved here refuses on the work's bucket instead of the process's. */
+    ...(runStatus ? { sessionStatus: runStatus } : {}),
   };
 
   /**
