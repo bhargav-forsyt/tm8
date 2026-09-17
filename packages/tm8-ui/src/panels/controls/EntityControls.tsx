@@ -73,6 +73,7 @@ import {
   offWorkflowType,
   processControlFor,
   resolveAction,
+  sessionStatusOf,
   workflowRefusalText,
   workflowTypeOf,
   workflowVocabularyOf,
@@ -458,7 +459,15 @@ export function RowActionCluster({
    * The 2→1 jitter when a hovered row dies is ACCEPTED, not designed around:
    * the shift is a welcome signal that the session just ended.
    */
-  const rowProcess = { category: row.category, liveness: props.livenessOf?.(row.id) };
+  /* `sessionStatusOf` is what makes this the PROCESS question rather than the
+     work one — see `hasEnded`. It reads the status off the row the cluster is
+     already holding, through the registry's declared state source, so no kind
+     literal enters this file and a row without a run simply answers nothing. */
+  const rowProcess = {
+    category: row.category,
+    liveness: props.livenessOf?.(row.id),
+    sessionStatus: sessionStatusOf(row),
+  };
   const endedRun = declared.includes(PROCESS_CONTROL.running) && hasEnded(rowProcess);
 
   /* `sort` is stable in every engine this ships to (ES2019 requires it), which
@@ -583,17 +592,76 @@ export function EntityControlStrip({
   props,
   config,
   variant = 'lines',
+  collapseEmptyDates = false,
+  omitArchive = false,
+  inlineEditors = false,
+  trailing,
 }: {
   row: ControlSubject;
   props: ControlHost;
   config: KindConfig;
   /** `chips` for the control-card anatomy; see the amendment note above. */
   variant?: 'lines' | 'chips';
+  /**
+   * Collapse a WHOLLY EMPTY set of date controls to one `＋ Add dates` verb.
+   *
+   * Opt-in per host and deliberately narrow: the list's expanded strip asserts
+   * — correctly — that an empty date field is still a rendered field, so it
+   * keeps both boxes. Only the detail panel, where two empty `mm/dd/yyyy`
+   * placeholders were the widest and loudest things on the screen at 125.3px
+   * each, opts in.
+   */
+  collapseEmptyDates?: boolean;
+  /**
+   * The HOST renders the tombstone verb somewhere better. Set by the detail
+   * panel only: as this strip's last child, Archive took `margin-left: auto`,
+   * became the widest item in the row, and was therefore the one flex-wrap
+   * ejected onto a second line — landing a few pixels under `✕` Close.
+   */
+  omitArchive?: boolean;
+  /** Status and priority show their VALUE and open a picker on click. */
+  inlineEditors?: boolean;
+  /**
+   * A read-only fact the HOST wants shown on this row, rendered last. Kept as
+   * an opaque node on purpose: this strip is registry-driven and may not learn
+   * per-kind facts of its own (§15.2 — no kind literals in `panels/`).
+   */
+  trailing?: ReactNode;
 }) {
   const list = config.list;
   const control = list.stateControl;
   const archived = row.deletedAt != null;
   const chips = variant === 'chips';
+
+  /*
+   * COLLAPSE ONLY A TOTAL ABSENCE, and only until the user asks otherwise. If
+   * either date carries a value the controls render as they always have — a
+   * value must never be behind a click. `datesOpen` is deliberately local and
+   * unpersisted: revealing the fields is a step in one editing gesture, not a
+   * preference worth remembering across entities.
+   */
+  const dateControls = list.dateControls ?? [];
+  const [datesOpen, setDatesOpen] = useState(false);
+  const everyDateEmpty =
+    dateControls.length > 0 &&
+    dateControls.every(
+      (date) =>
+        dateInputValue((row.state as unknown as Record<string, unknown>)[date.source]) === '',
+    );
+  /*
+   * COLLAPSE ONLY WHAT IS ACTUALLY WRITABLE — the same three gates
+   * `RowDateControl` applies, hoisted, because hiding a control also hides
+   * whichever refusal it would have rendered. An unloaded capability set, a
+   * `canEdit: false` refusal, or an unwired host must each still draw the real
+   * control and say why it cannot be used; a `＋ Add dates` button in front of
+   * a refusal would be an invitation this panel cannot honour.
+   */
+  const dateCaps = props.capabilitiesOf?.(row.id);
+  const datesWritable =
+    props.onSetValue != null &&
+    (props.capabilitiesOf === undefined ||
+      (dateCaps !== undefined && dateCaps.canEdit !== false));
+  const datesCollapsed = collapseEmptyDates && everyDateEmpty && datesWritable && !datesOpen;
 
   /**
    * THE STRIP IS MOUNTED, SO THE ROW'S PERMISSIONS ARE NOW WORTH KNOWING.
@@ -660,20 +728,47 @@ export function EntityControlStrip({
               props={props}
               control={control}
               pill={config.panel.statusPill}
+              inlineEditors={inlineEditors}
             />,
           )
         : null}
 
       {(list.valueControls ?? []).map((value) =>
-        line(value.label, <RowValueControl row={row} props={props} control={value} />),
+        line(
+          value.label,
+          <RowValueControl row={row} props={props} control={value} inlineEditors={inlineEditors} />,
+        ),
       )}
 
       {/* Directly after the enum pickers and before the axes, so the strip
           reads status → priority → due → axes: the kind's OWN registry-declared
           fields together, then the per-space vocabulary the host hydrates. */}
-      {(list.dateControls ?? []).map((date) =>
-        line(date.label, <RowDateControl row={row} props={props} control={date} />),
-      )}
+      {/* TWO EMPTY DATE BOXES WERE THE LOUDEST THING ON THE PANEL. A native
+          `<input type="date">` renders its own `mm/dd/yyyy` placeholder, and
+          the rule meant to hide it only DIMS it — dimming is not removing. So
+          a task with no dates spent 250px of the strip, across its two widest
+          controls, displaying a format hint twice. Collapsed, the same absence
+          is one quiet verb; pressing it reveals the real inputs, unchanged. */}
+      {datesCollapsed
+        ? line(
+            'Dates',
+            <button
+              type="button"
+              className="lp__dateadd"
+              data-testid="row-dates-add"
+              title={`Set ${dateControls.map((d) => d.label.toLowerCase()).join(' or ')}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                setDatesOpen(true);
+              }}
+            >
+              <span aria-hidden>＋</span>
+              <span>Add dates</span>
+            </button>,
+          )
+        : dateControls.map((date) =>
+            line(date.label, <RowDateControl row={row} props={props} control={date} />),
+          )}
 
       {/* One picker per axis the SPACE defines — none defined, none drawn.
           Registry presence only marks the kind whose state carries `axes`;
@@ -698,7 +793,9 @@ export function EntityControlStrip({
           )
         : null}
 
-      {line(
+      {trailing}
+
+      {omitArchive ? null : line(
         'Archive',
         /* The tombstone verb. `restore` when this row is already archived —
            the Archived tier is where a user meets these rows, and a tier that
@@ -730,6 +827,97 @@ export function EntityControlStrip({
 }
 
 /**
+ * A VALUE THAT OPENS ITS OWN EDITOR — the click-to-edit form of a picker.
+ *
+ * WHY THIS EXISTS. A native `<select>` and a native date input are the two
+ * most operating-system-looking widgets available, and the detail panel showed
+ * four of them permanently, mostly empty. That — not spacing — is why that
+ * header did not read as designed. This shows the VALUE and keeps the
+ * machinery one click away, which is the same capability in a quieter voice.
+ *
+ * IT IS AN OPT-IN, NOT A VARIANT RULE. The list's expanded row keeps its
+ * native select: it is a dense editing surface where the OS widget is the
+ * right tool, and thirty-odd tests drive it by `fireEvent.change`. Only the
+ * detail panel asks for this.
+ *
+ * THE REFUSALS ARE NOT ROUTED THROUGH HERE. `CheckingPermission` and
+ * `DisabledAction` still render exactly as they did, above this call — hiding
+ * a control would hide the reason it is refused, which is the rule
+ * `CollapsibleSection` states for empty sections and the one an earlier
+ * attempt at this broke.
+ */
+function ChipMenu({
+  testId,
+  source,
+  tone,
+  ariaLabel,
+  current,
+  options,
+  onPick,
+}: {
+  testId: string;
+  source?: string;
+  tone: string;
+  ariaLabel: string;
+  /** What the closed chip reads. */
+  current: ReactNode;
+  options: readonly { id: string; label: string; disabled?: boolean; reason?: string }[];
+  onPick: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useDismissable(open, ref, useCallback(() => setOpen(false), []));
+  return (
+    <span className="lp__chipmenu" ref={ref}>
+      <button
+        type="button"
+        className={`lp__statesel lp__statesel--live lp__statesel--chip kit-pill--${tone}`}
+        aria-label={ariaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid={testId}
+        {...(source ? { 'data-source': source } : {})}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((was) => !was);
+        }}
+      >
+        {current}
+        <span className="lp__chipmenu__caret" aria-hidden>▾</span>
+      </button>
+      {open ? (
+        <div className="lp__chipmenu__menu" role="menu" data-testid={`${testId}-menu`}>
+          {options.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={false}
+              className="lp__chipmenu__item"
+              /* The OPTION'S OWN ID, so a test chooses a value the way the
+                 registry names it rather than by whatever the label happens to
+                 be cased as today. */
+              data-option-id={o.id}
+              disabled={o.disabled}
+              /* THE REASON RIDES THE LABEL, not `title`: a `title` on a
+                 disabled control is unreachable by touch, which is the defect
+                 the option list below already fixed once. */
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onPick(o.id);
+              }}
+            >
+              {o.disabled && o.reason ? `${o.label} — ${o.reason}` : o.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </span>
+  );
+}
+
+/**
  * The picker for a registry-declared `ValueControl` — priority, today.
  *
  * THE REFUSALS ARE `RowStateControl`'s, MINUS THE ONE THAT CANNOT HAPPEN. No
@@ -742,10 +930,13 @@ function RowValueControl({
   row,
   props,
   control,
+  inlineEditors = false,
 }: {
   row: ControlSubject;
   props: ControlHost;
   control: ValueControl;
+  /** Show the value and open the picker on click — see `ChipMenu`. */
+  inlineEditors?: boolean;
 }) {
   const selectId = useId();
   const raw = (row.state as unknown as Record<string, unknown>)[control.source];
@@ -783,6 +974,23 @@ function RowValueControl({
       <DisabledAction label={`Change ${control.label.toLowerCase()}`} reason={NOT_WIRED_REASON}>
         {currentPill}
       </DisabledAction>
+    );
+  }
+
+  if (inlineEditors) {
+    return (
+      <ChipMenu
+        testId="row-value-select"
+        source={control.source}
+        tone={chosen?.tone ?? 'idle'}
+        ariaLabel={`Change ${control.label.toLowerCase()} for ${row.title}`}
+        current={chosen?.label ?? control.emptyLabel}
+        options={control.options.map((o) => ({ id: o.id, label: o.label }))}
+        onPick={(next) => {
+          if (next === current) return;
+          props.onSetValue?.(row.id, control.source, next, control.label);
+        }}
+      />
     );
   }
 
@@ -1431,7 +1639,7 @@ export function RowMembershipControl({
 /* A real bin, not '▢'. Same reason the chevrons became SVG in
    `MaestroTaskTile`: a typographic glyph sits on its own font's baseline and
    lands at a different optical height from the chips beside it. */
-function BinIcon() {
+export function BinIcon() {
   return (
     <svg viewBox="0 0 16 16" aria-hidden focusable="false" width="14" height="14">
       <path
@@ -1446,7 +1654,7 @@ function BinIcon() {
   );
 }
 
-function RestoreIcon() {
+export function RestoreIcon() {
   return (
     <svg viewBox="0 0 16 16" aria-hidden focusable="false" width="14" height="14">
       <path
@@ -1503,9 +1711,12 @@ export function RowStateControl({
   pill,
   variant = 'select',
   glyph,
+  inlineEditors = false,
 }: {
   row: ControlSubject;
   props: ControlHost;
+  /** Show the value and open the picker on click — see `ChipMenu`. */
+  inlineEditors?: boolean;
   /** REQUIRED — see the note above; a kind with no state draws no control. */
   control: StateControl;
   /** The kind's existing value→word / value→tone map. The ONLY source for both. */
@@ -1595,6 +1806,7 @@ export function RowStateControl({
     kind: row.kind,
     capabilities: props.capabilitiesOf?.(row.id) ?? null,
     liveness: props.livenessOf?.(row.id),
+    ...(sessionStatusOf(row) ? { sessionStatus: sessionStatusOf(row) } : {}),
   });
 
   if (availability.kind === 'disabled') {
@@ -1700,6 +1912,38 @@ export function RowStateControl({
     );
   }
 
+  /* CLICK-TO-EDIT, where the host asked for it. Same options, same `via`
+     routing, same W4 narrowing carried into the item labels — only the widget
+     changes. The refusal arms above are untouched and still render first. */
+  if (inlineEditors) {
+    return (
+      <>
+        <ChipMenu
+          testId="row-state-select"
+          tone={toneFor(current)}
+          ariaLabel={`Change state for ${row.title}`}
+          current={wordFor(current)}
+          options={control.options.map((o) => ({
+            id: o.id,
+            label: wordFor(o.id),
+            disabled: barred(o.id),
+            reason: barred(o.id) ? `not in type ${typeValue}` : undefined,
+          }))}
+          onPick={(next) => {
+            if (next === current) return;
+            const chosen = control.options.find((o) => o.id === next);
+            props.onSetState?.(row.id, next, chosen?.via ?? control.command);
+          }}
+        />
+        {offWords !== null ? (
+          <span className="hon-caption" role="note" data-testid="row-state-offworkflow">
+            {offWords}
+          </span>
+        ) : null}
+      </>
+    );
+  }
+
   return (
     <>
     {/* The wrapper exists ONLY to own the caret: see `.lp__statewrap::after`.
@@ -1792,11 +2036,11 @@ export function RowAction({
    */
   onRun?: (ref: ActionRef, entityId: string) => void;
   /**
-   * Opens the FULL launch sheet for a `flow: 'launch'` verb. When wired, Run
-   * goes STRAIGHT to the sheet — no inline expand in between (user ruling:
-   * the two-step tile expand made the important configuration a second click
-   * away). The inline quick config remains the fallback for hosts that mount
-   * no sheet (kind screens), so Run never silently does nothing.
+   * Opens the FULL launch sheet for a `flow: 'launch'` verb. Since the flow
+   * became the composer POPUP (2026-09-07) this is the fallback, not the
+   * outranking path: Run opens the popup wherever a flow host exists, and the
+   * sheet is reached through the popup's `full options ▸` — or directly, on a
+   * host that mounts no flow, so Run never silently does nothing.
    */
   onOpenLaunch?: (entityId: string) => void;
   /**
@@ -1818,6 +2062,7 @@ export function RowAction({
   const def = resolveAction(ref_);
   const wide = variant === 'wide';
   const mark = glyph ?? def.icon;
+  const runStatus = sessionStatusOf(row);
   const ctx: ActionContext = {
     ...props.ctx,
     entityId: row.id,
@@ -1827,6 +2072,10 @@ export function RowAction({
     /* The row's OWN tab, so a verb can refuse itself on a finished row without
        a second seam question. See `ControlSubject.category`. */
     ...(row.category ? { category: row.category } : {}),
+    /* And the row's own RUN, which is a different question from its tab since
+       174 — `endableGate` and `resumableGate` both need this one, or a verb
+       resolved here refuses on the work's bucket instead of the process's. */
+    ...(runStatus ? { sessionStatus: runStatus } : {}),
   };
 
   /**
@@ -1835,12 +2084,16 @@ export function RowAction({
    * the config states for itself whether it can commit. Asking the resolved
    * def for `flow` keeps this free of both kind and action-id literals.
    *
-   * The sheet OUTRANKS the inline expand: where the host mounted the full
-   * launch sheet, one click on Run opens it directly and the tile never
-   * expands. The inline quick config only serves hosts without a sheet.
+   * THE FLOW OUTRANKS THE SHEET NOW (owner's ask 2026-09-07: "when we hit
+   * button — we pop up this screen"). The flow IS the canvas composer as a
+   * modal popup — the full per-launch configuration one click away, which is
+   * what the earlier straight-to-the-sheet ruling was buying when the flow was
+   * a two-step tile expand. The sheet stays reachable as the popup's
+   * `full options ▸` escape, and remains the DIRECT target only for hosts
+   * with no flow mount.
    */
-  const opensSheet = def.flow === 'launch' && onOpenLaunch != null;
-  const opensFlow = def.flow === 'launch' && !opensSheet && onFlow != null;
+  const opensFlow = def.flow === 'launch' && onFlow != null;
+  const opensSheet = def.flow === 'launch' && !opensFlow && onOpenLaunch != null;
 
   /**
    * A `wide` control refuses in the WIDE vocabulary too.

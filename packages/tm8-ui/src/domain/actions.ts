@@ -15,6 +15,7 @@
  * L6 everywhere: an unavailable action is DISABLED WITH A REASON, never hidden
  * and never silently inert.
  */
+import type { WorkSessionStatus } from '@tm8/contract';
 import type {
   ActionAvailability,
   ActionContext,
@@ -256,18 +257,68 @@ function endableGate(ctx: ActionContext): ActionAvailability | null {
  * files it under Done without closing it — so the category alone no longer
  * implies the run is over. See `endableGate` above for the measured failure.
  *
- * KNOWN, ACCEPTED IMPRECISION. `ActionContext` carries no session STATUS
- * (see its docblock in `types.ts`), and the server's real guard on resume is
- * `status IN ('exited','failed')`. So a session ticked while `spawning` that
- * never ran reads as ended here and is offered a Resume the node will refuse
- * with `only exited or failed sessions can be resumed`. That is the right
- * trade: a refused resume is NON-DESTRUCTIVE and the node's message is
- * honest, whereas adding a status field to this context to pre-empt it would
- * make this layer COMPUTE a verdict it is supposed to present (R-UI-5).
+ * THE CATEGORY IS NOT THE PROCESS, AND MIGRATION 174 SPLIT THEM.
+ *
+ * This used to read the category alone for the second half of the question,
+ * and that worked only while `failed` implied `done`. 174
+ * (`interrupted_sessions_are_not_done`) ended that: a session the server
+ * killed — `failed` with an `ended_kind` of `server_restart`, `crashed` or
+ * `out_of_memory` — now files under IN_PROGRESS on purpose, because "Done is a
+ * claim about the WORK, not about the process" and interrupted work has not
+ * finished. 174's own stated goal was to put those rows where "Resume is one
+ * click away".
+ *
+ * It got the opposite. `in_progress` made `hasEnded` false, the tail slot kept
+ * TERMINATE, and terminate dispatches `work_session_transition(…, 'exited')`
+ * onto a row the same database has already ruled terminal — so the one control
+ * 174 moved these rows to reach was a button that could only ever answer
+ * `illegal work_session transition failed -> exited` (23514). Measured on a
+ * live node 2026-09-17: 46 of 61 in_progress sessions were in exactly that
+ * state, every one of them with a dead power button. The bug is that the
+ * predicate asked the WORK question when the swap needs the PROCESS question.
+ *
+ * So the run's own STATUS answers it, and `ENDED_SESSION_STATUSES` is the
+ * server's resume guard verbatim rather than a second opinion about it. This
+ * is a read, not a computation (R-UI-5): the status arrives ON the row it
+ * describes — see `sessionStatusOf`, which is also why no seam was added.
+ *
+ * LIVENESS STILL OUTRANKS BOTH, and it is the first line for the reason D6
+ * gives: if something is answering, the run has not ended, whatever any record
+ * says. That is what keeps the headline ruling intact — a session ticked while
+ * running is `done` AND streaming, and it keeps Terminate.
+ *
+ * THE CATEGORY REMAINS THE FALLBACK, unchanged, for every row that has no run:
+ * a done TASK has no `sessionStatus` and must keep reading as ended, or the
+ * tick disappears from every finished task in the app.
+ *
+ * Fixed in passing: the imprecision this docblock used to accept in the other
+ * direction. A session ticked while `spawning` read as ended and was offered a
+ * Resume the node refuses with `only exited or failed sessions can be
+ * resumed`; it now reads as running and keeps the Terminate that `spawning`
+ * genuinely accepts.
  */
-export function hasEnded(ctx: Pick<ActionContext, 'category' | 'liveness'>): boolean {
-  return ctx.category === 'done' && ctx.liveness !== 'live';
+export function hasEnded(
+  ctx: Pick<ActionContext, 'category' | 'liveness' | 'sessionStatus'>,
+): boolean {
+  if (ctx.liveness === 'live') return false;
+  if (ctx.sessionStatus) return ENDED_SESSION_STATUSES.includes(ctx.sessionStatus);
+  return ctx.category === 'done';
 }
+
+/**
+ * The two statuses a run can END in — `public.execution_resume`'s guard
+ * (`status IN ('exited','failed')`) and `work_session_transition`'s terminal
+ * set (`when current_status in ('exited','failed') then false`) are the SAME
+ * two, which is what makes one list here honest about both halves of the slot:
+ * Resume is offered exactly where the node accepts it, and Terminate is
+ * withheld exactly where the database would refuse it.
+ *
+ * NOT DERIVED FROM THE CATEGORY MAPPING. `SESSION_STATE_CONTROL.options` also
+ * files both under `done`, but that table is a mirror of 155 and 174 has since
+ * refined what the category means; reading it here would reintroduce the same
+ * coupling this predicate was just freed from.
+ */
+const ENDED_SESSION_STATUSES: readonly WorkSessionStatus[] = ['exited', 'failed'];
 
 /** The literal complement of `endableGate`'s refusal — see `hasEnded`. */
 function resumableGate(ctx: ActionContext): ActionAvailability | null {
@@ -301,7 +352,7 @@ export const PROCESS_CONTROL = {
  */
 export function processControlFor(
   ref: ActionRef,
-  ctx: Pick<ActionContext, 'category' | 'liveness'>,
+  ctx: Pick<ActionContext, 'category' | 'liveness' | 'sessionStatus'>,
 ): ActionRef {
   return ref === PROCESS_CONTROL.running && hasEnded(ctx) ? PROCESS_CONTROL.ended : ref;
 }

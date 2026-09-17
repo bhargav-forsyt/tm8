@@ -20,6 +20,7 @@ import type {
   EntityKind,
   SpaceId,
   StatusCategory,
+  WorkSessionStatus,
 } from '@tm8/contract';
 import type { SessionLiveness } from '../data/seam';
 import type { PillTone } from '../kit';
@@ -485,6 +486,25 @@ export interface ActionContext {
    * exactly the row that needs retiring (user report 2026-08-19).
    */
   category?: StatusCategory;
+  /**
+   * THE RUN'S OWN STATUS, for a row that HAS a run — `EntitySummary.state.
+   * status` on a work_session, arriving with the row exactly as `category`
+   * does. Server truth; nothing here derives it (`sessionStatusOf` reads it
+   * through the registry's declared state source).
+   *
+   * SEPARATE FROM `category` BECAUSE MIGRATION 174 SEPARATED THEM. The two
+   * used to answer the same question and no longer do: a session killed by a
+   * server restart is `failed` — the process is gone — while its category is
+   * `in_progress`, because the WORK was interrupted rather than finished.
+   * `hasEnded` needs the first fact and was reading the second, which left
+   * every interrupted session drawing a Terminate the database refuses. See
+   * `hasEnded` for the whole account.
+   *
+   * ABSENT ON EVERY OTHER KIND, deliberately — see `sessionStatusOf`. A task
+   * has a status too, and letting it arrive here would silently re-answer
+   * "has this ended" for rows that have no process at all.
+   */
+  sessionStatus?: WorkSessionStatus;
   /**
    * WHO IS LOOKING — the viewer's own actor id in this space, resolved by the
    * shell from the identity read.

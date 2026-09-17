@@ -14,7 +14,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, within } from '@testing-library/react';
-import type { EntityCapabilities, EntitySummary, StatusCategory } from '@tm8/contract';
+import type {
+  EntityCapabilities,
+  EntitySummary,
+  StatusCategory,
+  WorkSessionStatus,
+} from '@tm8/contract';
 import { FIXTURE_SPACE_ID, fixtureSummaries } from '../fixtures';
 import { type ActionContext, type ActionRef } from '../domain';
 import type { SessionLiveness } from '../data/seam';
@@ -50,14 +55,27 @@ function mount(
     onComplete?: (entityId: string) => void;
     onTerminate?: (entityId: string) => void;
     onResume?: (entityId: string) => void;
-    /** The two seam answers the process control turns on — see its describe. */
+    /** The THREE answers the process control turns on — see its describe. */
     liveness?: SessionLiveness;
     category?: StatusCategory;
+    /**
+     * The RUN's own status, overridden on `state` exactly where a server row
+     * carries it. A third input rather than a derivative of the two above
+     * because migration 174 made it independent of both: a killed session is
+     * `failed` AND `in_progress`, and the fixture's first session is `running`,
+     * so a case that does not say which status it means is testing whichever
+     * one the fixture happens to hold.
+     */
+    status?: WorkSessionStatus;
   } = {},
 ) {
-  const rows = rowsOfKind(kind).map((row) =>
-    handlers.category ? { ...row, category: handlers.category } : row,
-  );
+  const rows = rowsOfKind(kind).map((row) => ({
+    ...row,
+    ...(handlers.category ? { category: handlers.category } : {}),
+    ...(handlers.status
+      ? { state: { ...(row.state as Record<string, unknown>), status: handlers.status } }
+      : {}),
+  })) as EntitySummary[];
   return render(
     <EntityListPanel
       kind={kind}
@@ -357,20 +375,38 @@ describe('the tail slot resolves to terminate-or-resume, never both and never ne
     within(firstCluster(container)).queryByLabelText(label) !== null;
 
   it.each([
-    // The reported defect: nothing is answering and the run is filed done.
-    ['done', 'not-running', 'resume'],
+    // The reported defect: nothing is answering and the run has ended.
+    ['done', 'not-running', 'exited', 'resume'],
     // THE HEADLINE STATE #425 never paired. A session ticked while running is
     // under Done AND still streaming, so the run has NOT ended: the slot keeps
     // Terminate and the tick stays, because there it is the UN-tick.
-    ['done', 'live', 'terminate'],
-    ['in_progress', 'live', 'terminate'],
+    ['done', 'live', 'running', 'terminate'],
+    ['in_progress', 'live', 'running', 'terminate'],
     // The stale ghost #425 fixed: not live, not finished, and the one row that
     // most needs retiring. Unchanged by this ruling.
-    ['to_do', 'unknown', 'terminate'],
-  ] as [StatusCategory, SessionLiveness, 'terminate' | 'resume'][])(
-    'category %s + liveness %s puts %s in the tail, and the tick follows it',
-    (category, liveness, expected) => {
-      const { container } = mount('work_session', SESSION, { category, liveness });
+    ['to_do', 'unknown', 'spawning', 'terminate'],
+    //
+    // THE TWO ROWS MIGRATION 174 CREATED, and the reason status is an input
+    // here at all. Both were wrong while the category answered for the run.
+    //
+    // INTERRUPTED. A session the server killed is `failed` — the process is
+    // gone and the database refuses every further transition — but 174 files
+    // it under IN_PROGRESS, because the WORK did not finish. Terminate here
+    // could only ever raise `illegal work_session transition failed -> exited`
+    // (23514), which is exactly what a user hit on 2026-09-17 with 46 such
+    // rows on one node. Resume is the control 174 moved them to reach.
+    ['in_progress', 'not-running', 'failed', 'resume'],
+    // STALE, and the mirror image. The record still says `running` while
+    // nothing answers, so the run has NOT ended: `execution_resume` refuses
+    // anything but exited/failed, while `running -> exited` is a legal
+    // transition. Terminate is the honest control, and the old predicate —
+    // which read only the tab — offered a Resume the node would have thrown
+    // out.
+    ['done', 'not-running', 'running', 'terminate'],
+  ] as [StatusCategory, SessionLiveness, WorkSessionStatus, 'terminate' | 'resume'][])(
+    'category %s + liveness %s + status %s puts %s in the tail, and the tick follows it',
+    (category, liveness, status, expected) => {
+      const { container } = mount('work_session', SESSION, { category, liveness, status });
       const ended = expected === 'resume';
 
       // THE VERB IS LIVE, not merely drawn: the tail slot is the row's one
@@ -417,6 +453,7 @@ describe('the tail slot resolves to terminate-or-resume, never both and never ne
     const { container } = mount('work_session', SESSION, {
       category: 'done',
       liveness: 'not-running',
+      status: 'exited',
       onResume,
       onAction,
     });
@@ -437,7 +474,15 @@ describe('the tail slot resolves to terminate-or-resume, never both and never ne
     const { container } = render(
       <EntityListPanel
         kind="work_session"
-        rowsFor={() => rowsOfKind('work_session').map((row) => ({ ...row, category: 'done' as const }))}
+        rowsFor={() =>
+          rowsOfKind('work_session').map((row) => ({
+            ...row,
+            category: 'done' as const,
+            /* The run must genuinely have ended for Resume to be the slot's
+               occupant at all — see the table above. */
+            state: { ...(row.state as Record<string, unknown>), status: 'exited' },
+          })) as EntitySummary[]
+        }
         ctx={ctx}
         capabilitiesOf={() => SESSION}
         livenessOf={() => 'not-running'}
@@ -458,6 +503,7 @@ describe('the tail slot resolves to terminate-or-resume, never both and never ne
     const { container } = mount('work_session', SESSION, {
       category: 'done',
       liveness: 'not-running',
+      status: 'exited',
     });
     const button = firstCluster(container).querySelector('button[data-action="resume"]');
     expect(button?.getAttribute('data-action')).toBe('resume');

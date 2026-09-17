@@ -101,6 +101,8 @@ export { actorPresentation, type ActorPresentation } from './actors';
 
 export { QUIET_SESSION_DETAIL, needsAttentionOf, toRowFacts } from './needs-attention';
 
+export { sessionStatusOf } from './session-run';
+
 export {
   AGENT_TOOLS,
   LAUNCH_MODES,
@@ -128,10 +130,15 @@ export {
   accessModeLabel,
   describeAccessMode,
   nextAccessMode,
+  AGENT_CREDENTIAL_PROVIDER,
+  CREDENTIAL_PROVIDER_LABEL,
+  EFFORT_LABELS,
+  effortLabel,
 } from './launch';
 export type {
   AgentToolDef,
   LaunchAccessMode,
+  LaunchCredentialSource,
   LaunchCapacity,
   LaunchConfig,
   LaunchMode,

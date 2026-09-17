@@ -776,6 +776,12 @@ export function EntityView(props: EntityViewProps) {
          see `composePanelActions` for why neither can be passed alone. */
       onAction={panelActions.onAction}
       wiredActions={panelActions.wiredActions}
+      /* The dead-session canvas's controls. This screen already hands the LIST
+         `primaries.resume`; the panel beside it was drawing the same verb
+         refused as "not wired on this surface yet". See `auxPanel`. */
+      onResumeSession={() => primaries.resume(selectedId)}
+      resumingSession={primaries.resumingId === selectedId}
+      onMarkSessionExited={() => primaries.terminate(selectedId)}
       memoryAuthoring={memoryWorkingSet.authoring}
       membershipAuthoring={membership.authoringFor(detail)}
       onMarkMemory={memoryMarks.begin}
