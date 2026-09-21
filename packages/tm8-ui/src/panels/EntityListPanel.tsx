@@ -93,7 +93,11 @@ import { relatedOfKind } from './list/related';
 import { RelatedGroup } from './list/RelatedGroup';
 import type { MessagePulse } from './list/useMessagePulses';
 import { TileFlightLayer, type ResolvedFlight } from './list/TileFlightLayer';
-import { LaunchQuickConfig, type LaunchTeammateOption } from './launch/LaunchQuickConfig';
+import { type LaunchTeammateOption } from './launch/LaunchQuickConfig';
+/* The Run/Coordinate flow opens the canvas composer as a modal tile now —
+   design import 2026-09-07. `LaunchQuickConfig` remains the inline fallback
+   for surfaces not yet migrated (merge flow). */
+import { LaunchComposerPopup } from '../new-session';
 import { newLaunchMutationId } from '../domain/launch';
 
 const EMPTY_MEMBERS: readonly ActorSummary[] = Object.freeze([]);
@@ -327,6 +331,8 @@ export interface EntityListPanelProps {
   onTerminate?: (entityId: string) => void;
   /** The other half of that row's tail slot — see `ControlHost.onResume`. */
   onResume?: (entityId: string) => void;
+  /** The row's sharing slot (187) — see `ControlHost.onShareSession`. */
+  onShareSession?: (entityId: string, next: 'none' | 'space') => void;
   onCreate?: () => void;
   /** Authoring 7a: the host's REAL create control (NewTaskControl). */
   createSlot?: React.ReactNode;
@@ -486,6 +492,18 @@ export interface LaunchSources {
   profileFor?: (teamMemberId: string | null) => ProfileResolution | undefined;
   onSpawn?: (input: ExecutionSpawnInput) => void | Promise<void>;
   onFullOptions?: (entityId: string) => void;
+  /**
+   * The entity's current description, for the launch popup's body field —
+   * the popup EDITS the task's description, so it must open showing the real
+   * one, read fresh when the row's detail is not hydrated.
+   */
+  descriptionOf?: (entityId: string) => Promise<string | null>;
+  /**
+   * Persists title/description edited IN the launch popup back onto the
+   * entity, as one patch. Absent ⇒ the edits still shape the session (its
+   * title, the agent's briefing) but the entity keeps its own record.
+   */
+  onUpdateEntity?: (entityId: string, edits: { title?: string; description?: string }) => Promise<unknown> | void;
   /** Caller owns uniqueness of the optimistic-journal id. */
   mutationId: (entityId: string) => string;
 }
@@ -1475,7 +1493,21 @@ function CategoryTabs({
           onClick={() => onTab(tab.id)}
           {...(oneSurface ? { 'aria-label': `${tab.label}, ${tabLabel(tab)}` } : {})}
         >
-          {oneSurface ? <CategoryGlyph category={tab.id} /> : `${tab.label} ${tabLabel(tab)}`}
+          {oneSurface ? (
+            <CategoryGlyph category={tab.id} />
+          ) : (
+            <>
+              {/* THE COUNT IS A SECOND VOICE, NOT THE SAME ONE. At the label's
+                  size and weight `To Do 227` reads as one blob rather than a
+                  name with a quantity; at --pn-fs-fine in --pn-ink-4 it recedes
+                  without being lost, and tabular figures stop the row reflowing
+                  as the numbers tick. The word is the part allowed to shorten
+                  (see .lp__tab-word in panels.css) — a count that truncates is
+                  a wrong number, which is worse than a shortened one. */}
+              <span className="lp__tab-word">{tab.label}</span>
+              <span className="lp__tab-count">{tabLabel(tab)}</span>
+            </>
+          )}
         </button>
       ))}
     </div>
@@ -1549,6 +1581,11 @@ function FilterRow({
       return option ? [{ spec, option }] : [];
     }),
   );
+  /* THE CHIP COUNTS THE NARROWINGS, so an active filter states how many
+     without spawning one dismissable chip per selection — which is what let
+     this row grow past its container. It is the same array the chips below
+     are built from, so the badge cannot disagree with them. */
+  const activeFilterCount = active.length;
 
   /**
    * ONE BODY, TWO CONTAINERS — a hanging popover on a desktop, a bottom sheet
@@ -1639,7 +1676,12 @@ function FilterRow({
           aria-haspopup="menu"
           data-testid="filter-trigger"
         >
-          filter ▾
+          Filter
+          {activeFilterCount > 0 ? (
+            <span className="lp__chip-count">{activeFilterCount}</span>
+          ) : (
+            <span className="lp__chip-caret" aria-hidden>▾</span>
+          )}
         </button>
       ) : null}
       {people.length > 1 ? (
@@ -1651,7 +1693,12 @@ function FilterRow({
           aria-haspopup="menu"
           data-testid="people-filter-trigger"
         >
-          {selectedPeople.length > 0 ? `people · ${selectedPeople.length}` : 'people ▾'}
+          People
+          {selectedPeople.length > 0 ? (
+            <span className="lp__chip-count">{selectedPeople.length}</span>
+          ) : (
+            <span className="lp__chip-caret" aria-hidden>▾</span>
+          )}
         </button>
       ) : null}
       {/* The collection lens trigger. Rendered exactly when the registry
@@ -1679,7 +1726,8 @@ function FilterRow({
             aria-haspopup="menu"
             data-testid="collection-lens-trigger"
           >
-            {`${membership.label.toLowerCase()} ▾`}
+            {membership.label}
+            <span className="lp__chip-caret" aria-hidden>▾</span>
           </button>
         )
       ) : null}
@@ -1735,8 +1783,10 @@ function FilterRow({
           keeps `overflow: hidden` as its floor guard, and the picker is still
           free to overflow it. No hardcoded offset — `top: 100%` of the bar
           works whether or not this kind renders a header-actions row. */}
-      {narrowing('filters', 'Filter', 'filter-menu', 'lp__filtermenu', (
+      {narrowing('filters', 'Filter', 'filter-menu', 'lp__filtermenu lp__filtermenu--withfoot', (
         <>
+          {/* The options scroll; the footer below does not. */}
+          <div className="lp__filteropts">
           {config.list.filters.map((spec) => (
             <div key={spec.id}>
               <div className="lp__filtergroup">{spec.label.toUpperCase()}</div>
@@ -1762,13 +1812,51 @@ function FilterRow({
                     className={on ? 'lp__kindopt lp__kindopt--current' : 'lp__kindopt'}
                     onClick={() => onToggleOption(spec.id, option.id, spec.multi ?? false)}
                   >
-                    {option.label}
-                    {on ? <span className="lp__filtercheck">✓</span> : null}
+                    {/* A REAL BOX, NOT A TRAILING TICK. These options combine,
+                        and a `✓` that appears only after the click cannot say
+                        so beforehand — the affordance has to be visible while
+                        the option is still off. Drawn, not an <input>: the
+                        button already owns `role="menuitemcheckbox"` and its
+                        `aria-checked`, so a nested input would be a second,
+                        conflicting control in the same accessible node. */}
+                    <span className="lp__optbox" aria-hidden data-on={on ? 'yes' : 'no'} />
+                    <span className="lp__optlabel">{option.label}</span>
                   </button>
                 );
               })}
             </div>
           ))}
+          </div>
+          {/* CLEARING WAS ONLY EVER REACHABLE BY HUNTING CHIPS. Every active
+              option spawned a dismissable chip in the bar, so undoing four
+              filters meant finding and clicking four separate targets that
+              MOVED as each one left. One verb clears the set from the surface
+              that set it. `Done` only dismisses — it commits nothing, because
+              every toggle above already applied; it exists so the menu has an
+              obvious way out that is not "click somewhere else". */}
+          <div className="lp__filterfoot">
+            <button
+              type="button"
+              className="lp__filterclear"
+              data-testid="filter-clear-all"
+              disabled={active.length === 0}
+              onClick={() => {
+                for (const { spec, option } of active) {
+                  onToggleOption(spec.id, option.id, spec.multi ?? false);
+                }
+              }}
+            >
+              Clear all
+            </button>
+            <button
+              type="button"
+              className="lp__filterdone"
+              data-testid="filter-done"
+              onClick={() => setPicker(null)}
+            >
+              Done
+            </button>
+          </div>
         </>
       ))}
       {membership ? narrowing('sets', membership.label, 'collection-lens-menu', 'lp__filtermenu', (
@@ -3015,6 +3103,7 @@ export function Tile({
    */
   path?: ReadonlySet<string>;
 }) {
+  const { oneSurface } = useMobileSurface();
   const list = config.list;
   const controlCard = list.tile.anatomy === 'control-card';
   const sessionTree = list.tile.anatomy === 'session-tree';
@@ -3148,6 +3237,21 @@ export function Tile({
    *
    * `cancelled` is deliberately NOT completed: a cancelled task stopped, it
    * did not finish, and the fourth category exists to say so.
+   *
+   * WHAT `completed` MAY NO LONGER DO IS PAINT A COMPLETION MARK. `done` is
+   * the server's RESOLUTION predicate and not a lifecycle position:
+   * `db/migrations/152_universal_status.sql` seeds the FACT KINDS — commit,
+   * message, file, memory, artifact — into `done` on purpose, so that a fact
+   * about the past cannot block a `depends_on` forever, and its header says
+   * so. Reading it as "this finished" struck through every row of the
+   * Artifacts, Memories, Files, Messages and Commits lists. The strikethrough
+   * is therefore gone from the list for EVERY kind, tasks included (the status
+   * chip, the dot and the Done tab already carry completion); `--archived`
+   * stays, because archived and completed are still two facts (C2).
+   *
+   * `completed` survives as a computed fact because the SESSION tile still
+   * consumes it — for a `done` text tag, not a strikethrough, and no fact kind
+   * renders as a session.
    */
   const archived = row.deletedAt != null;
   const completed = row.category === 'done';
@@ -3317,7 +3421,7 @@ export function Tile({
             anatomyActions={own}
           />
         )}
-        detail={<EntityControlStrip row={row} props={props} config={config} />}
+        detail={<EntityControlStrip row={row} props={props} config={config} omitArchive={oneSurface} />}
       />
       {relatedBlock}
       </>
@@ -3336,7 +3440,6 @@ export function Tile({
         attention={attention}
         attentionReason={row.badges.attention?.latestReason}
         archived={archived}
-        completed={completed}
         childCount={childCount}
         childrenExpanded={expanded}
         onToggleChildren={onToggleChildren}
@@ -3404,31 +3507,33 @@ export function Tile({
             expand: two status controls, one of them inert. One strip now, in
             the place the chips already occupied, so the thing that looks like
             the control IS the control. */}
-        <EntityControlStrip row={row} props={props} config={config} variant="chips" />
+        <EntityControlStrip row={row} props={props} config={config} variant="chips" collapseEmptyDates={oneSurface} omitArchive={oneSurface} />
 
         {flowRef ? (
           <div className="lp__flow lp__flow--control">
-            <LaunchQuickConfig
+            <LaunchComposerPopup
               subject={row}
               key={flowRef}
-            verbLabel={resolveAction(flowRef).label}
+              verbLabel={resolveAction(flowRef).label}
               {...(resolveAction(flowRef).launchMode
                 ? { mode: resolveAction(flowRef).launchMode }
                 : {})}
               spaceId={props.launch?.spaceId ?? props.ctx.spaceId ?? ''}
               teammates={props.launch?.teammates ?? []}
               projects={props.launch?.projects ?? []}
-              loadFor={props.launch?.loadFor}
               capacity={props.launch?.capacity}
-              profileFor={props.launch?.profileFor}
               onSpawn={props.launch?.onSpawn}
-              onFullOptions={
-                props.launch?.onFullOptions
-                  ? () => props.launch?.onFullOptions?.(row.id)
+              loadDescription={
+                props.launch?.descriptionOf
+                  ? () => props.launch!.descriptionOf!(row.id)
+                  : undefined
+              }
+              onSaveSubject={
+                props.launch?.onUpdateEntity
+                  ? (edits) => props.launch!.onUpdateEntity!(row.id, edits)
                   : undefined
               }
               onDismiss={() => setFlowRef(null)}
-              boundsRef={tileRef}
               newClientMutationId={() => props.launch?.mutationId(row.id) ?? newLaunchMutationId()}
             />
           </div>
@@ -3531,12 +3636,15 @@ export function Tile({
             type="button"
             className={[
               'lp__title',
-              /* Two facts, two classes — C2. `--completed` is the
-                 strikethrough (this row FINISHED); `--archived` only dims
-                 (this row was FILED AWAY). The one class used to be named
-                 `--done` and was driven by `deletedAt`, so archiving struck a
-                 row through as though it had been completed. */
-              completed ? 'lp__title--completed' : '',
+              /* ONE fact, one class. `--archived` dims (this row was FILED
+                 AWAY) and is fed by `deletedAt` alone — C2, and the reason it
+                 was split off a single `--done` class that `deletedAt` used to
+                 drive. There is no longer a `--completed` sibling: it struck
+                 the title through from `category === 'done'`, which is the
+                 server's RESOLUTION predicate and which every fact kind is
+                 seeded into, so the Artifacts list rendered twelve of twelve
+                 titles as completed work. Completion is said by the status dot
+                 and the Done tab instead. */
               archived ? 'lp__title--archived' : '',
             ]
               .filter(Boolean)
@@ -3652,11 +3760,12 @@ export function Tile({
 
       {detailsExpanded ? <EntityControlStrip row={row} props={props} config={config} /> : null}
 
-      {/* The config is an attached card section, not a popover: the subject
-          remains obvious while teammate/model choices are changed. */}
+      {/* The config pops as a modal tile now (canvas composer): the subject is
+          named IN the popup's verb strip, so it stays obvious while teammate
+          and model choices are changed. */}
       {flowRef ? (
         <div className="lp__flow" onClick={(e) => e.stopPropagation()}>
-          <LaunchQuickConfig
+          <LaunchComposerPopup
             subject={row}
             key={flowRef}
             verbLabel={resolveAction(flowRef).label}
@@ -3666,17 +3775,19 @@ export function Tile({
             spaceId={props.launch?.spaceId ?? props.ctx.spaceId ?? ''}
             teammates={props.launch?.teammates ?? []}
             projects={props.launch?.projects ?? []}
-            loadFor={props.launch?.loadFor}
             capacity={props.launch?.capacity}
-            profileFor={props.launch?.profileFor}
             onSpawn={props.launch?.onSpawn}
-            onFullOptions={
-              props.launch?.onFullOptions
-                ? () => props.launch?.onFullOptions?.(row.id)
+            loadDescription={
+              props.launch?.descriptionOf
+                ? () => props.launch!.descriptionOf!(row.id)
+                : undefined
+            }
+            onSaveSubject={
+              props.launch?.onUpdateEntity
+                ? (edits) => props.launch!.onUpdateEntity!(row.id, edits)
                 : undefined
             }
             onDismiss={() => setFlowRef(null)}
-            boundsRef={tileRef}
             newClientMutationId={() => props.launch?.mutationId(row.id) ?? newLaunchMutationId()}
           />
         </div>

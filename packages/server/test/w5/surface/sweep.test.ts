@@ -306,9 +306,10 @@ describe('W5.C schema-valid stub sweep — all 98 v1 non-WS operations', () => {
     // 160 -> 163 (2026-08-16, W4/132): spaces.taskWorkflows list/upsert/delete.
     // 166 -> 169 (148): spaces.workflows list/upsert/delete.
     // 169 -> 193 (177): the 24 container HTTP rows. MEASURED.
-    expect(SURFACE).toHaveLength(193);
-    expect(rows).toHaveLength(193);
-    expect(new Set(rows.map((r) => r.op)).size).toBe(193);
+    // 193 -> 194 (187): execution.sessions.share, one POST command. MEASURED.
+    expect(SURFACE).toHaveLength(194);
+    expect(rows).toHaveLength(194);
+    expect(new Set(rows.map((r) => r.op)).size).toBe(194);
   });
 
   /**
@@ -966,7 +967,42 @@ describe('W5.C schema-valid stub sweep — all 98 v1 non-WS operations', () => {
     // every search phrased in terms of the thing being added. Any branch that
     // adds a migration file touches this line, and the only reliable way to
     // find that out before CI does is to know it is here.
-    expect(server.appliedMigrations.length).toBe(172);
+    //
+    // 172 -> 173 (2026-09-15): ONE file, 185_work_session_usage.sql (the
+    // exit-time usage instrument on work_sessions), MEASURED on the merged
+    // tree as every row above instructs:
+    //   git ls-tree -r --name-only origin/main db/migrations | grep -c '\.sql$' -> 172
+    //   ls db/migrations/*.sql | wc -l                                          -> 173
+    //   duplicate prefixes                                                      -> 0
+    //   git rev-list --count HEAD..origin/main                                  -> 0
+    // Main had not moved under this branch, so the two differ by exactly its
+    // one file. A migration landing on main first makes this a conflict BY
+    // CONSTRUCTION — RE-MEASURE, do not add.
+    //
+    // 173 -> 174 (2026-09-15): ONE file, 186_menu_codebrain_tab_removed.sql
+    // (the CodeBrain tab and its ref leave the menu), MEASURED the same way on
+    // the merged tree rather than incremented:
+    //   git ls-tree -r --name-only origin/main db/migrations | grep -c '\.sql$' -> 173
+    //   ls db/migrations/*.sql | wc -l                                          -> 174
+    //   duplicate prefixes                                                      -> 0
+    //   git rev-list --count HEAD..origin/main                                  -> 0
+    // Main had not moved under this branch either, so the two again differ by
+    // exactly its one file. The prose above is right that this pin is a bare
+    // integer invisible to any grep phrased as the thing being added — it was
+    // found here by running the suite, which is the other way it says to find
+    // it. RE-MEASURE, do not add.
+    //
+    // 174 -> 175 (187): ONE file, 187_work_session_sharing.sql (the two space
+    // sharing defaults, work_sessions.drive_mode, the inheriting trigger, and
+    // the re-defined grant_stream_attach). MEASURED the same way, not
+    // incremented:
+    //   git ls-tree -r --name-only origin/main db/migrations | grep -c '\.sql$' -> 174
+    //   ls db/migrations/*.sql | wc -l                                          -> 175
+    //   duplicate prefixes                                                      -> 0
+    //   git rev-list --count HEAD..origin/main                                  -> 0
+    // Main has not moved under this branch, so the two differ by exactly its
+    // one file.
+    expect(server.appliedMigrations.length).toBe(175);
 
     // EVERY PREFIX IS UNIQUE. The count pin above catches a file that VANISHES;
     // it is structurally incapable of catching the failure that has now happened

@@ -55,7 +55,13 @@ export type CoreEntityKind =
   // Containers (TM8-CONTAINERS-DESIGN §3.1, migration 177): a machine an
   // agent runs IN or drives. It is an entity so hierarchy, edges, messages
   // and attention all work on it for free; the RUNTIME behind it is not.
-  | 'container';
+  | 'container'
+  // Drawings (migration 194, 2026-09-17): a hand-drawn canvas as an entity.
+  // The scene is Excalidraw's own three parts — elements, appState, files —
+  // and `format` is a SLUG, not a closed list, so a second canvas format
+  // later costs no migration (135's R3 lesson). Phase 1 is single-writer and
+  // refuses embedded images; both are rulings, not omissions.
+  | 'drawing';
 
 /** tm8: runtime-registered custom kinds are namespaced (T-L4). */
 export type CustomEntityKind = `c:${string}`;
@@ -298,6 +304,16 @@ export type CoreEntityState =
   // tm8 additions (03 §1) — see §2 for the enums.
   | { kind: 'work_session'; status: WorkSessionStatus; agentTool: string | null;
       model: string | null; shareMode: WorkSessionShareMode;
+      /**
+       * OPTIONAL, AND ITS ABSENCE MEANS `owner` — the same degrade-to-the-old-
+       * behaviour rule `sessionKind` states below. A node that predates 187, or
+       * a payload cached before the column shipped, carries no value here, and
+       * `owner` is exactly what every such session did.
+       *
+       * Never render a drive affordance on absence: "we do not know" must read
+       * as "no" for a write capability.
+       */
+      driveMode?: WorkSessionDriveMode;
       startedAt: string | null; exitedAt: string | null;
       /**
        * WHAT KIND OF SESSION THIS IS — the discriminator that lets a client
@@ -440,6 +456,12 @@ export type CoreEntityState =
    * needs them and they can be large.
    */
   | { kind: 'graph'; graphType: string; nodeCount: number; edgeCount: number }
+  /**
+   * A drawing's row facts: which canvas format, and how big. The elements
+   * themselves are content, never state — a list row never needs them and a
+   * scene is the largest payload any kind carries.
+   */
+  | { kind: 'drawing'; format: string; elementCount: number }
   /**
    * A chat's row facts (176). Everything here answers a question a list row
    * asks — who is it with, what is it running, is it busy — without a second
@@ -761,6 +783,21 @@ export type CoreEntityContent =
   | { kind: 'graph'; graphType: string; nodes: GraphNode[]; edges: GraphEdgeSpec[];
       layout: Record<string, { x: number; y: number }>; source: string | null }
   /**
+   * The whole Excalidraw scene in one row (194 D2).
+   *
+   * The three members are Excalidraw's own, passed through unchanged so the
+   * editor can hand `elements`/`appState` straight back to it with no
+   * translation layer to drift. They are deliberately UNTYPED beyond their
+   * containers: an element is ~30 fields of Excalidraw's private shape and
+   * pinning it here would make every upstream release a contract change.
+   *
+   * `files` is the embedded-image map. It is always `{}` today — the doors
+   * refuse a non-empty one by name — and phase 2 fills it after splitting
+   * image bytes to `public.files`.
+   */
+  | { kind: 'drawing'; format: string; elements: Record<string, unknown>[];
+      appState: Record<string, unknown>; files: Record<string, unknown> }
+  /**
    * Containers (§4.2), hydrated in the panel.
    *
    * THERE IS NO `runtimeRef` HERE, and there must never be one (R5). This arm
@@ -990,6 +1027,21 @@ export interface CollectionQuery {
      */
     category?: StatusCategory[];
     deleted?: 'exclude'|'only'|'include';
+    /**
+     * Additive (2026-09-15): memories whose statement, mechanism, subject
+     * scope or does-not-establish text contains ANY of these terms as a
+     * case-insensitive substring — any-of, like every other array filter
+     * here. Same kind-narrowing semantics as `status`: the four columns live
+     * on the memory arm only, so while present the query returns memories
+     * exclusively.
+     *
+     * It exists because the MCP `memory_search` tool scanned a summary's
+     * title/excerpt — a ~200-char prefix of a statement that averages 1,752
+     * chars on the launch node — and so could not reach 71% of the words it
+     * held. Memory-only on purpose: nothing searches another kind's text yet,
+     * and a predicate over columns nobody asked for is a feature, not a fix.
+     */
+    terms?: string[];
   };
   layout?: 'list'|'board'|'tree'|'feed'|'gallery'|'graph';
   /** `priority` added 2026-08-16 (Board tab wave) — same additive posture as the rest of the union. */
@@ -2473,6 +2525,18 @@ export interface UpdateSpaceInput extends CommandContext {
   name?: string;
   description?: string;
   githubRepo?: string | null;
+  /**
+   * 187 — the posture NEW sessions spawned into this space are given. Neither
+   * key touches a session that already exists: each carries its own pair, and
+   * a space default that reached backwards would retroactively open terminals
+   * their owners never offered.
+   *
+   * Optional in the PATCH sense, like every key here: absent means "leave it",
+   * so a caller changing the name cannot reset a sharing posture it never
+   * mentioned.
+   */
+  sessionShareDefault?: 'none' | 'space';
+  sessionDriveDefault?: WorkSessionDriveMode;
 }
 
 /**
@@ -2593,7 +2657,7 @@ export type InvitePreview =
  * so its default door is a control on the tab bar (the `inbox` precedent). The
  * registry row exists all the same, because an operator who places Help in
  * their own menu must not be refused by the server validator. */
-export type MenuViewRef = 'dashboard' | 'feed' | 'inbox' | 'workspace' | 'graph' | 'channels' | 'files' | 'settings' | 'git' | 'messages' | 'board' | 'craft' | 'help' | 'codebrain';
+export type MenuViewRef = 'dashboard' | 'feed' | 'inbox' | 'workspace' | 'graph' | 'channels' | 'files' | 'settings' | 'git' | 'messages' | 'board' | 'craft' | 'help';
 /**
  * tm8: `worktree` became menu-VISIBLE 2026-07-31 (additive union widening,
  * same R4 posture as `graph`). Menu presence is list navigation only — a
@@ -2865,11 +2929,15 @@ export const DEFAULT_MENU_GROUP_SPINE = [
   // edit here if the pending position ruling says otherwise.
   { serverId: 'craft', clientId: 'craft' },
   { serverId: 'graph', clientId: 'graph' },
-  // 2026-09-01 (CodeBrain, migration 173): the delivery pipeline's own tab,
-  // seated after Graph and before the utility tabs. This constant is the ONE
-  // place both parity tests read, so the group cannot land on one side alone
-  // — the 059 lesson this spine exists to encode.
-  { serverId: 'codebrain', clientId: 'codebrain' },
+  // 2026-09-15 (CodeBrain removed, migration 186): the tab 173 seated here is
+  // gone, and `codebrain` has left the MenuViewRef union above with it. #610
+  // deleted the 2.0 UI package that held the only CodeBrain SCREEN, which left
+  // the ref addressable but unrenderable — `view-ref-screens.ts` marked it
+  // `unbuilt`, and the shipped row carried a tab that could only report its own
+  // absence. Files and Board (commented out around this line) kept their refs
+  // when they left the spine because their screens still exist; this one has
+  // none to keep. The registry row and the check-constraint entry go in 186.
+  // { serverId: 'codebrain', clientId: 'codebrain' },
   // Files is no longer a shipped tab, but remains a legal customized-menu ref.
   // { serverId: 'files', clientId: 'files' },
   { serverId: 'settings', clientId: 'settings' },
@@ -2931,6 +2999,16 @@ export interface SpaceSummary {
   unreadTotal: number | null;
   githubRepo?: string | null;
   createdAt: string;
+  /**
+   * The posture NEW sessions spawned into this space are born with (187).
+   *
+   * Both are OPTIONAL so an older node's response still validates, and both are
+   * DEFAULTS rather than current state: changing one never moves a session that
+   * already exists, so nobody's open terminal changes posture because an admin
+   * edited a setting. Writable through `spaces.update` by a space admin.
+   */
+  sessionShareDefault?: 'none' | 'space';
+  sessionDriveDefault?: WorkSessionDriveMode;
 }
 
 /** GET /v2/spaces/:spaceId/navigation */
@@ -3155,8 +3233,29 @@ export type WorkSessionStatus = 'spawning' | 'running' | 'idle' | 'exited' | 'fa
  */
 export type WorktreeStatus = 'active' | 'merged' | 'abandoned' | 'deleted';
 
-/** Graph-side announce/authorize state for live terminal sharing (T-L10). */
+/**
+ * Graph-side announce/authorize state for live terminal sharing (T-L10). Gates
+ * WATCHING a session's PTY bytes.
+ *
+ * `explicit` IS INERT AND HAS ALWAYS BEEN. `grant_stream_attach` tests only
+ * `= 'none'`, so a session set to `explicit` behaves exactly like `space` — the
+ * whole space may watch — and no per-person list is consulted anywhere, because
+ * none exists. The value is kept so stored rows stay legal; a real per-person
+ * share has to BUILD the list check, and setting this value is not that.
+ */
 export type WorkSessionShareMode = 'none' | 'space' | 'explicit';
+
+/**
+ * Who may TYPE into a session's PTY (187). Deliberately a second dial rather
+ * than another `WorkSessionShareMode` value: watching a terminal and driving it
+ * are different grants, and the common posture — the space may watch, only the
+ * owner may type — cannot be said with one flag.
+ *
+ * `owner` is the creator plus anyone who may act as the creator, which under
+ * 075 means any member of the space may drive a TEAMMATE-launched session. That
+ * is a persona right, not a sharing setting, and `owner` does not revoke it.
+ */
+export type WorkSessionDriveMode = 'owner' | 'space';
 
 /**
  * What a work_session IS, mirroring 083's `work_sessions.session_kind` as
@@ -4298,6 +4397,27 @@ export interface ExecutionResumeInput extends CommandContext {
  */
 export interface ExecutionStreamsAttachInput extends CommandContext {
   mode: 'view' | 'drive';
+}
+
+/**
+ * execution.sessions.share (187): turn one session's two dials.
+ *
+ * Both fields are optional and a `null`/absent field MERGES — naming only
+ * `driveMode` leaves `shareMode` alone — but at least one must be present, so a
+ * request that would be a no-op is a 400 rather than a silent success.
+ *
+ * `shareMode` is NARROWER than {@link WorkSessionShareMode} on purpose: reading
+ * a session may return `'explicit'`, writing one may not. Nothing in this schema
+ * consults a per-person list, so the gate treats `'explicit'` as `'space'` while
+ * the badge renders "shared: explicit" — a stored row that says one thing and
+ * behaves as another. It stays readable so existing rows round-trip, and stays
+ * unwritable until the list it names actually exists.
+ */
+export interface ExecutionSessionsShareInput extends CommandContext {
+  shareMode?: Exclude<WorkSessionShareMode, 'explicit'>;
+  driveMode?: WorkSessionDriveMode;
+  /** Optimistic concurrency against the session entity's version, when given. */
+  expectedVersion?: number;
 }
 
 export interface StreamAttachGrant {
