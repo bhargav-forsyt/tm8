@@ -33,6 +33,7 @@
  * ESC WALKS DOWN ONE RUNG PER PRESS: aux → detail → list.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { sessionVerbNotice } from './session-verb-notice';
 import type { EntityId, EntityKind, ExecutionSpawnInput } from '@tm8/contract';
 import {
   EntityDetailPanel,
@@ -400,14 +401,8 @@ export function EntityView(props: EntityViewProps) {
   /* A useCallback, not an inline arrow — see WorkspaceView for why an unstable
      reporter churns the whole dispatcher's identity every render. */
   const notifyTerminateFailed = useCallback(
-    (_verb: ActionRef, _entityId: string, error: unknown) => {
-      props.onNotice({
-        id: 'session-terminate-failed',
-        tone: 'error',
-        title: 'Session could not be terminated',
-        body: String((error as { message?: string })?.message ?? error),
-        ttlMs: 6_000,
-      });
+    (verb: ActionRef, _entityId: string, error: unknown) => {
+      props.onNotice(sessionVerbNotice(verb, error));
     },
     [props.onNotice],
   );
@@ -1090,6 +1085,7 @@ export function EntityView(props: EntityViewProps) {
              WorkspaceView passed one. A verb with a dedicated prop is dead on
              every host that forgets it, so all three pass it now. */
           onTerminate={primaries.terminate}
+          onShareSession={primaries.shareSession}
           onResume={primaries.resume}
           onSetValue={rowLifecycle.setValue}
           onSetAxis={rowLifecycle.setAxis}

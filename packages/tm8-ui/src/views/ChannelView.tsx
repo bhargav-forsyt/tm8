@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { sessionVerbNotice } from './session-verb-notice';
 import type {
   ChannelTab,
   CollectionResult,
@@ -110,14 +111,8 @@ export function ChannelView({
     reconcileCommand: data.reconcileCommand,
     ...(onNotice
       ? {
-          onError: (_verb: ActionRef, _entityId: string, error: unknown) =>
-            onNotice({
-              id: 'session-terminate-failed',
-              tone: 'error',
-              title: 'Session could not be terminated',
-              body: String((error as { message?: string })?.message ?? error),
-              ttlMs: 6_000,
-            }),
+          onError: (verb: ActionRef, _entityId: string, error: unknown) =>
+            onNotice(sessionVerbNotice(verb, error)),
         }
       : {}),
     /* The version the viewer is LOOKING AT — see `versionOf` on the hook. */

@@ -16,6 +16,7 @@
 
 import type { CredentialProviderName } from '@tm8/contract';
 import type { CoordinatorKind } from '@tm8/prompt';
+import type { WorkSessionUsage, WorkSessionUsageSource } from '../transcript/session-usage.js';
 
 export type { CoordinatorKind };
 
@@ -473,6 +474,20 @@ export interface WorkSessionResumeInfo {
   nativeSessionId: string | null;
   /** Exact CLAUDE_CONFIG_DIR/CODEX_HOME used for the original run. */
   agentConfigDir: string | null;
+  /**
+   * `work_sessions.session_kind` — 'agent', 'shell' or 'credential'.
+   *
+   * Resume is an AGENT verb: it restores a provider conversation by handing the
+   * provider its own session id back. A `shell` row has no conversation and no
+   * teammate, and a `credential` row is a login flow, so neither can be resumed
+   * in any sense the word carries here.
+   *
+   * Read so `resume()` can say that. Without it the refusal fell through to the
+   * teammate check and came back as "has no linked Teammate — cannot
+   * reconstruct its launch", which describes the implementation and not the
+   * reason: a terminal never HAD a Teammate to lose.
+   */
+  sessionKind: string | null;
 }
 
 export interface ResumeWorkSessionResult {
@@ -590,6 +605,23 @@ export interface GraphPort {
     auth: GraphAuth,
     input: { sessionId: string; clientMutationId: string | null; nodeId: string | null },
   ): Promise<ResumeWorkSessionResult>;
+  /**
+   * `public.record_work_session_usage` (185) — the whole-conversation provider
+   * usage read from the agent's own transcript once its process is gone.
+   *
+   * NOT a transition and never on the transition path: it is written AFTER
+   * the ending is recorded, best-effort, by a caller that swallows its own
+   * failure. A session whose transcript was already deleted, or lives on
+   * another node, simply keeps `usage = NULL` — which the column comment says
+   * must render as "never measured", not as zero. Resolves whether a row was
+   * written (false = the session row was gone).
+   */
+  recordWorkSessionUsage(
+    auth: GraphAuth,
+    sessionId: string,
+    usage: WorkSessionUsage,
+    source: WorkSessionUsageSource,
+  ): Promise<boolean>;
   /**
    * `public.execution_record_native_session` — write-once native-id capture.
    * Resolves `false` when the row already held a DIFFERENT id, which is a

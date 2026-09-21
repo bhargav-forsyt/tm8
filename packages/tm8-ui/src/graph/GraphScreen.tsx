@@ -12,6 +12,7 @@
  * views/, and the port names exactly what this screen consumes.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { sessionVerbNotice } from '../views/session-verb-notice';
 import type {
   CommandResult,
   EdgeView,
@@ -169,14 +170,8 @@ export function GraphScreen(props: GraphScreenProps) {
     ...(data.reconcileCommand ? { reconcileCommand: data.reconcileCommand } : {}),
     ...(props.onNotice
       ? {
-          onError: (_verb: ActionRef, _entityId: string, error: unknown) =>
-            props.onNotice?.({
-              id: 'session-terminate-failed',
-              tone: 'error',
-              title: 'Session could not be terminated',
-              body: String((error as { message?: string })?.message ?? error),
-              ttlMs: 6_000,
-            }),
+          onError: (verb: ActionRef, _entityId: string, error: unknown) =>
+            props.onNotice?.(sessionVerbNotice(verb, error)),
         }
       : {}),
     /* The version the viewer is LOOKING AT — see `versionOf` on the hook. */

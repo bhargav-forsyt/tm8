@@ -51,6 +51,8 @@ import {
   type WorkdirMode,
   type WorkSessionResumeInfo,
   type WorkSessionStatus,
+  type WorkSessionUsage,
+  type WorkSessionUsageSource,
   WorktreeManager,
   type WorktreeAllocationRow,
   type WorktreeAllocationState,
@@ -68,6 +70,7 @@ import type {
   ExecutionLiveness,
   ExecutionPromptInput,
   ExecutionResumeInput,
+  ExecutionSessionsShareInput,
   ExecutionSpawnInput,
   ExecutionTerminalStartInput,
   ExecutionStreamsAttachInput,
@@ -770,10 +773,11 @@ export class DbGraphPort implements GraphPort {
         status: string;
         native_session_id: string | null;
         agent_config_dir: string | null;
+        session_kind: string | null;
       }>(
         `select ws.entity_id, e.space_id, e.parent_id, ws.project_id, ws.workdir_mode,
                 ws.workdir_path, ws.mode, ws.model, ws.agent_tool, ws.title,
-                ws.status, ws.native_session_id, ws.agent_config_dir
+                ws.status, ws.native_session_id, ws.agent_config_dir, ws.session_kind
            from public.work_sessions ws
            join public.entities e on e.id = ws.entity_id
           where ws.entity_id = $1 and e.deleted_at is null`,
@@ -809,6 +813,7 @@ export class DbGraphPort implements GraphPort {
         status: row.status as WorkSessionStatus,
         nativeSessionId: row.native_session_id,
         agentConfigDir: row.agent_config_dir,
+        sessionKind: row.session_kind,
       };
     });
   }
@@ -917,6 +922,30 @@ export class DbGraphPort implements GraphPort {
         nativeSessionId,
         null, // p_actor_id — derived from claims
       ],
+    );
+    return stored === true;
+  }
+
+  /**
+   * The usage instrument (185). A SEPARATE RPC from `work_session_transition`
+   * on purpose: that function is R29's single writer of status, and 171/177
+   * show what a signature change there costs (DROP + CREATE, five positional
+   * callers, a re-armed PUBLIC grant). This writes only the three usage
+   * columns, which 001's status guard does not cover, and bumps
+   * `entities.version` so the fact reaches clients the way 107's does. The
+   * document goes over as text: `rpc` binds it as a parameter and Postgres
+   * casts it to the function's jsonb argument, exactly as `record_session_manifest`.
+   */
+  async recordWorkSessionUsage(
+    auth: GraphAuth,
+    sessionId: string,
+    usage: WorkSessionUsage,
+    source: WorkSessionUsageSource,
+  ): Promise<boolean> {
+    const stored = await this.db.rpc<boolean>(
+      this.claims(auth),
+      'public.record_work_session_usage',
+      [sessionId, JSON.stringify(usage), source],
     );
     return stored === true;
   }
@@ -1162,6 +1191,28 @@ export class DbGraphPort implements GraphPort {
       // and never stored, while replaying the old row with a freshly generated
       // bearer would return a token whose hash is not in the database.
       null,
+    ]);
+  }
+
+  /** execution.sessions.share — turns the two dials `grantStreamAttach`
+   *  reads (187). Kept next to it deliberately: this is the only write that
+   *  can change whether the call above succeeds for anyone but the owner. */
+  async setWorkSessionSharing(
+    auth: GraphAuth,
+    sessionId: string,
+    input: { shareMode?: string; driveMode?: string; expectedVersion?: number },
+    clientMutationId: string | null,
+  ): Promise<unknown> {
+    return this.db.rpc(this.claims(auth), 'public.set_work_session_sharing', [
+      sessionId,
+      input.expectedVersion ?? null,
+      // `null` MERGES in the RPC, so an omitted dial is left alone rather
+      // than reset — a client that only wants to stop drive must not
+      // silently re-close the session to viewers as a side effect.
+      input.shareMode ?? null,
+      input.driveMode ?? null,
+      null, // p_actor_id — derived from claims
+      clientMutationId,
     ]);
   }
 }
@@ -2837,6 +2888,38 @@ function registerHandlers(
       }),
     );
     return json(await assembleCommandResult(db, claims, result.commandResult, owner.identityId));
+  });
+
+  /**
+   * execution.sessions.share — the write side of the attach gate (187).
+   *
+   * Thin on purpose: every rule that matters (who may turn the dials, which
+   * words are legal, and the revocation of live grants when the posture
+   * narrows) lives in `public.set_work_session_sharing`, because the same
+   * rules have to hold for the CLI and for any future caller that never
+   * passes through this process. The RPC returns an `internal.command_result`,
+   * so it assembles exactly like terminate above.
+   */
+  registry.register('execution.sessions.share', async (ctx) => {
+    const owner = await resolveOwner();
+    const envelope = commandEnvelope(ctx);
+    const claims = claimsFor(owner, ctx, envelope);
+    const input = ctx.body as ExecutionSessionsShareInput;
+    const raw = await rethrowing(() =>
+      graph.setWorkSessionSharing(
+        claims,
+        requireUuidParam(ctx, 'id'),
+        {
+          ...(input.shareMode === undefined ? {} : { shareMode: input.shareMode }),
+          ...(input.driveMode === undefined ? {} : { driveMode: input.driveMode }),
+          ...(input.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: input.expectedVersion }),
+        },
+        envelope.clientMutationId ?? null,
+      ),
+    );
+    return json(await assembleCommandResult(db, claims, raw, owner.identityId));
   });
 
   registry.register('execution.streams.attach', async (ctx) => {

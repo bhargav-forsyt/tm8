@@ -34,6 +34,7 @@
  * `auxPanel`'s docblock names. One screen, one set.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { sessionVerbNotice } from './session-verb-notice';
 import type { EntityId, ExecutionSpawnInput } from '@tm8/contract';
 import { HomePage } from '../home-page';
 import { AuxEntityPanel } from './auxPanel';
@@ -111,6 +112,23 @@ export const HOME_CENTER_MIN = 360;
 export const HOME_LIST_MIN = 240;
 export const HOME_LIST_DEFAULT = 340;
 export const HOME_LIST_MAX = 560;
+/** THE WIDTH BELOW WHICH A'S CHROME GOES COMPACT.
+
+    Home passed `compact` as a hardcoded literal, so the panel's header rows
+    were IDENTICAL at 240 and at 560: dragging the column changed the list and
+    nothing above it, and the row designed for the floor was also what a 560px
+    column got — ~274px of empty filter row between the last chip and the sort
+    control. `WorkspaceView` has derived the same prop from its measured width
+    since it gained one (`layout.left <= 220`); this is that rule for a column
+    whose floor is 240 rather than 200, which is why the number differs.
+
+    420 is where the filter row stops fitting WORDS. At `--pn-fs-micro` the
+    four controls it can carry at once — `Filter ▾`, `People ▾`,
+    `Collections ▾` and `↓ Recently modified`, the longest sort label the task
+    registry declares — need ~410px with their gaps and the row's two 10px
+    gutters. Below this the sort control collapses to its glyph (T0-3 frame 4)
+    and the row still fits; above it the row reads as words. */
+export const HOME_LIST_COMPACT_MAX = 420;
 /** A's separator track. It has no border of its own — unlike the aside, which
     is why this is 8 and `ASIDE_CHROME` is 9. */
 export const HOME_LIST_CHROME = 8;
@@ -324,21 +342,16 @@ export function HomeView(props: HomeViewProps) {
   );
 
   const notifyActionFailed = useCallback(
-    (_verb: ActionRef, _entityId: string, error: unknown) => {
-      onNotice({
-        id: 'session-terminate-failed',
-        tone: 'error',
-        title: 'Session could not be terminated',
-        body: String((error as { message?: string })?.message ?? error),
-        ttlMs: 6_000,
-      });
+    (verb: ActionRef, _entityId: string, error: unknown) => {
+      onNotice(sessionVerbNotice(verb, error));
     },
     [onNotice],
   );
 
   /* `onFullOptions` rides in when the shell wired `onLaunchOpen` — a task
-     row's Run then goes STRAIGHT to the launch sheet this screen mounts,
-     the same outranking the kind screens apply. */
+     row's Run pops the composer, and this is the popup's `full options ▸`
+     escape to the launch sheet this screen mounts (precedence flipped
+     2026-09-07: the popup outranks the sheet everywhere a flow can mount). */
   const launchPort = useLaunchPort(data, {
     ...(props.onSpawn ? { onSpawn: props.onSpawn } : {}),
     ...(props.onLaunchOpen
@@ -665,6 +678,7 @@ export function HomeView(props: HomeViewProps) {
           /* Same executor, same reason as `EntityView`: this list draws the
              session row's ⏻ too, and until now nothing was behind it. */
           onTerminate={primaries.terminate}
+          onShareSession={primaries.shareSession}
           onResume={primaries.resume}
           onSetValue={rowLifecycle.setValue}
           onAssign={rowLifecycle.assign}
@@ -675,12 +689,15 @@ export function HomeView(props: HomeViewProps) {
           launch={launchPort}
           onAction={listActions.onAction}
           wiredActions={listActions.wiredActions}
-          compact
+          /* MEASURED, not asserted. This was `compact` — a bare literal, true
+             at every one of the 320px this column drags through. See
+             `HOME_LIST_COMPACT_MAX`. */
+          compact={listWidth <= HOME_LIST_COMPACT_MAX}
         />
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, ctx, centerId, rowLifecycle, primaries, launchPort, listActions],
+    [data, ctx, centerId, rowLifecycle, primaries, launchPort, listActions, listWidth],
   );
 
   const regions: HomeChatRegions = {

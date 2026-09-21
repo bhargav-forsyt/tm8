@@ -62,6 +62,7 @@ import type {
   EntityKindDef, EntityKindUpdateInput, EntityStaleness, EntityState, EntitySummary, ErrorCode,
   ErrorDetails, ExecutionDispatchInput, ExecutionDispatchResult,
   ExecutionPromptInput, ExecutionResumeInput, ExecutionSpawnInput,
+  ExecutionSessionsShareInput,
   ExecutionStreamsAttachInput, ExecutionTerminateInput,
   ExecutionGitCheckpointInput, ExecutionGitRollbackInput, ExecutionGitCommitInput, ExecutionGitMergeInput,
   ExecutionGitCherryPickInput, ExecutionGitBranchInput, ExecutionGitStashInput,
@@ -113,7 +114,7 @@ import type {
   UndoToken, UpdateInteractionProfileDraftInput, UpdateMemberRoleInput, UpdateMenuInput,
   UpdateSpaceInput, ValidateInteractionProfileInput, VoiceParticipant, VoiceTokenGrant, WithdrawHandoffInput,
   ExecutionTerminalStartInput,
-  WorkInput, WorkSessionEndedKind, WorkSessionKind, WorkSessionShareMode, WorkSessionStatus, WorkSessionWorkdirMode, WorktreeStatus, WorkspaceControlAck, WorkspaceControlFrame,
+  WorkInput, WorkSessionDriveMode, WorkSessionEndedKind, WorkSessionKind, WorkSessionShareMode, WorkSessionStatus, WorkSessionWorkdirMode, WorktreeStatus, WorkspaceControlAck, WorkspaceControlFrame,
   WorkspaceEvent,
 } from './contract.js';
 import type { WireErrorBody } from './envelope.js';
@@ -153,6 +154,8 @@ export const CoreEntityKindSchema = z.enum([
   'chat',
   // Containers (177): a machine an agent runs in or drives.
   'container',
+  // Drawings (194): an Excalidraw canvas as an entity.
+  'drawing',
 ]);
 
 export const CustomEntityKindSchema = z.custom<CustomEntityKind>(
@@ -219,6 +222,23 @@ export const GraphContentInputSchema = z.object({
   source: z.string().nullable().optional(),
 }).passthrough();
 
+/**
+ * 194 — the drawing write door's input. Every member optional because a patch
+ * carries only what changed: the debounced editor sends `elements` and
+ * `appState` and never restates the title, and `null` MERGES in the door.
+ *
+ * The element shape is deliberately unpinned (`z.record(z.unknown())`): an
+ * Excalidraw element is ~30 fields of upstream's private shape, so pinning it
+ * would make every Excalidraw release a contract change for no safety we act
+ * on. The CONTAINER types are pinned, which is also what the doors check.
+ */
+export const DrawingContentInputSchema = z.object({
+  format: z.string().min(1).optional(),
+  elements: z.array(z.record(z.unknown())).optional(),
+  appState: z.record(z.unknown()).optional(),
+  files: z.record(z.unknown()).optional(),
+}).passthrough();
+
 export const WorkStatusSchema = z.enum(['open', 'pulled', 'working', 'in_review', 'done', 'blocked', 'cancelled']);
 /**
  * The closed four. `z.ZodType<StatusCategory>` on purpose: the annotation makes
@@ -233,6 +253,16 @@ export const WorkSessionStatusSchema: z.ZodType<WorkSessionStatus> =
   z.enum(['spawning', 'running', 'idle', 'exited', 'failed']);
 export const WorkSessionShareModeSchema: z.ZodType<WorkSessionShareMode> =
   z.enum(['none', 'space', 'explicit']);
+/**
+ * Mirrors `work_sessions.drive_mode`'s CHECK exactly — 187.
+ *
+ * TWO values, not three, and deliberately not a mirror of share_mode: watching
+ * has a per-person future ('explicit') that typing does not, and giving drive a
+ * value the gate does not read would be the same inert vocabulary 187's header
+ * complains about.
+ */
+export const WorkSessionDriveModeSchema: z.ZodType<WorkSessionDriveMode> =
+  z.enum(['owner', 'space']);
 /** Mirrors `work_sessions.session_kind`'s CHECK exactly — 083, widened by 101. */
 export const WorkSessionKindSchema: z.ZodType<WorkSessionKind> =
   z.enum(['agent', 'credential', 'shell']);
@@ -438,6 +468,18 @@ export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
     // Absent = a node that predates the field; explicit null = a run with no
     // persona, which renders the tool alone. See the DTO note in contract.ts.
     teammate: ActorSummarySchema.nullable().optional(),
+    // 187: whether a non-owner who may WATCH this terminal may also TYPE into
+    // it. Optional and not nullable for the usual additive reason — a pre-187
+    // node omits it and a reader takes the absence as 'owner', which is the
+    // rule that node is in fact enforcing.
+    //
+    // This arm is `.strict()`, and that is the whole reason this line exists:
+    // the projector emits whatever the entity reader produced, and a field the
+    // reader spreads but the schema does not name is not dropped, it is a
+    // refusal — `OffContractEventError` on `entity.upsert`, i.e. the space's
+    // event stream stops. The TS type gaining a field is only half of adding
+    // one.
+    driveMode: WorkSessionDriveModeSchema.optional(),
   }).strict(),
   z.object({
     kind: z.literal('collection'),
@@ -492,6 +534,12 @@ export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
     graphType: z.string().min(1),
     nodeCount: z.number().int().nonnegative(),
     edgeCount: z.number().int().nonnegative(),
+  }).strict(),
+  // 194 — which canvas format, and how big. The scene itself is content.
+  z.object({
+    kind: z.literal('drawing'),
+    format: z.string().min(1),
+    elementCount: z.number().int().nonnegative(),
   }).strict(),
   // 176 — the chat row's facts. `runtimeState` is the durable claim about the
   // headless child; `turnState` is the queue. They are independent: a chat can
@@ -861,6 +909,20 @@ export const EntityContentSchema: z.ZodType<EntityContent> = z.lazy(() => z.unio
     layout: z.record(z.object({ x: z.number(), y: z.number() }).passthrough()),
     source: z.string().nullable(),
   }).passthrough(),
+  /*
+   * 194 — the Excalidraw scene. `passthrough` and `z.record(z.unknown())` are
+   * the point, not laxity: an Excalidraw element is ~30 fields of upstream's
+   * private shape, so pinning it would turn every Excalidraw release into a
+   * contract change while buying no safety we act on. What IS pinned is the
+   * container types, which is what the doors check too.
+   */
+  z.object({
+    kind: z.literal('drawing'),
+    format: z.string().min(1),
+    elements: z.array(z.record(z.unknown())),
+    appState: z.record(z.unknown()),
+    files: z.record(z.unknown()),
+  }).passthrough(),
   // A chat has no content beyond its summary (R5): the working directory and
   // the native session id are the two facts that stay server-side.
   z.object({ kind: z.literal('chat') }).strict(),
@@ -963,6 +1025,11 @@ const CollectionFiltersSchema = z.object({
   // encode this phase's incompleteness as a permanent law.
   category: z.array(StatusCategorySchema).optional(),
   deleted: z.enum(['exclude', 'only', 'include']).optional(),
+  // Memory text terms, any-of (collections.ts). Each term is trimmed and must
+  // survive it: a blank term is a substring of everything, the
+  // confident-EVERYTHING twin of the confident-zero the refinements below
+  // refuse. An empty array is refused for the same reason.
+  terms: z.array(z.string().trim().min(1)).min(1).optional(),
 }).strict().superRefine((f, ctx) => {
   // A22: refused, not silently empty. The two filters are kind-disjoint (no
   // row is both a task and a work_session), so their conjunction can only
@@ -2271,6 +2338,13 @@ export const UpdateSpaceInputSchema: z.ZodType<UpdateSpaceInput> = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   githubRepo: z.string().nullable().optional(),
+  // 187. This object is `.strict()`, so the keys have to be NAMED here or the
+  // request is a 400 at the door — `w2_update_space` would never see them, and
+  // the allow-list in `identity-spaces.ts` would be filtering a body that was
+  // already refused. Not nullable: there is no "unset" for a default, only the
+  // two postures, and the RPC validates the vocabulary again on its side.
+  sessionShareDefault: z.enum(['none', 'space']).optional(),
+  sessionDriveDefault: WorkSessionDriveModeSchema.optional(),
 }).strict();
 
 /** The role vocabulary, in one place, so the wire and the check constraint agree. */
@@ -2305,7 +2379,7 @@ export const UpdateMemberRoleInputSchema: z.ZodType<UpdateMemberRoleInput> = z.o
 // `board` widened 2026-08-16 in the same lockstep (the task kanban tab).
 // `help` widened 2026-08-19 in the same lockstep (the Help shelf). Menu-eligible
 // but not in the shipped default spine — see the type for why.
-export const MenuViewRefSchema = z.enum(['dashboard', 'feed', 'inbox', 'workspace', 'graph', 'channels', 'files', 'settings', 'git', 'messages', 'board', 'craft', 'help', 'codebrain']);
+export const MenuViewRefSchema = z.enum(['dashboard', 'feed', 'inbox', 'workspace', 'graph', 'channels', 'files', 'settings', 'git', 'messages', 'board', 'craft', 'help']);
 // `worktree` un-excluded 2026-07-31 in lockstep with the MenuKindRef type:
 // menu-visible, still not menu-creatable (creation stays with the saga).
 // `channel` un-excluded 2026-08-01, same lockstep — it became a collection
@@ -2826,6 +2900,24 @@ export const ExecutionStreamsAttachInputSchema: z.ZodType<ExecutionStreamsAttach
   ...commandContextShape,
   mode: z.enum(['view', 'drive']),
 }).strict();
+
+/**
+ * At least one dial must be named. `.strict()` rejects unknown keys, and the
+ * refinement rejects the empty patch — the RPC refuses it too (22023), but a
+ * request that cannot do anything should not reach the database to find out.
+ */
+export const ExecutionSessionsShareInputSchema: z.ZodType<ExecutionSessionsShareInput> = z.object({
+  ...commandContextShape,
+  // No 'explicit'. It is readable on a stored row and not writable here — see
+  // ExecutionSessionsShareInput for why a value with no list behind it must not
+  // become settable through the first door that could set it.
+  shareMode: z.enum(['none', 'space']).optional(),
+  driveMode: z.enum(['owner', 'space']).optional(),
+  expectedVersion: z.number().int().nonnegative().optional(),
+}).strict().refine(
+  (v) => v.shareMode !== undefined || v.driveMode !== undefined,
+  { message: 'name shareMode, driveMode, or both' },
+) as z.ZodType<ExecutionSessionsShareInput>;
 
 export const ExecutionGitCheckpointInputSchema: z.ZodType<ExecutionGitCheckpointInput> = z.object({
   ...commandContextShape,
@@ -3529,6 +3621,14 @@ export const SpaceSummarySchema: z.ZodType<SpaceSummary> = z.object({
   // an older node parses unchanged.
   unreadTotal: z.number().int().nonnegative().nullable(),
   githubRepo: z.string().nullable().optional(),
+  // 187, the space-wide DEFAULT posture new sessions are spawned with — not a
+  // statement about any existing session, each of which carries its own pair.
+  // Optional for the additive reason, and it matters here more than usual:
+  // this object is `.strict()` and is re-parsed on the way OUT of storage, so
+  // a node that stores the keys without naming them here answers 503
+  // `stored Space settings violate the frozen contract` for the whole space.
+  sessionShareDefault: z.enum(['none', 'space']).optional(),
+  sessionDriveDefault: WorkSessionDriveModeSchema.optional(),
   createdAt: IsoTimestamp,
 }).strict();
 
