@@ -16,6 +16,7 @@ import { CredentialSessionLauncher } from '@tm8/execution';
 import { ensureLaunchResources } from './bootstrap/launch-resources.js';
 
 import { createDb } from './db/index.js';
+import { verifySchemaIsCurrent } from './db/schema-drift.js';
 import type { Db, DbClaims } from './db/types.js';
 import {
   createControlChannel,
@@ -200,6 +201,24 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
           : {}),
       })
     : undefined;
+  /**
+   * THE FIRST THING THIS NODE ASKS ITS DATABASE, AND IT ASKS IT BEFORE WRITING.
+   *
+   * The schema the handlers were COMPILED against must be the schema they are
+   * about to query. `verifyDeliveryPrincipal` below is the same species of boot
+   * assertion, but this one deliberately runs EARLIER than that — earlier than
+   * `ensureLaunchResources`, which seeds spaces and projects, and earlier than
+   * the node claim. Both of those WRITE. Seeding rows through a schema this
+   * function is about to reject is how a drifted node leaves evidence behind
+   * before refusing, and the first draft of this guard did exactly that.
+   *
+   * See `db/schema-drift.ts` for the outage that earned it. The short version:
+   * the node booted clean, `/health` answered 200, 195 of 196 operations
+   * answered 200, and the one read the shell cannot start without failed — so
+   * it presented as an unreachable node, three days after the commit that
+   * actually broke it.
+   */
+  if (config.databaseUrl) await verifySchemaIsCurrent({ connectionString: config.databaseUrl });
   const dataDir = config.dataDir ?? resolveServerDataDir();
   const fileMaxSizeBytes = config.fileMaxSizeBytes ?? FILE_MAX_SIZE_BYTES_DEFAULT;
   const owner = db ? createLoopbackOwnerResolver(db) : undefined;
