@@ -168,6 +168,7 @@ describe('a session records what it cost, after it records why it ended', () => 
     status: 'running',
     nativeSessionId: 'nat-1',
     agentConfigDir: null,
+    sessionKind: 'agent',
     ...overrides,
   });
 

@@ -1423,6 +1423,31 @@ export class SpawnService {
         { sessionId, status: info.status },
       );
     }
+    // KIND BEFORE TEAMMATE, because the teammate check cannot tell these two
+    // failures apart and answers both with the wrong one.
+    //
+    // Resume is an AGENT verb: it hands a provider its own session id back and
+    // lets it restore the conversation. A `shell` row is a login terminal — no
+    // conversation, no provider, and no `relates_to` edge, because it never had
+    // a Teammate to lose. It therefore fell through to the check below and came
+    // back as "has no linked Teammate — cannot reconstruct its launch", which
+    // reads as a broken agent session and sent at least one operator looking
+    // for the missing edge.
+    //
+    // The UI offers this verb on any ended row (`resumableGate` asks only
+    // whether it has ended), so a terminal killed by a restart shows a Resume
+    // button that can never work — and `retireGhostSessions` writes it an
+    // ended_reason that promises it will. Both of those are worth fixing at
+    // their own sites; this refusal at least names the truth when it is hit.
+    if (info.sessionKind != null && info.sessionKind !== 'agent') {
+      throw new SpawnError(
+        `work session ${sessionId} is a '${info.sessionKind}' session, and resume restores an agent ` +
+          `conversation — there is nothing to restore. Start a new terminal instead; this row is a ` +
+          `record of one that has already ended.`,
+        'conflict',
+        { sessionId },
+      );
+    }
     if (!info.teamMemberId) {
       throw new SpawnError(
         `work session ${sessionId} has no linked Teammate — cannot reconstruct its launch`,

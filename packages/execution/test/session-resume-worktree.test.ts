@@ -87,6 +87,7 @@ describe('resume preserves the worktree it was given (D1) and releases it on exi
     status: 'exited',
     nativeSessionId: 'pre-minted-claude-uuid',
     agentConfigDir: null,
+    sessionKind: 'agent',
   });
 
   function serviceWith(env: NodeJS.ProcessEnv = {}): SpawnService {

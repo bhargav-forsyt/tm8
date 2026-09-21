@@ -474,6 +474,20 @@ export interface WorkSessionResumeInfo {
   nativeSessionId: string | null;
   /** Exact CLAUDE_CONFIG_DIR/CODEX_HOME used for the original run. */
   agentConfigDir: string | null;
+  /**
+   * `work_sessions.session_kind` — 'agent', 'shell' or 'credential'.
+   *
+   * Resume is an AGENT verb: it restores a provider conversation by handing the
+   * provider its own session id back. A `shell` row has no conversation and no
+   * teammate, and a `credential` row is a login flow, so neither can be resumed
+   * in any sense the word carries here.
+   *
+   * Read so `resume()` can say that. Without it the refusal fell through to the
+   * teammate check and came back as "has no linked Teammate — cannot
+   * reconstruct its launch", which describes the implementation and not the
+   * reason: a terminal never HAD a Teammate to lose.
+   */
+  sessionKind: string | null;
 }
 
 export interface ResumeWorkSessionResult {

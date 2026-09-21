@@ -34,6 +34,7 @@
  * `auxPanel`'s docblock names. One screen, one set.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { sessionVerbNotice } from './session-verb-notice';
 import type { EntityId, ExecutionSpawnInput } from '@tm8/contract';
 import { HomePage } from '../home-page';
 import { AuxEntityPanel } from './auxPanel';
@@ -341,14 +342,8 @@ export function HomeView(props: HomeViewProps) {
   );
 
   const notifyActionFailed = useCallback(
-    (_verb: ActionRef, _entityId: string, error: unknown) => {
-      onNotice({
-        id: 'session-terminate-failed',
-        tone: 'error',
-        title: 'Session could not be terminated',
-        body: String((error as { message?: string })?.message ?? error),
-        ttlMs: 6_000,
-      });
+    (verb: ActionRef, _entityId: string, error: unknown) => {
+      onNotice(sessionVerbNotice(verb, error));
     },
     [onNotice],
   );

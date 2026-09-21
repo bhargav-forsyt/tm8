@@ -141,6 +141,7 @@ describe('a resumed session keeps the posture it was launched with', () => {
     status: 'exited',
     nativeSessionId: 'pre-minted-claude-uuid',
     agentConfigDir: null,
+    sessionKind: 'agent',
   };
 
   beforeEach(async () => {

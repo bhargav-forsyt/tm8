@@ -10,6 +10,7 @@
  * the settled result to the store (the direction A1a's DAG correction fixed).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { sessionVerbNotice } from './session-verb-notice';
 import type {
   EntityId,
   EntitySummary,
@@ -250,14 +251,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
      paraphrase, because paraphrasing discards the remedy. */
   const notifySessionVerbFailed = useCallback(
     (verb: ActionRef, _entityId: string, error: unknown) => {
-      const resumed = verb === 'resume';
-      props.onNotice({
-        id: resumed ? 'session-resume-failed' : 'session-terminate-failed',
-        tone: 'error',
-        title: resumed ? 'Session could not be resumed' : 'Session could not be terminated',
-        body: String((error as { message?: string })?.message ?? error),
-        ttlMs: resumed ? 8_000 : 6_000,
-      });
+      props.onNotice(sessionVerbNotice(verb, error));
     },
     [props.onNotice],
   );

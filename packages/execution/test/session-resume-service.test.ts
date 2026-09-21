@@ -53,6 +53,7 @@ const RESUME_INFO: WorkSessionResumeInfo = {
   status: 'exited',
   nativeSessionId: 'pre-minted-claude-uuid',
   agentConfigDir: null,
+  sessionKind: 'agent',
 };
 
 // --- codex rollout fixture helpers (same shapes as session-resume.test.ts) ---
@@ -109,6 +110,59 @@ describe('SpawnService.resume — guards and orchestration', () => {
     expect((error as SpawnError).code).toBe(code);
     return error as SpawnError;
   }
+
+  /**
+   * A TERMINAL IS NOT A BROKEN AGENT SESSION.
+   *
+   * Resume is an agent verb: it hands a provider its own session id back so the
+   * conversation can be restored. A `shell` row has no conversation, no
+   * provider and no `relates_to` edge — it never had a Teammate to lose.
+   *
+   * Before this refusal existed, such a row fell through to the teammate check
+   * and came back as "has no linked Teammate — cannot reconstruct its launch".
+   * Lived 2026-09-21: a terminal killed by a server restart, whose stored
+   * `ended_reason` cheerfully said "Nothing was wrong with this session — it can
+   * be resumed to pick up where it left off". The operator, reading a missing
+   * Teammate, went looking for the broken edge. There was none to find.
+   */
+  it('refuses a shell session by its kind, not by the teammate it never had', async () => {
+    graph.resumeInfo = {
+      ...RESUME_INFO,
+      sessionKind: 'shell',
+      // Exactly as the row looks: a terminal carries no agent facts at all.
+      teamMemberId: null,
+      agentTool: null,
+      model: null,
+      nativeSessionId: null,
+      status: 'failed',
+    };
+
+    const error = await expectRefusal(
+      serviceWith().resume(AUTH, { sessionId: SESSION_ID }),
+      'conflict',
+    );
+
+    expect(error.message).toContain("is a 'shell' session");
+    // The sentence that was actually misleading must be gone.
+    expect(error.message).not.toContain('no linked Teammate');
+    // And the reader is told what to do instead of what is absent.
+    expect(error.message).toContain('Start a new terminal');
+    // A refused resume must not touch the row, kind-refusal included.
+    expect(graph.resumes).toHaveLength(0);
+  });
+
+  it('still refuses an AGENT session that has lost its teammate edge', async () => {
+    // The kind check must not swallow the case it was inserted in front of.
+    graph.resumeInfo = { ...RESUME_INFO, sessionKind: 'agent', teamMemberId: null };
+
+    const error = await expectRefusal(
+      serviceWith().resume(AUTH, { sessionId: SESSION_ID }),
+      'invalid_input',
+    );
+
+    expect(error.message).toContain('no linked Teammate');
+    expect(graph.resumes).toHaveLength(0);
+  });
 
   it('refuses a session that is not in a terminal status', async () => {
     graph.resumeInfo = { ...RESUME_INFO, status: 'running' };
