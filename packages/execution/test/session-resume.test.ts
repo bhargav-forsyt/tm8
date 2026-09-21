@@ -167,6 +167,100 @@ describe('resolveCodexNativeSessionId', () => {
     ).resolves.toBe('rollout-new');
   });
 
+  /**
+   * CODEX MOVES A ROLLOUT AS IT AGES, AND THE SCAN HAS TO FOLLOW IT.
+   *
+   * Only `sessions` was walked. Codex archives older rollouts into
+   * `archived_sessions`, so a conversation sitting intact on disk became
+   * permanently unresumable the moment Codex tidied it away — and the refusal
+   * said "no Codex rollout under ~/.codex/sessions could be proven to belong
+   * to session …", which was true about where it looked and false about what
+   * existed.
+   *
+   * Measured on one node 2026-09-21: two sessions refused exactly this way,
+   * both with their launch rollout under `archived_sessions`, marker intact
+   * and inside the head window.
+   */
+  it('finds a rollout Codex has archived, not just a live one', async () => {
+    home = await mkdtemp(join(tmpdir(), 'tm8-resume-'));
+    const archived = join(home, '.codex', 'archived_sessions', '2026', '07', '31');
+    await mkdir(archived, { recursive: true });
+    // Nothing at all under `sessions` — the state a tidied Codex home reaches.
+    await writeFile(
+      join(archived, 'old.jsonl'),
+      [meta('rollout-archived', '/w', '2026-07-31T09:00:00Z'), userTurn(MARKER)].join('\n'),
+    );
+
+    await expect(
+      resolveCodexNativeSessionId({ home, tm8SessionId: SESSION, cwd: '/w' }),
+    ).resolves.toBe('rollout-archived');
+  });
+
+  /**
+   * The two directories are ONE candidate pool, ranked by the existing rule
+   * (cwd match, then newest) — an archived rollout is neither privileged nor
+   * penalised for where it sits. A live continuation is newer than the
+   * archived original it continues, so it must still win.
+   */
+  it('ranks live and archived rollouts together, newest continuation winning', async () => {
+    home = await mkdtemp(join(tmpdir(), 'tm8-resume-'));
+    const archived = join(home, '.codex', 'archived_sessions', '2026', '07', '31');
+    const live = join(home, '.codex', 'sessions', '2026', '07', '31');
+    await mkdir(archived, { recursive: true });
+    await mkdir(live, { recursive: true });
+    await writeFile(
+      join(archived, 'old.jsonl'),
+      [meta('rollout-archived', '/w', '2026-07-31T09:00:00Z'), userTurn(MARKER)].join('\n'),
+    );
+    await writeFile(
+      join(live, 'new.jsonl'),
+      [meta('rollout-live', '/w', '2026-07-31T11:00:00Z'), userTurn(MARKER)].join('\n'),
+    );
+
+    await expect(
+      resolveCodexNativeSessionId({ home, tm8SessionId: SESSION, cwd: '/w' }),
+    ).resolves.toBe('rollout-live');
+  });
+
+  /**
+   * A fresh CODEX_HOME has no `archived_sessions` until Codex first archives
+   * something. Returning on that missing directory is what would make the
+   * absence of one root hide the contents of the other.
+   */
+  it('still reads sessions when archived_sessions does not exist', async () => {
+    home = await mkdtemp(join(tmpdir(), 'tm8-resume-'));
+    const live = join(home, '.codex', 'sessions', '2026', '07', '31');
+    await mkdir(live, { recursive: true });
+    await writeFile(
+      join(live, 'only.jsonl'),
+      [meta('rollout-live', '/w', '2026-07-31T11:00:00Z'), userTurn(MARKER)].join('\n'),
+    );
+
+    await expect(
+      resolveCodexNativeSessionId({ home, tm8SessionId: SESSION, cwd: '/w' }),
+    ).resolves.toBe('rollout-live');
+  });
+
+  /**
+   * Ownership still comes only from a USER turn. Widening the search must not
+   * widen the proof: an archived rollout that merely MENTIONS the id in tool
+   * output is not ours, and treating it as ours would resume the wrong
+   * conversation — the exact failure the fail-closed design exists to prevent.
+   */
+  it('does not accept an archived rollout that only mentions the id in tool output', async () => {
+    home = await mkdtemp(join(tmpdir(), 'tm8-resume-'));
+    const archived = join(home, '.codex', 'archived_sessions', '2026', '07', '31');
+    await mkdir(archived, { recursive: true });
+    await writeFile(
+      join(archived, 'other.jsonl'),
+      [meta('rollout-other', '/w', '2026-07-31T12:00:00Z'), toolOutput(MARKER)].join('\n'),
+    );
+
+    await expect(
+      resolveCodexNativeSessionId({ home, tm8SessionId: SESSION, cwd: '/w' }),
+    ).resolves.toBeNull();
+  });
+
   it('fails closed: no sessions dir, or no provable owner, is null', async () => {
     home = await mkdtemp(join(tmpdir(), 'tm8-resume-'));
     await expect(
