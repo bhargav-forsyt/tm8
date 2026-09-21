@@ -75,6 +75,41 @@ describe('the boot card names the failure it actually got', () => {
     expect(screen.queryByText(/clears itself the moment the node answers/)).toBeNull();
   });
 
+  /**
+   * The second lie of the same shape, found the hard way on 2026-09-21.
+   *
+   * A stored menu payload still seated a view ref that a migration had removed,
+   * so `spaces.settings` could not parse its own read. The node was up, every
+   * other request answered 200, and this card said it was unreachable and
+   * would heal itself. It never could: the next read returns the same row.
+   */
+  it('states a schema drift as a drift, and names the remedy instead of promising a retry', async () => {
+    render(
+      <GateApp
+        seam={seamRefusing(
+          new CollabError(
+            'invariant_violation',
+            'stored Space settings for space s1 violate the frozen contract at menu.groups.4.items.0.ref' +
+              ' — the database has drifted from @tm8/contract',
+          ),
+        )}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/This node’s database and build disagree/)).toBeTruthy(),
+    );
+    // The field that actually failed reaches the reader. Without it this card
+    // is a shrug, and the operator has nothing to grep for.
+    expect(screen.getByText(/menu\.groups\.4\.items\.0\.ref/)).toBeTruthy();
+    // The remedy, because it is off-surface and nearly always the same one.
+    expect(screen.getByText(/pending migration is the usual cause/)).toBeTruthy();
+    // And neither of the two headlines that would send the reader somewhere useless.
+    expect(screen.queryByText(/Can’t reach the tm8 node/)).toBeNull();
+    expect(screen.queryByText(/clears itself the moment the node answers/)).toBeNull();
+    expect(screen.queryByText(/The node refused this Space/)).toBeNull();
+  });
+
   it('still calls an unreachable node unreachable', async () => {
     render(
       <GateApp

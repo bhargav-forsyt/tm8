@@ -2679,6 +2679,33 @@ export function GateApp(props: GateAppProps = {}) {
                 <div>The workspace is empty because the read was refused — not because there is nothing in it.</div>
                 <div>Waiting will not clear this. Open a different Space above, or ask a Space admin for access to this one.</div>
               </div>
+            ) : data.bootErrorCode === 'invariant_violation' ? (
+              /* THE SECOND ANSWER THAT MUST NOT WEAR THE OUTAGE'S HEADLINE,
+                 for the same reason `forbidden` above must not. The node
+                 answered, and what it answered is that a row it read does not
+                 satisfy the frozen contract. Retrying re-reads the same row and
+                 fails identically; the boot loop will do that forever.
+
+                 Lived, 2026-09-21: a stored menu payload still seated a view
+                 ref that a migration had removed, the node returned
+                 `upstream_unavailable`, and this card told the operator the
+                 node was unreachable and would heal itself. The node was up the
+                 whole time and every other request answered 200. The server no
+                 longer sends `upstream_unavailable` for this (see
+                 `spaceSettingsDrift`), and this branch is the other half: a
+                 code that means "the database and the build disagree" deserves
+                 a sentence that says so.
+
+                 The remedy is named because it is nearly always the same one,
+                 and it is not a thing the reader can do from this screen — so
+                 unlike the `forbidden` card, this one points OFF the surface
+                 rather than at the tab bar above it. */
+              <div className="shell-boot" role="alert">
+                <strong>This node’s database and build disagree.</strong>
+                <div>{data.bootError}</div>
+                <div>The workspace is empty because what was read could not be trusted — not because there is nothing in it.</div>
+                <div>Waiting will not clear this. A pending migration is the usual cause: run <code>db/migrate.mjs up</code> against this node, or roll the build back to match its schema.</div>
+              </div>
             ) : (
               <div className="shell-boot" role="alert">
                 <strong>Can’t reach the tm8 node.</strong>

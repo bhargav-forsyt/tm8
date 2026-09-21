@@ -502,6 +502,99 @@ describe('W2.G01 identity and Spaces handler seam', () => {
     });
   });
 
+  /**
+   * A ROW THE CONTRACT REFUSES IS NOT AN OUTAGE.
+   *
+   * Lived on a prod node, 2026-09-21. Migration 186 removed the `codebrain`
+   * view ref from the contract; the node's database had not been migrated, so a
+   * stored menu payload still seated it. `spaces.settings` could not parse its
+   * own read and answered `upstream_unavailable` — which is in
+   * `RETRYABLE_BY_DEFAULT`, and which the shell renders as "Can't reach the tm8
+   * node … Retrying automatically". The node was up. Every other request
+   * answered 200. The workspace stayed blank and the operator waited on a card
+   * that could never clear, because the next read returns the same row.
+   *
+   * The two things this pins are the two things that cost that investigation
+   * its afternoon: the CODE must not be a retryable transport code, and the
+   * message must NAME THE FIELD. The old one named nothing, and `parsed.error`
+   * was dropped — so no log line, no API response and no card ever contained
+   * the string `codebrain`.
+   */
+  it('calls a contract-violating settings row a drift, not an outage, and names the field', async () => {
+    const db = new FakeDb(async (sql) => {
+      if (sql.includes('from public.members membership')) {
+        return [{ entity_id: MEMBER_ID, role: 'owner' }];
+      }
+      if (sql.includes('from public.spaces s')) {
+        return [{
+          id: SPACE_ID,
+          name: 'G01',
+          description: '',
+          github_repo: null,
+          created_at: '2026-07-26T10:00:00.000Z',
+          member_count: '1',
+          default_channel_id: CHANNEL_ID,
+          default_interaction_profile_id: null,
+          settings_revision: 3,
+        }];
+      }
+      if (sql.includes('from public.members member_row')) {
+        return [{ entity_id: MEMBER_ID, role: 'owner', joined_at: '2026-07-26T10:00:00.000Z' }];
+      }
+      if (sql.includes('from public.entities e') && sql.includes('left join public.members mem')) {
+        return [{
+          id: MEMBER_ID,
+          kind: 'member',
+          space_id: SPACE_ID,
+          member_display_name: 'Owner',
+          member_role: 'owner',
+          team_member_name: null,
+          team_member_avatar: null,
+          team_member_owner_id: null,
+          profile_display_name: 'Owner',
+          profile_avatar: null,
+        }];
+      }
+      if (sql.includes('from public.space_invites')) return [];
+      if (sql.includes('from public.task_axes')) return [];
+      if (sql.includes('from public.task_workflows')) return [];
+      if (sql.includes('from public.space_menu_configs')) {
+        return [{
+          schema_version: 1,
+          revision: 2,
+          payload: {
+            schemaVersion: 1,
+            groups: [
+              { id: 'settings', label: 'Settings', items: [{ type: 'view', ref: 'settings' }] },
+              // The shape of the outage, reproduced: a ref the frozen
+              // `MenuViewRef` union does not name, which is exactly what a
+              // database one migration behind its build still holds.
+              { id: 'codebrain', label: 'CodeBrain', items: [{ type: 'view', ref: 'codebrain' }] },
+            ],
+          },
+        }];
+      }
+      throw new Error(`unexpected settings query: ${sql}`);
+    });
+    const handler = registryFor(db).get('spaces.settings')!;
+
+    const error = await handler(context('spaces.settings', { params: { spaceId: SPACE_ID } })).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(CollabError);
+    const collab = error as CollabError;
+    // NOT `upstream_unavailable`: that code is retryable by default and means
+    // the node did not answer. This node answered, correctly, and will answer
+    // identically forever.
+    expect(collab.code).toBe('invariant_violation');
+    // The field the reader has to go and fix. Without this the card is a shrug.
+    expect(collab.message).toMatch(/menu/);
+    // And it must not repeat the promise that sent the last reader off to wait.
+    expect(collab.message).toMatch(/retrying will not clear it/i);
+  });
+
   it('returns task-axis mutations as the frozen TaskAxis DTO and binds the route Space', async () => {
     const db = new FakeDb(async () => [], async (fn, args) => {
       expect(fn).toBe('w2_update_task_axis');

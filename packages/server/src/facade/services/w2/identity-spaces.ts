@@ -435,6 +435,59 @@ async function loadTaskAxes(q: Querier, spaceId: string): Promise<TaskAxis[]> {
   return rows.map(toTaskAxis);
 }
 
+/**
+ * `spaces.settings` read a row the frozen contract does not accept.
+ *
+ * TWO THINGS THIS FIXES, BOTH LEARNED FROM ONE OUTAGE (2026-09-21).
+ *
+ * 1. THE CODE. This used to throw `upstream_unavailable`, which
+ *    `RETRYABLE_BY_DEFAULT` marks retryable and which `useGateData` documents,
+ *    in as many words, as "the node not answering — transient, nothing to do
+ *    but wait". None of that is true here: the node answered, it answered
+ *    correctly, and it will answer identically forever. The shell then painted
+ *    "Can't reach the tm8 node … Retrying automatically — this clears itself
+ *    the moment the node answers" over a permanent data defect, and the reader
+ *    waited on a card that could never clear. `invariant_violation` is the
+ *    honest code — the same verdict `EntityKindDriftError` and
+ *    `WorkStatusDriftError` already reach for on this exact class of drift —
+ *    and it is not in the retryable set.
+ *
+ * 2. THE DETAIL. The old message named no field, and `parsed.error` was
+ *    dropped on the floor. A menu row seating a view ref that a later
+ *    migration had removed took a whole workspace down, and NOTHING — not the
+ *    API, not the UI, not the server log — ever said which field or which
+ *    value. The offending paths ride in the message, because the operator
+ *    reading the card is the person who has to fix the row; the full issue
+ *    list goes to the log, because it is too long for a card and too useful to
+ *    discard.
+ *
+ * The message follows the drift errors' house phrasing on purpose: an operator
+ * who has seen one of those should recognise this instantly as the same kind
+ * of fault, in a different table.
+ */
+function spaceSettingsDrift(spaceId: string, error: { issues: readonly { path: readonly (string | number)[]; message: string }[] }): CollabError {
+  const paths = error.issues.map((issue) => issue.path.join('.') || '(root)');
+  // Deduplicated and capped: one field failing three refinements is one field
+  // to the reader, and a card is not a place to print forty of them.
+  const unique = [...new Set(paths)];
+  const shown = unique.slice(0, 5);
+  const suffix = unique.length > shown.length ? ` (+${unique.length - shown.length} more)` : '';
+  console.error(JSON.stringify({
+    component: 'w2-spaces',
+    level: 'error',
+    event: 'stored Space settings violate the frozen contract',
+    spaceId,
+    issues: error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+  }));
+  return new CollabError(
+    'invariant_violation',
+    `stored Space settings for space ${spaceId} violate the frozen contract at ` +
+      `${shown.join(', ')}${suffix} — the database has drifted from @tm8/contract. ` +
+      `This is a migration that has not been applied, or one the contract did not follow; ` +
+      `retrying will not clear it.`,
+  );
+}
+
 function readCursorPair(cursor: string, label: string): [string | number, string] {
   const { k } = decodeCursor(cursor);
   if (k.length !== 2 || !UUID_RE.test(String(k[1]))) {
@@ -523,7 +576,7 @@ export class W2IdentitySpacesService {
       };
       const parsed = SpaceSettingsViewSchema.safeParse(settings);
       if (!parsed.success) {
-        throw new CollabError('upstream_unavailable', 'stored Space settings violate the frozen contract');
+        throw spaceSettingsDrift(spaceId, parsed.error);
       }
       return parsed.data;
     });
