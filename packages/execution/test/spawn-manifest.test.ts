@@ -785,6 +785,47 @@ describe('composeEnv', () => {
     expect('TM8_JOURNAL_PATH' in env).toBe(false);
   });
 
+  describe('CLAUDE_CODE_AUTO_COMPACT_WINDOW — removed, and stays removed', () => {
+    // tm8 used to pin every claude-code launch to a 200k auto-compaction
+    // window. That knob is gone: the harness's own default now decides where
+    // a session compacts, and no tm8 code names the variable. These pin both
+    // halves of "gone" — the launch never sets it, and composeEnv's allowlist
+    // never lets the server process's own value leak into a child.
+    const withLaunch = (overrides: Partial<Parameters<typeof resolveLaunchConfig>[0]>, member = {}) => {
+      const launch = resolveLaunchConfig({ ...base, ...overrides }, context(member), {});
+      return composeManifest({
+        sessionId: 'sess-compact',
+        request: { ...base, ...overrides },
+        context: context(member),
+        launch,
+        workdir: { mode: 'project', path: '/tmp/tm8-fixture' },
+        command: buildAgentCommand(launch, {}),
+        baseUrl: 'http://127.0.0.1:4610',
+      });
+    };
+
+    it('is ABSENT from a claude-code launch environment', () => {
+      const m = withLaunch({});
+      expect(m.launch.tool).toBe('claude-code');
+      expect('CLAUDE_CODE_AUTO_COMPACT_WINDOW' in composeEnv(m, '/tmp/m.json', 'http://x', {})).toBe(false);
+    });
+
+    it('is ABSENT from a codex launch environment', () => {
+      const m = withLaunch({}, { model: 'gpt-5.6-sol', agentTool: 'codex' });
+      expect(m.launch.tool).toBe('codex');
+      expect('CLAUDE_CODE_AUTO_COMPACT_WINDOW' in composeEnv(m, '/tmp/m.json', 'http://x', {})).toBe(false);
+    });
+
+    it('never inherits the variable from the server process', () => {
+      for (const member of [{}, { model: 'gpt-5.6-sol', agentTool: 'codex' }]) {
+        const env = composeEnv(withLaunch({}, member), '/tmp/m.json', 'http://x', {
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500000',
+        });
+        expect('CLAUDE_CODE_AUTO_COMPACT_WINDOW' in env).toBe(false);
+      }
+    });
+  });
+
   it('uses only the explicitly minted session credential and never inherits one', () => {
     const inherited = composeEnv(manifest, '/tmp/m.json', 'http://x', {
       TM8_AGENT_TOKEN: 'operator-token-must-not-cross',
