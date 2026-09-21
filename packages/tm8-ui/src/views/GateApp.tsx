@@ -18,6 +18,9 @@ import {
   NoticeHost,
   SpaceSwitcher,
   SpaceTabBar,
+  SpaceTabBarLegacy,
+  topBarVersion,
+  setTopBarVersion,
   groupIdOfTarget,
   isRaillessGroup,
   primaryTargetOfGroup,
@@ -37,7 +40,6 @@ import { UNADDRESSED_HASH, createBrowserTarget, type RouterTarget } from '../rou
 import { forgetSpaceScopedPanels } from '../auth/session-reset';
 import { CommandPalette, type PaletteView } from '../shell/CommandPalette';
 import { CopyLinkControl } from '../share';
-import { UiVersionSwitch } from '../ui-version';
 import { useShellKind } from '../mobile';
 import { MobileShell } from './MobileShell';
 import { isUnbuiltViewRef } from './view-ref-screens';
@@ -133,6 +135,19 @@ const LIVE_COUNT_KIND = 'work_session';
 
 /** The three-panel workspace — the handoff destination entity opens use. */
 const WORKSPACE_TARGET: MenuTarget = { type: 'view', ref: 'workspace' };
+
+/* WHICH TOP BAR THIS DEVICE GETS (R21) — read ONCE, at module scope, and that
+   is deliberate. Both bars mount at the top of the tree above the router, so
+   swapping them under a live tree would remount every screen below; the flag is
+   therefore a boot-time fact and `setTopBarVersion` reloads. Reading it here
+   rather than in a hook also keeps it out of every render.
+
+   `SpaceTabBarLegacy` is the bar as it stood at origin/main 4790333c, kept
+   verbatim for one release so that "go back" returns the bar that was there
+   rather than a reconstruction of it. See `shell/topbar-version.ts` for why the
+   UI-2.0 switch is NOT this control. */
+const LEGACY_BAR = topBarVersion() === 'legacy';
+const TopBar = LEGACY_BAR ? SpaceTabBarLegacy : SpaceTabBar;
 /**
  * The screen a viewer with no remembered place lands on (single-home ruling,
  * 2026-08-14): the merged Home page. A viewer's OWN remembered place still
@@ -1844,7 +1859,7 @@ export function GateApp(props: GateAppProps = {}) {
       data-theme={theme === 'dark' ? 'dark' : undefined}
     >
       <div className="shell-root">
-        <SpaceTabBar
+        <TopBar
           /* R1 (2026-08-15): the identity block lives in the TOP ROW now.
              Still ONE control — the single-home rule holds, only the address
              changed; the old read-only server label is not restored. The
@@ -1904,6 +1919,11 @@ export function GateApp(props: GateAppProps = {}) {
              nothing — `copyLinkUrl` would return null and the control would be
              a button that cannot perform, which is the shape this codebase
              refuses everywhere else. */
+          /* Only the LEGACY bar draws this; the current bar hosts copy-link
+             as a row in the account menu. Passing it to both is harmless —
+             `SpaceTabBar` renders `shareSlot` only when it is also hosting the
+             other utilities — but it is passed conditionally anyway, so the
+             intent is readable rather than inferred from another file. */
           shareSlot={
             data.spaceId ? (
               <CopyLinkControl
@@ -1913,16 +1933,6 @@ export function GateApp(props: GateAppProps = {}) {
               />
             ) : undefined
           }
-          /* THE DOOR TO THE ALTERNATE 2.0 UI, and only when this bundle is
-             actually serving the root. `BASE_URL` is `/` in the product build,
-             in dev and in tests, and would be a mount path in any build served
-             under one — so the control appears exactly where it means
-             something. Offering it from a mounted build would be a link out of
-             the alternate UI into itself.
-
-             It refuses with its own reason when the server serves no 2.0
-             bundle, so it needs no further gate here. */
-          uiSwitchSlot={import.meta.env.BASE_URL === '/' ? <UiVersionSwitch /> : undefined}
           accountSlot={
             authAccount && data.viewerActor ? (
               <AccountMenu
@@ -1931,6 +1941,47 @@ export function GateApp(props: GateAppProps = {}) {
                 onThemeChange={setTheme}
                 agentToolsNudge={setupNudge}
                 {...(credentialsPort ? { onOpenAgentTools: () => setSetupOpen(true) } : {})}
+                /* R21 — THE UTILITY GROUP, and it is wired ONLY for the current
+                   bar. On the legacy bar these three verbs are still in the row
+                   itself, and handing them to the menu as well would draw every
+                   one of them twice. One control, one home, in both bars. */
+                {...(LEGACY_BAR
+                  ? {}
+                  : {
+                      onOpenInbox: () => navigateTo({ type: 'view', ref: 'inbox' }),
+                      onOpenPrompts: () => setPromptsOpen(true),
+                      utilityRows: (
+                        <>
+                          {data.spaceId ? (
+                            <CopyLinkControl
+                              className="auth-menu__row auth-menu__row--live"
+                              spaceId={data.spaceId}
+                              target={activeTarget ?? WORKSPACE_TARGET}
+                              openEntity={openOnScreen}
+                            />
+                          ) : null}
+                          {/* THE ROLLBACK, and the only control that performs
+                              it. Deliberately the last row of the group and
+                              deliberately plain: it is an escape hatch for one
+                              release, not a feature. */}
+                          <button
+                            type="button"
+                            className="auth-menu__row auth-menu__row--live"
+                            data-testid="use-previous-topbar"
+                            title="Go back to the previous top bar on this device"
+                            onClick={() => {
+                              setTopBarVersion('legacy');
+                              window.location.reload();
+                            }}
+                          >
+                            <span className="auth-menu__glyph" aria-hidden>
+                              ↩
+                            </span>
+                            Use the previous top bar
+                          </button>
+                        </>
+                      ),
+                    })}
               />
             ) : undefined
           }
@@ -2627,6 +2678,33 @@ export function GateApp(props: GateAppProps = {}) {
                 <div>{data.bootError}</div>
                 <div>The workspace is empty because the read was refused — not because there is nothing in it.</div>
                 <div>Waiting will not clear this. Open a different Space above, or ask a Space admin for access to this one.</div>
+              </div>
+            ) : data.bootErrorCode === 'invariant_violation' ? (
+              /* THE SECOND ANSWER THAT MUST NOT WEAR THE OUTAGE'S HEADLINE,
+                 for the same reason `forbidden` above must not. The node
+                 answered, and what it answered is that a row it read does not
+                 satisfy the frozen contract. Retrying re-reads the same row and
+                 fails identically; the boot loop will do that forever.
+
+                 Lived, 2026-09-21: a stored menu payload still seated a view
+                 ref that a migration had removed, the node returned
+                 `upstream_unavailable`, and this card told the operator the
+                 node was unreachable and would heal itself. The node was up the
+                 whole time and every other request answered 200. The server no
+                 longer sends `upstream_unavailable` for this (see
+                 `spaceSettingsDrift`), and this branch is the other half: a
+                 code that means "the database and the build disagree" deserves
+                 a sentence that says so.
+
+                 The remedy is named because it is nearly always the same one,
+                 and it is not a thing the reader can do from this screen — so
+                 unlike the `forbidden` card, this one points OFF the surface
+                 rather than at the tab bar above it. */
+              <div className="shell-boot" role="alert">
+                <strong>This node’s database and build disagree.</strong>
+                <div>{data.bootError}</div>
+                <div>The workspace is empty because what was read could not be trusted — not because there is nothing in it.</div>
+                <div>Waiting will not clear this. A pending migration is the usual cause: run <code>db/migrate.mjs up</code> against this node, or roll the build back to match its schema.</div>
               </div>
             ) : (
               <div className="shell-boot" role="alert">
