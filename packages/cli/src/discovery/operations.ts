@@ -378,6 +378,152 @@ const ROWS: Record<OperationName, Row> = {
       '`connected` and `stored` are separate answers — a verified GitHub login reports stored=false where its string-shaped store is not present',
     ],
   },
+  'credentials.serviceKeys.status': {
+    cmd: null,
+    sum: 'Read which server-side service keys (TypeSafe, for Ask Jev) this member has stored — human sessions only',
+    authz: 'server',
+    input: 'none',
+    tags: ['credential', 'service-key', 'typesafe', 'jev', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'answers the last four characters of a stored key at most — never the key',
+      'a service key is used by the server for this member alone and is never injected into a spawned session',
+    ],
+  },
+  'credentials.serviceKeys.put': {
+    cmd: null,
+    sum: 'Store or replace this member\'s TypeSafe key for Ask Jev, encrypted at rest — human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'service-key', 'typesafe', 'jev', 'paste', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'the key is sealed with the node credential key before it reaches Postgres and is never echoed back',
+    ],
+  },
+  'credentials.serviceKeys.delete': {
+    cmd: null,
+    sum: 'Remove this member\'s stored TypeSafe key — human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'service-key', 'typesafe', 'jev', 'disconnect', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'idempotent; Ask Jev then falls back to the node key, if the node has one',
+    ],
+  },
+  'credentials.space.list': {
+    cmd: null,
+    sum: 'List a space\'s shared agent credentials (metadata only) — human sessions only',
+    authz: 'server',
+    input: 'none',
+    tags: ['credential', 'space', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'answers the last four characters of a stored key at most — never the key',
+      'any member of the space may list; revoked credentials are not listed',
+    ],
+  },
+  'credentials.space.create': {
+    cmd: null,
+    sum: 'Add a space API key or GitHub token after the vendor accepts it — human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'space', 'paste', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'the vendor is asked first; a key it refuses is never stored',
+      'the key is sealed with the node credential key and never echoed back',
+    ],
+  },
+  'credentials.space.rekey': {
+    cmd: null,
+    sum: 'Replace a space credential\'s key — its creator or a space admin, human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'space', 'rotate', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'the new key is probed first; live sessions keep the old key and the next spawn uses the new one',
+    ],
+  },
+  'credentials.space.setDefault': {
+    cmd: null,
+    sum: 'Make a space credential its provider\'s default — its creator or a space admin, human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'space', 'default', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'the default is what a launch uses when it names the space source without an id',
+    ],
+  },
+  'credentials.space.rename': {
+    cmd: null,
+    sum: 'Rename a space credential — its creator or a space admin, human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'space', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'the label is unique per space and provider',
+    ],
+  },
+  'credentials.space.delete': {
+    cmd: null,
+    sum: 'Delete a space credential and kill every live session using it — its creator or a space admin, human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'space', 'disconnect', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'the row is revoked first; every live session and login terminal on it is then killed, whoever launched it',
+    ],
+  },
+  'credentials.space.policy.get': {
+    cmd: null,
+    sum: 'Read a space\'s credential source policy and the node\'s — human sessions only',
+    authz: 'server',
+    input: 'none',
+    tags: ['credential', 'space', 'policy', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'null means no policy: every source is allowed',
+    ],
+  },
+  'credentials.space.policy.set': {
+    cmd: null,
+    sum: 'Set which credential sources a space allows for one provider — space admin, human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'space', 'policy', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'null removes the policy',
+    ],
+  },
+  'node.credentials.status': {
+    cmd: null,
+    sum: 'Read the node\'s credential fallback per provider — node admin, human sessions only',
+    authz: 'server',
+    input: 'none',
+    tags: ['credential', 'node', 'policy', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'answers whether the node environment carries a key — never the key',
+    ],
+  },
+  'node.credentials.policy.set': {
+    cmd: null,
+    sum: 'Allow or forbid the node credential fallback for one provider — node admin, human sessions only',
+    authz: 'server',
+    input: 'bound',
+    tags: ['credential', 'node', 'policy', 'settings'],
+    reason: 'human_settings_only',
+    notes: [
+      'null removes the policy: node fallback is allowed',
+    ],
+  },
   'serverConnections.list': {
     cmd: ['server', 'list'],
     syn: 'tm8 server list',
@@ -433,11 +579,16 @@ const ROWS: Record<OperationName, Row> = {
   },
   'spaces.update': {
     cmd: ['space', 'update'],
-    syn: 'tm8 space update [<space-id>] [--name <name>] [--description <text-source>] [--github-repo <url|none>] [--mutation-id <id>]',
-    sum: 'Change a Space name, description, or deprecated repository field',
+    syn: 'tm8 space update [<space-id>] [--name <name>] [--description <text-source>] [--github-repo <url|none>] [--session-share none|space] [--session-drive owner|space] [--mutation-id <id>]',
+    sum: 'Change a Space name, description, deprecated repository field, or its session sharing defaults',
     authz: 'space',
     input: 'bound',
-    notes: ['`--github-repo` is deprecated in favour of linked ProjectResources'],
+    tags: ['share', 'terminal', 'defaults', 'permissions', 'visibility'],
+    notes: [
+      '`--github-repo` is deprecated in favour of linked ProjectResources',
+      '`--session-share`/`--session-drive` set the defaults NEW sessions are born with; existing sessions keep the posture they already have',
+      'override one session with `tm8 session share`',
+    ],
   },
   'spaces.navigation': {
     cmd: ['space', 'navigation', 'get'],
@@ -634,8 +785,10 @@ const ROWS: Record<OperationName, Row> = {
     input: 'none',
     tags: ['read', 'show', 'task', 'doc', 'session'],
     notes: [
-      'returns the full entity unbounded — no limit or projection flags exist; for orientation prefer entity context (bounded, cursors)',
+      'json is BOUNDED by default: identity, version, state, content (long strings capped at 1000 chars, named in `truncated`), and edge/child COUNTS instead of connections and hierarchy; `--full` returns the old unbounded envelope',
+      'for relationships, messages, and acceptance ids read `tm8 entity context <entity-id>` (bounded, cursors) — a closeout never needs entity get',
     ],
+    examples: ['tm8 entity get <entity-id> --format json', 'tm8 entity get <entity-id> --format json --full'],
   },
   'entities.create': {
     cmd: ['entity', 'create'],
@@ -792,9 +945,28 @@ const ROWS: Record<OperationName, Row> = {
     tags: ['done', 'finish', 'complete'],
     notes: [
       'it alone checks acceptance criteria and writes completer relationships, activity, and awards',
+      'unticked criteria refuse it (acceptance_criteria_incomplete); tick them first with `tm8 task tick <task-id> <criterion-id>... --expect-version <n>` — ids are in the acceptance section of `tm8 entity context <task-id>`',
       '`task transition <id> done` is refused with invariant_violation / use_complete_command',
     ],
     examples: ['tm8 task complete <task-id> --expect-version <n> --by <actor-id>'],
+  },
+  'entities.commands.tick': {
+    cmd: ['task', 'tick'],
+    syn: 'tm8 task tick <task-id> <criterion-id>... --expect-version <n> [--untick] [--mutation-id <id>]',
+    sum: 'Tick (or --untick) acceptance criteria by id — the write the task complete criteria gate asks for',
+    authz: 'entity',
+    input: 'bound',
+    ver: 'expectedVersion',
+    tags: ['tick', 'untick', 'acceptance', 'criteria', 'criterion', 'checklist', 'check'],
+    notes: [
+      'merges by criterion id on the Server: criteria not named are left as stored, so the whole acceptanceCriteria list is never restated',
+      'an id the task does not carry is refused with the ids it does carry',
+      'ids and the version are in `tm8 entity context <task-id>` (acceptance, acceptanceWrite)',
+    ],
+    examples: [
+      'tm8 task tick <task-id> f1 f2 --expect-version <n>',
+      'tm8 task tick <task-id> f2 --untick --expect-version <n>',
+    ],
   },
   'entities.commands.work': {
     cmd: ['task', 'transition'],
@@ -1085,6 +1257,16 @@ const ROWS: Record<OperationName, Row> = {
     ],
   },
 
+  'skills.equip': { cmd: ['skill', 'equip'], syn: 'tm8 skill equip <skill-id> --teammate <teammate-id>', sum: 'Equip a teammate with a skill', authz: 'entity', input: 'bound' },
+  'skills.unequip': { cmd: ['skill', 'unequip'], syn: 'tm8 skill unequip <skill-id> --teammate <teammate-id>', sum: 'Remove a skill from a teammate', authz: 'entity', input: 'bound' },
+  'skills.create': { cmd: ['skill', 'create'], syn: 'tm8 skill create --root <project-id|home> --name <name> [--provider agents|claude|codex|hermes] [--level project|user] [--description <text>] [--body <text-source>]', sum: 'Write SKILL.md and scan its reference', authz: 'space', input: 'bound' },
+  'skills.edit': { cmd: ['skill', 'edit'], syn: 'tm8 skill edit <skill-id> --expected-version <version> [--content-hash <hash>] [--name <name>] [--description <text>] [--body <text-source>]', sum: 'Edit a writable skill, preserving unknown frontmatter', authz: 'entity', input: 'bound', ver: 'expectedVersion' },
+  'skills.roots': { cmd: null, sum: 'List authorized skill authoring roots', authz: 'space', input: 'none', tags: ['skills'] },
+  'launch.suggest': { cmd: null, sum: 'Ask Jev for model, teammate, memory and skill suggestions for a launch', authz: 'space', input: 'bound', tags: ['jev', 'launch', 'skills', 'memory', 'model'], notes: ['Launch-sheet API; no CLI — Jev is UI-only (design 01a0cb80).'] },
+  'skills.preview': { cmd: null, sum: 'Preview equipped skill metadata for a launch', authz: 'space', input: 'none', tags: ['skills'], notes: ['Read-only launch-sheet API; effective CLI is deferred.'] },
+  'skills.scan': { cmd: ['skill', 'scan'], syn: 'tm8 skill scan [--root <project-id>|--all]', sum: 'Scan authorized filesystem roots into skill references', authz: 'space', input: 'bound' },
+  'skills.list': { cmd: ['skill', 'list'], syn: 'tm8 skill list [--root <root-ref>] [--limit <count>] [--cursor <cursor>]', sum: 'List skill references with cached metadata', authz: 'space', input: 'none' },
+  'skills.show': { cmd: ['skill', 'show'], syn: 'tm8 skill show <skill-id>', sum: 'Read a skill and its current filesystem body', authz: 'entity', input: 'none' },
   // ── projects ─────────────────────────────────────────────────────────────
   'projects.list': {
     cmd: ['project', 'list'],
@@ -1390,7 +1572,7 @@ const ROWS: Record<OperationName, Row> = {
   // ── capability discovery ─────────────────────────────────────────────────
   'actions.list': {
     cmd: ['action', 'list'],
-    syn: 'tm8 action list [--for <entity-id>]',
+    syn: 'tm8 action list [--for <entity-id>] [--all] [--limit <count>] [--cursor <cursor>] [--schema v1|v2]',
     sum: 'Ask what THIS actor may actually do on a target right now',
     authz: 'entity',
     input: 'none',
@@ -1398,6 +1580,10 @@ const ROWS: Record<OperationName, Row> = {
     notes: [
       'static help answers "what can tm8 express?"; this answers "what may I do here now?" — they are different questions',
       'results are bound to an actor, a Space, a target version, and a capabilityEpoch, and go stale in 30 seconds',
+      'with --for, only operations on that entity are listed, most relevant first; --all appends the Space-level and global ones (auth, spaces.create, ...) — the complete authorized inventory',
+      'v2 (tm8.actions.v2): target, capabilityEpoch and actor once, then one [operation, kind, authzTarget, exposure] row per action; id/label/helpRef are derived (action:<op>:<target>, op with dots as spaces, tm8://help/operation/<op>)',
+      'v2 pages: 20 rows by default, --limit 1..100; continue with --cursor <nextCursor>. A cursor is bound to the capabilityEpoch — if capabilities changed, list again without it',
+      'agent sessions get v2 minified by default; a non-agent --format json keeps the v1 objects this release (stderr notice); --schema pins either',
     ],
   },
 
@@ -1427,7 +1613,7 @@ const ROWS: Record<OperationName, Row> = {
   },
   'events.poll': {
     cmd: ['event', 'list'],
-    syn: 'tm8 event list [--space <space-id>] [--after <space-seq>] [--limit <count>]',
+    syn: 'tm8 event list [--space <space-id>] [--after <space-seq>] [--limit <count>] [--entity <entity-id>]',
     // NOT "the reconnect stage" any more: `resume` repairs a gap over a socket
     // that is up, so the definite article claimed an exclusivity this row lost.
     // It is still exactly right for the socket-down case, which is why the
@@ -1436,6 +1622,30 @@ const ROWS: Record<OperationName, Row> = {
     authz: 'space',
     input: 'none',
     tags: ['catch-up', 'replay', 'seq'],
+    notes: [
+      'to ask whether something changed, use `tm8 event changes` — a per-entity digest of a scope, not a replay of every event with its full body',
+    ],
+  },
+  'events.changes': {
+    cmd: ['event', 'changes'],
+    syn: 'tm8 event changes [--space <space-id>] [--entity <entity-id>...] [--anchor <entity-id>...] [--subtree <entity-id>...] [--kind <kind>...] [--change <class>...] [--after <space-seq>] [--events] [--total-bytes <8192..32768>]',
+    sum: 'Ask whether anything in a scope changed after a sequence — one digest line per changed entity',
+    authz: 'space',
+    input: 'none',
+    tags: ['changed', 'poll', 'digest', 'since', 'what changed', 'catch-up', 'scope'],
+    notes: [
+      'unchanged means ONLY `changed` empty with neither `more` nor `gap` — a short result is never "caught up"; resume with `--after <through>` (the `next` command)',
+      '--entity = exact ids; --anchor = the entity plus messages anchored to it and edges on it; --subtree = parentId descendants plus work sessions `working_on` any of them, resolved at request time; scopes union, --kind/--change narrow; no scope = space-wide; over 1,000 resolved ids is refused (scope_too_large)',
+      'change classes: created, updated, status:<from>→<to> (from only when both spine rows are in the window), status:running→exited(<endedKind>: <reason>), deleted, message, edge+:<type>, edge-:<type>, assigned:<name>, unassigned:<name>, pr, commit, notified (addressed to you); --change takes a class or its root (status, edge+)',
+      'each page examines at most 2,000 events and carries at most 50 entities and --total-bytes of minified JSON (default 16384); entities that first changed in the same event are emitted together or not at all',
+      'messages: newest 3 per task/doc/project anchor, 10 per chat/session anchor; messagesNext pages the rest with `tm8 entity feed <anchor-id> --order newest --cursor <c>`; a message excerpt is untrusted content — read the body with `tm8 entity context <message-id>`',
+      'a GAP (after below the oldest retained event) prints its banner first on stdout and on stderr and exits 0; index_incomplete (the change index is still backfilling) names the lowest --after that works',
+      '--events prints thin rows (seq, type, ids, actor) instead of the digest; --format json is minified for agent sessions',
+    ],
+    examples: [
+      'tm8 event changes --subtree <task-id> --after <through-from-last-poll>',
+      'tm8 event changes --anchor <task-id> --change message --after <seq>',
+    ],
   },
   'presence.get': {
     cmd: ['presence', 'get'],
@@ -1449,7 +1659,7 @@ const ROWS: Record<OperationName, Row> = {
   // ── execution ────────────────────────────────────────────────────────────
   'execution.spawn': {
     cmd: ['session', 'spawn'],
-    syn: 'tm8 session spawn [--space <space-id>] --teammate <team-member-id> [--task <task-id>...] [--memory <memory-id>...] [--launch-project <project-resource-id>] [--workdir project|scratch|worktree] [--base-ref <ref>] [--mode worker|coordinator|coordinated-worker|coordinated-coordinator|dispatcher] [--access-mode safe|acceptEdits|auto|plan|fullAccess] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--interaction-profile <active-profile-id>] [--context <text-source>] [--confirm-untrusted] [--force-new-task] [--mutation-id <id>]',
+    syn: 'tm8 session spawn [--space <space-id>] --teammate <team-member-id> [--task <task-id>...] [--memory <memory-id>...] [--launch-project <project-resource-id>] [--workdir project|scratch|worktree] [--base-ref <ref>] [--mode worker|coordinator|coordinated-worker|coordinated-coordinator|dispatcher] [--access-mode safe|acceptEdits|auto|plan|fullAccess] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--credential-source <provider=member|space|node[:<space-credential-id>]>...] [--interaction-profile <active-profile-id>] [--context <text-source>] [--confirm-untrusted] [--force-new-task] [--mutation-id <id>]',
     sum: 'Start a server-hosted work session for a Teammate',
     authz: 'space',
     input: 'bound',
@@ -1461,6 +1671,7 @@ const ROWS: Record<OperationName, Row> = {
       '`--memory` appends memory entities to the persona’s injected working set for THIS session only; nothing is written to the graph',
       'memories a `--task` task `remembers` are auto-injected after the persona’s working set (D9)',
       'omit `--access-mode` and a session spawned BY a session inherits its spawner’s posture',
+      '`--credential-source anthropic=space` launches on the space default; `anthropic=space:<id>` pins one space credential; omit it and a child inherits its spawner’s exact credential',
       'worktree provisions an isolated checkout per session (base ref via --base-ref); merged/abandoned lanes are reconciled server-side',
     ],
   },
@@ -1562,6 +1773,23 @@ const ROWS: Record<OperationName, Row> = {
     tags: ['terminal', 'pty', 'watch', 'drive'],
     notes: ['`--format json` implies `--grant-only`: interactive terminal bytes are not DTO output'],
   },
+  'execution.sessions.share': {
+    cmd: ['session', 'share'],
+    syn: 'tm8 session share <work-session-id> [--share none|space] [--drive owner|space] [--expect-version <n>] [--mutation-id <id>]',
+    sum: 'Set who may WATCH a work session terminal and who may TYPE into it — two independent dials',
+    authz: 'session',
+    input: 'bound',
+    side: 'durable',
+    ver: 'expectedVersion',
+    tags: ['share', 'terminal', 'pty', 'permissions', 'visibility', 'watch', 'drive'],
+    notes: [
+      'the two dials are independent: opening a session to the space never implies handing anyone the keyboard',
+      'an omitted flag is LEFT ALONE, not defaulted — sending only `--drive` does not change who may watch',
+      'the session owner, an actor who may act as the owner, and a space admin may set this; nobody else',
+      'narrowing REVOKES outstanding stream grants for other identities, so un-sharing takes effect at once rather than when the last 30s capability expires',
+      'a new session inherits the space defaults (`tm8 space update --session-share/--session-drive`); this command overrides one session',
+    ],
+  },
   'execution.journal': {
     cmd: ['session', 'journal'],
     syn: 'tm8 session journal <work-session-id> [--limit <count>] [--before <line-index>]',
@@ -1635,7 +1863,7 @@ const ROWS: Record<OperationName, Row> = {
   },
   'execution.gitCommit': {
     cmd: null,
-    sum: 'Stage (optionally) and commit exactly what is staged in a session worktree',
+    sum: 'Commit exactly what is staged in a session worktree; a path-scoped commit refuses when other paths are already staged',
     authz: 'entity',
     input: 'bound',
     side: 'execution',
@@ -1668,6 +1896,15 @@ const ROWS: Record<OperationName, Row> = {
     input: 'bound',
     side: 'execution',
     tags: ['git', 'branch', 'create', 'rename', 'delete', 'worktree'],
+    reason: 'cli_runs_git_locally',
+  },
+  'execution.gitStage': {
+    cmd: null,
+    sum: 'Stage or unstage paths in a session worktree without committing; unstage is a path-scoped mixed reset that moves no working-tree bytes',
+    authz: 'entity',
+    input: 'bound',
+    side: 'execution',
+    tags: ['git', 'stage', 'unstage', 'index', 'reset', 'worktree'],
     reason: 'cli_runs_git_locally',
   },
   'execution.gitStash': {
@@ -1858,15 +2095,19 @@ const ROWS: Record<OperationName, Row> = {
   },
   'entities.context': {
     cmd: ['entity', 'context'],
-    syn: 'tm8 entity context <entity-id> [--sections <summary|hierarchy|connections|messages|activity|actions>[,...]] [--total-bytes <1024..32768>] [--section-bytes <512..8192>]',
+    syn: 'tm8 entity context <entity-id> [--schema v1|v2] [--sections <summary|hierarchy|connections|messages|activity|actions>[,...]] [--total-bytes <1024..32768>] [--section-bytes <512..8192>] [--offset <bytes>] [--actions-schema v1|v2] [--cursor <c>] [--edge-type <type>]',
     sum: 'Read a bounded snapshot of an entity with its parents, children, edges, recent messages, and available actions',
     authz: 'entity',
     input: 'none',
     tags: ['snapshot', 'around', 'brief', 'orient'],
     notes: [
-      'exactly three flags bind — --sections, --total-bytes, --section-bytes (EntityContextQuery); --depth/--messages/--children/--edge-type never bound and are gone',
+      'exactly eight flags bind — --schema, --sections, --total-bytes, --section-bytes, --offset, --actions-schema, --cursor, --edge-type (EntityContextQuery); --depth/--messages/--children never bound and are gone',
+      'v2 only: --cursor continues ONE paged section (--sections hierarchy|blockers|connections|messages) and is copied verbatim from an omitted[] expand; --edge-type filters --sections connections to one edge type',
+      'actions under v2 (agent default) are tm8.actions.v2 rows; cursors.actions continues in `tm8 action list --for <id> --cursor <c>`',
+      '--schema v2 returns tm8.entity-context.v2 (compact rows, full acceptance text, omitted[]/notLoaded[]/errors[] with runnable expands); v2 sections are assignment (alias summary), hierarchy, blockers, connections, messages, actions; v2 refuses --section-bytes. Without --schema the read is v2 (text, and agent-class --format json); --section-bytes or --sections activity alone select v1 (no body) with a stderr note; an unknown --edge-type is invalid_input listing the valid types',
+      'v2 body ceiling: a body over ~15 KB arrives complete:false with an expand `--sections assignment --offset <N>` (UTF-8 bytes, server-filled; run it verbatim). A --total-bytes under the never-drop core is 422 context_budget_too_small (exit 2) and prints `next`, the retry rounded up to the KB',
       'bounded by design: defaults are 16 KiB total and 4 KiB per section (service source); hard caps 32 KiB and 8 KiB (frozen schema)',
-      'returned cursors.messages/.activity continue in `entity feed --cursor` (--order newest); cursors.children has no consumer in this grammar',
+      'returned cursors.messages/.activity continue in `entity feed --cursor` (--order newest); cursors.children continues in `entity children --cursor`',
       '--sections summary,actions is a precise pre-mutation capability + version check for a few hundred tokens',
     ],
     examples: ['tm8 entity context <entity-id> --sections summary,actions'],
@@ -2417,6 +2658,7 @@ const NOUN_BY_FAMILY: Record<string, string> = {
   commands: 'undo',
   search: 'search',
   projects: 'project',
+  skills: 'skill',
   files: 'file',
   bridge: 'bridge',
   inbox: 'inbox',
@@ -2444,6 +2686,13 @@ const NOUN_BY_FAMILY: Record<string, string> = {
   // noun groups them in `tm8 help`, so they are DISCOVERABLE rather than
   // hidden. Someone asking "can tm8 manage my vendor logins?" gets an answer.
   credentials: 'credential',
+  // `node.credentials.*` (SC-3, node admin, `cmd: null`) groups with the
+  // credential rows it bounds; the conformance generator says the same.
+  node: 'credential',
+  // `launch.suggest` groups under `session`: it advises the launch of one, and
+  // it is `cmd: null` (Jev is UI-only, design 01a0cb80), so a separate noun
+  // would name no command. `tools/conformance`'s generator holds the same map.
+  launch: 'session',
 };
 
 function nounFor(operation: OperationName): string {
@@ -2505,7 +2754,21 @@ export const CATALOG_DIGEST =
   // containers.* rows). RECOMPUTED from JSON.stringify(OPERATIONS), never
   // adjusted from either side of the merge — neither branch's value is
   // correct once both landed.
-  'sha256:3b2b97fc54418ed191f5bd2dbaf48f5176d0fa404b4d6ee397546cf3a1eedafa';
+  // Re-measured on the MERGED tree (2026-09-19): it carries BOTH
+  // execution.sessions.share (187) and execution.gitStage, so the digest is a
+  // THIRD value — neither 186723c6.. nor 10d20505.. is correct here. RECOMPUTED
+  // from `JSON.stringify(OPERATIONS)` on this tree and read out of the failing
+  // run, then written into the regenerated conformance manifest.
+  // Re-measured on the MERGED tree (2026-09-23): filesystem skills add
+  // skills.scan/list/show/preview on top of main's 199 rows. RECOMPUTED from
+  // `JSON.stringify(OPERATIONS)` and matched to the regenerated manifest.
+  // Re-measured 2026-09-23 with F4 (#648): skills.roots/create/edit/equip/unequip.
+  // Re-measured 2026-09-23, Jev lane F: + launch.suggest. Matched to the
+  // regenerated conformance manifest's catalogDigest.
+  // Re-measured 2026-09-23, SC-3: + credentials.space.* and node.credentials.*.
+  // Read out of the failing digest test and matched to the regenerated manifest.
+  // Re-measured (bug 01a0d2f1): + entities.commands.tick; matched to the regenerated manifest.
+  'sha256:1b1faa046bec1bba7a64797f80759ae65fb0f5d9d42313e237c80019287f1760';
 
 export const GRAMMAR_VERSION = '2';
 
@@ -2863,7 +3126,7 @@ const COMMAND_ALIASES = new Map<string, {
   }],
   ['chat show', {
     path: ['chat', 'show'],
-    syntax: 'tm8 chat show <chat-id> [--sections <summary|hierarchy|connections|messages|activity|actions>[,...]] [--total-bytes <1024..32768>] [--section-bytes <512..8192>]',
+    syntax: 'tm8 chat show <chat-id> [--sections <summary|hierarchy|connections|messages|activity|actions>[,...]] [--total-bytes <1024..32768>] [--section-bytes <512..8192>] [--actions-schema v1|v2]',
     summary: 'One chat in bounded context — configuration, recent transcript, and what it is about',
     notes: [
       'sugar over entities.context; bounded by design, so a long transcript is excerpted rather than paged here',

@@ -67,10 +67,17 @@ import { CollabError } from '@tm8/contract';
 import type {
   CredentialConnectionView,
   CredentialProviderName,
+  CredentialRoutingView,
   CredentialsDeleteResult,
   CredentialsStatusView,
 } from '@tm8/contract';
-import { CREDENTIAL_PROVIDERS, type Logger } from '@tm8/execution';
+import {
+  CREDENTIAL_PROVIDERS,
+  apiKeyBackendAgentTool,
+  apiKeyBackendNativeProvider,
+  isApiKeyCredentialProvider,
+  type Logger,
+} from '@tm8/execution';
 
 import type { Db } from '../../../db/types.js';
 import {
@@ -78,6 +85,10 @@ import {
   credentialHomeDir,
 } from '../../../credentials/agent-credential-home.js';
 import { AGENT_TOOLS_BY_CREDENTIAL_PROVIDER } from '../../../credentials/agent-credential-injection.js';
+import {
+  containmentFailureOf,
+  type AgentSessionContainmentPort,
+} from '../../../credentials/agent-session-containment.js';
 import type { CredentialPrincipal } from './credential-sessions.js';
 import {
   measureCredentialBinary,
@@ -87,12 +98,12 @@ import {
 /**
  * Every provider a card is rendered for, in display order.
  *
- * This is the SESSION table's six-value CHECK, not either credential store's
- * CHECK. Five file-shaped providers are indexed in
- * `account_agent_credentials`; GitHub is intentionally absent from that table
- * because its string-shaped token lives in `account_git_credentials`. A member
- * can still run all six login flows here, so deriving the cards from either
- * storage table would describe an implementation shape rather than the feature.
+ * This is the SESSION table's provider CHECK, not either credential store's
+ * CHECK. The file-shaped providers are indexed in `account_agent_credentials`;
+ * GitHub is intentionally absent from that table because its string-shaped
+ * token lives in `account_git_credentials`. A member can still run every login
+ * flow here, so deriving the cards from either storage table would describe an
+ * implementation shape rather than the feature.
  * `CREDENTIAL_PROVIDERS` is also the login table's order, so the two surfaces
  * cannot drift independently.
  */
@@ -107,6 +118,29 @@ export const CREDENTIAL_STATUS_PROVIDERS: readonly CredentialProviderName[] =
  */
 function agentToolsForProvider(provider: CredentialProviderName): readonly string[] | null {
   return provider === 'github' ? null : AGENT_TOOLS_BY_CREDENTIAL_PROVIDER[provider];
+}
+
+/**
+ * What connecting this provider does to the member's agent sessions.
+ *
+ * Only an API-key backend has anything to say: the kimi card states that it
+ * serves the Kimi models on `claude-code` and that every other `claude-code`
+ * model stays on Anthropic, whether or not the key is connected yet (`active`
+ * says which). A native provider's card carries no routing — routing is per
+ * model (`apiKeyBackendForModel`), so connecting Kimi never takes a session
+ * away from the Anthropic login, and there is nothing to warn about there.
+ */
+function routingFor(
+  provider: CredentialProviderName,
+  activeProviders: ReadonlySet<CredentialProviderName>,
+): CredentialRoutingView | null {
+  if (!isApiKeyCredentialProvider(provider)) return null;
+  return {
+    agentTool: apiKeyBackendAgentTool(provider),
+    role: 'backend',
+    counterpart: apiKeyBackendNativeProvider(provider),
+    active: activeProviders.has(provider),
+  };
 }
 
 /** Statuses that mean a work session may still be holding a credential. */
@@ -150,6 +184,8 @@ export interface CredentialTerminalPort {
 export interface W2CredentialCatalogServiceOptions {
   db: Db;
   terminals: CredentialTerminalPort;
+  /** Kills a live agent session on the disconnected credential and records its ending. */
+  agentSessions: AgentSessionContainmentPort;
   /** Node data root; the per-identity credential home hangs off it. */
   dataDir: string;
   logger?: Logger;
@@ -181,6 +217,7 @@ export interface W2CredentialCatalogServiceOptions {
 export class W2CredentialCatalogService {
   private readonly db: Db;
   private readonly terminals: CredentialTerminalPort;
+  private readonly agentSessions: AgentSessionContainmentPort;
   private readonly dataDir: string;
   private readonly logger: Logger | undefined;
   private readonly env: NodeJS.ProcessEnv;
@@ -195,6 +232,7 @@ export class W2CredentialCatalogService {
   constructor(options: W2CredentialCatalogServiceOptions) {
     this.db = options.db;
     this.terminals = options.terminals;
+    this.agentSessions = options.agentSessions;
     this.dataDir = options.dataDir;
     this.logger = options.logger;
     this.env = options.env ?? process.env;
@@ -208,7 +246,8 @@ export class W2CredentialCatalogService {
   // -------------------------------------------------------------------------
 
   /**
-   * The merged view. Always all six providers, in a fixed order.
+   * The merged view. Always every provider in `CREDENTIAL_PROVIDERS`, in a
+   * fixed order.
    *
    * A provider with no row is `connected: false` with every other field null —
    * an ABSENT row is the encoding of "not connected" (PR2 is deliberate about
@@ -242,6 +281,10 @@ export class W2CredentialCatalogService {
         status: row.status as CredentialConnectionView['status'],
         connectedAt: toIso(row.connected_at),
         lastVerifiedAt: toIso(row.last_verified_at),
+        // Overwritten below, once every row is known: a provider's routing
+        // depends on which OTHER providers are connected, so it cannot be
+        // decided while the rows are still being read.
+        routing: null,
       });
     }
 
@@ -258,14 +301,26 @@ export class W2CredentialCatalogService {
         status: 'active',
         connectedAt: null,
         lastVerifiedAt: null,
+        routing: null,
       });
     }
+
+    // Read from the STORED rows rather than from the cards below, because the
+    // cards have had `withMeasuredAvailability` applied and that can turn
+    // `connected` false for a missing binary. Spawn-time resolution asks the
+    // database, not the node, so the routing answer must too.
+    const activeProviders = new Set<CredentialProviderName>(
+      [...byProvider.values()].filter((view) => view.connected).map((view) => view.provider),
+    );
 
     return {
       providers: CREDENTIAL_STATUS_PROVIDERS.map((provider) =>
         this.withMeasuredAvailability(
           provider,
-          byProvider.get(provider) ?? notConnected(provider),
+          {
+            ...(byProvider.get(provider) ?? notConnected(provider)),
+            routing: routingFor(provider, activeProviders),
+          },
           principal.identityId,
         ),
       ),
@@ -498,9 +553,11 @@ export class W2CredentialCatalogService {
     try {
       rows = await this.db.query<OpenCredentialSessionRow>(
         principal.claims,
+        // A login INTO a space credential (206) is not the member's own
+        // credential: disconnecting theirs must not kill it.
         `select work_session_id
            from public.credential_sessions
-          where provider = $1 and finished_at is null`,
+          where provider = $1 and finished_at is null and space_credential_id is null`,
         [provider],
       );
     } catch (error) {
@@ -555,7 +612,9 @@ export class W2CredentialCatalogService {
    *     credential.
    *
    * `session_kind = 'agent'` keeps this from killing login terminals a second
-   * time, which step 2 has already handled.
+   * time, which step 2 has already handled. A session recorded against a
+   * space credential for this provider is left alone: it never held the
+   * member's own credential.
    */
   private async terminateAgentSessions(
     provider: CredentialProviderName,
@@ -578,8 +637,15 @@ export class W2CredentialCatalogService {
           where ws.session_kind = 'agent'
             and ws.status = any($1)
             and coalesce(m.identity_id, owner.identity_id) = $2
-            and ($3::text[] is null or ws.agent_tool = any($3::text[]))`,
-        [[...LIVE_SESSION_STATUSES], principal.identityId, tools ? [...tools] : null],
+            and ($3::text[] is null or ws.agent_tool = any($3::text[]))
+            -- A session that ran this provider on a SPACE credential (206)
+            -- never held the member's own: disconnecting it must not kill it
+            -- (A5). Deleting the space credential is what kills those.
+            and not exists (
+              select 1 from public.session_space_credentials ssc
+               where ssc.work_session_id = ws.entity_id and ssc.provider = $4
+            )`,
+        [[...LIVE_SESSION_STATUSES], principal.identityId, tools ? [...tools] : null, provider],
       );
     } catch (error) {
       failures.push({ step: 'agentSession', reason: errorMessage(error) });
@@ -587,15 +653,18 @@ export class W2CredentialCatalogService {
     }
 
     for (const row of rows) {
-      const outcome = this.terminals.terminate(row.work_session_id);
-      if (outcome === 'error') {
-        failures.push({
-          step: 'agentSession',
-          sessionId: row.work_session_id,
-          reason: 'the PTY host could not kill this agent session',
-        });
-        continue;
+      // Kill, then record the ending — one stop path with `terminate`, so the
+      // row does not read `running` after its process is gone. A failed kill
+      // leaves the row as it was.
+      const contained = await this.agentSessions.containCredentialSession(
+        row.work_session_id,
+        'member_credential_disconnected',
+      );
+      const failure = containmentFailureOf(contained);
+      if (failure !== null) {
+        failures.push({ step: 'agentSession', sessionId: row.work_session_id, reason: failure });
       }
+      if (contained.outcome === 'error') continue;
       // `not_found` is reported as terminated on purpose: it means no live PTY
       // on THIS node, which is the state the caller asked for. Recording it as
       // a failure would make a perfectly successful disconnect of a session
@@ -616,6 +685,9 @@ function notConnected(provider: CredentialProviderName): CredentialConnectionVie
     status: null,
     connectedAt: null,
     lastVerifiedAt: null,
+    // Filled by the caller. A not-connected BACKEND still routes — see
+    // `routingFor` — so this cannot be left as the final answer.
+    routing: null,
   };
 }
 

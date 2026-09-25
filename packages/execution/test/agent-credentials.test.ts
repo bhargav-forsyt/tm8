@@ -28,6 +28,14 @@ import {
   type AgentCredentialHome,
   type AgentCredentialProvider,
 } from '../src/spawn/agent-credentials.js';
+import { LAUNCH_MODEL_CATALOG } from '@tm8/contract';
+
+import {
+  apiKeyBackendForModel,
+  apiKeyBackendNativeProvider,
+  apiKeyBackendsForAgentTool,
+  isApiKeyCredentialProvider,
+} from '../src/credentials/api-key-credentials.js';
 import { CREDENTIAL_CONFIG_DIR_VAR, composeCredentialEnv } from '../src/credentials/credential-env.js';
 import { composeEnv, composeManifest } from '../src/spawn/manifest.js';
 import type { SpawnContext, SpawnRequest } from '../src/spawn/types.js';
@@ -170,10 +178,16 @@ describe('the exact key set a composed agent environment carries', () => {
     'USER',
     'XDG_CACHE_HOME',
   ].sort();
+  /**
+   * A claude-code launch carries NOTHING extra. It used to grow by the
+   * auto-compaction window; that knob was removed, so every tool's base
+   * environment is now the same list.
+   */
+  const CLAUDE_KEYS = BASE_KEYS;
 
   it('is exactly this, and XDG_CONFIG_HOME is not in it', () => {
     const env = composeEnv(manifestFor('claude-code'), '/tmp/m.json', 'http://x', POLLUTED_PARENT);
-    expect(Object.keys(env).sort()).toEqual(BASE_KEYS);
+    expect(Object.keys(env).sort()).toEqual(CLAUDE_KEYS);
   });
 
   it('grows by EXACTLY the config-dir variable and XDG_CONFIG_HOME when a credential is injected', () => {
@@ -187,7 +201,7 @@ describe('the exact key set a composed agent environment carries', () => {
       aliceHome,
     );
 
-    expect(Object.keys(env).sort()).toEqual([...BASE_KEYS, 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME'].sort());
+    expect(Object.keys(env).sort()).toEqual([...CLAUDE_KEYS, 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME'].sort());
   });
 
   it.each(['gemini', 'hermes', 'cursor'] as const)(
@@ -218,6 +232,18 @@ describe('the exact credential fragment is chosen by agent tool', () => {
       gemini: null,
       hermes: null,
       cursor: null,
+      // The API-key backends take their DISPLACED tool's variable, because the
+      // program this table configures is that tool. A `claude-code` session
+      // running on a Kimi key is still `claude`, and pointing CLAUDE_CONFIG_DIR
+      // at the kimi directory does two things at once: it gives `claude` a
+      // config home beside the credential that selected it, and — the half that
+      // matters — it makes the member's REAL Anthropic login, which lives in
+      // the sibling `anthropic/` directory, unreachable from this session. A
+      // stored OAuth login beats an `ANTHROPIC_AUTH_TOKEN`, so without this the
+      // routing would silently not happen for exactly the members who have both
+      // connected.
+      kimi: 'CLAUDE_CONFIG_DIR',
+      groq: 'CODEX_HOME',
     });
   });
 
@@ -312,6 +338,15 @@ describe('finding C8 — a session never carries two credentials for one provide
       gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
       hermes: [],
       cursor: ['CURSOR_API_KEY'],
+      // Kimi suppresses BOTH Anthropic key variables, including the one it then
+      // injects. `ANTHROPIC_AUTH_TOKEN` is listed here so that a node-level
+      // value cannot survive into a Kimi session on the path where the member's
+      // own key turns out to be unreadable; `manifest.ts` re-sets it afterwards
+      // from the member's file, and the ORDER is what makes both true.
+      kimi: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+      // Same shape, one variable: `OPENAI_API_KEY` is simultaneously the node
+      // key being suppressed and the member key being injected.
+      groq: ['OPENAI_API_KEY'],
     });
   });
 
@@ -379,6 +414,193 @@ describe('finding C8 — a session never carries two credentials for one provide
   });
 });
 
+/**
+ * API-KEY BACKEND ROUTING — the ordering claim, proved rather than commented.
+ *
+ * Kimi and Groq are not extra tools; they are alternative BACKENDS reached by
+ * pointing an existing tool's SDK at a different base URL. Everything about the
+ * launch is unchanged, which is what makes the one hazard here easy to miss:
+ * for Groq the variable being SUPPRESSED and the variable being INJECTED are
+ * the same name, so the whole feature rests on the suppression loop running
+ * first. Nothing in the type system says so, and both orderings compile.
+ */
+describe('API-key backend routing — the env a member with Kimi or Groq actually gets', () => {
+  const NODE_KEYS: NodeJS.ProcessEnv = {
+    ...POLLUTED_PARENT,
+    ANTHROPIC_API_KEY: 'sk-ant-node-key',
+    ANTHROPIC_AUTH_TOKEN: 'node-auth-token',
+    OPENAI_API_KEY: 'sk-openai-node-key',
+  };
+
+  const kimiHome: AgentCredentialHome = {
+    provider: 'kimi',
+    homeDir: HOME_DIR,
+    configDir: `${HOME_DIR}/kimi`,
+    apiKey: 'sk-member-moonshot-key',
+  };
+
+  const groqHome: AgentCredentialHome = {
+    provider: 'groq',
+    homeDir: HOME_DIR,
+    configDir: `${HOME_DIR}/groq`,
+    apiKey: 'gsk_member_groq_key',
+  };
+
+  it('points claude-code at Moonshot with the member key, not the node key', () => {
+    const env = composeEnv(
+      manifestFor('claude-code'),
+      '/tmp/m.json',
+      'http://x',
+      NODE_KEYS,
+      undefined,
+      undefined,
+      kimiHome,
+    );
+
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://api.moonshot.ai/anthropic');
+    // AUTH_TOKEN, not API_KEY. The former goes out as a bearer `Authorization`
+    // header, which is what a third-party endpoint authenticates; the latter
+    // goes out as Anthropic's vendor-specific `x-api-key`, which Moonshot does
+    // not read. Getting this wrong produces a 401 from a URL that looks right.
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-member-moonshot-key');
+    expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
+
+    // The config dir is the KIMI directory. This is what keeps the member's own
+    // `claude auth login` — which lives in the sibling anthropic/ directory and
+    // would outrank the token above — out of this session.
+    expect(env.CLAUDE_CONFIG_DIR).toBe(`${HOME_DIR}/kimi`);
+  });
+
+  it('points codex at Groq, and the suppress-then-inject order survives', () => {
+    const env = composeEnv(
+      manifestFor('codex'),
+      '/tmp/m.json',
+      'http://x',
+      NODE_KEYS,
+      undefined,
+      undefined,
+      groqHome,
+    );
+
+    expect(env.OPENAI_BASE_URL).toBe('https://api.groq.com/openai/v1');
+    // THE ASSERTION THIS WHOLE BLOCK EXISTS FOR. `OPENAI_API_KEY` is both the
+    // node key deleted by the suppression loop and the member key written by
+    // the routing step. If the two ever swap order this reads
+    // `sk-openai-node-key` (inject-then-delete leaves nothing at all, and the
+    // key is simply absent) — either way a session that silently talks to the
+    // wrong vendor or to nobody.
+    expect(env.OPENAI_API_KEY).toBe('gsk_member_groq_key');
+    expect(env.CODEX_HOME).toBe(`${HOME_DIR}/groq`);
+  });
+
+  it('routes nothing when the key could not be read', () => {
+    // NOT belt-and-braces any more, and the comment that used to say so was
+    // wrong within this same PR. `DbAgentCredentialHome` now returns exactly
+    // this keyless home for an active row whose key file cannot be read —
+    // answering `null` there left the node's own key live in the composed
+    // environment and ran the member's session on the machine account. So this
+    // is the real path, and what it must not produce is the worst of the three
+    // possible outcomes: a base URL without a key, i.e. a live session pointed
+    // at a vendor it cannot authenticate to.
+    const env = composeEnv(
+      manifestFor('claude-code'),
+      '/tmp/m.json',
+      'http://x',
+      NODE_KEYS,
+      undefined,
+      undefined,
+      { provider: 'kimi', homeDir: HOME_DIR, configDir: `${HOME_DIR}/kimi` },
+    );
+
+    expect(env).not.toHaveProperty('ANTHROPIC_BASE_URL');
+    // Suppression still ran, so the node's keys are gone either way: no
+    // credential is strictly better than someone else's.
+    expect(env).not.toHaveProperty('ANTHROPIC_API_KEY');
+    expect(env).not.toHaveProperty('ANTHROPIC_AUTH_TOKEN');
+  });
+
+  it('leaves a member who connected neither backend exactly as they were', () => {
+    const env = composeEnv(
+      manifestFor('claude-code'),
+      '/tmp/m.json',
+      'http://x',
+      NODE_KEYS,
+      undefined,
+      undefined,
+      aliceHome,
+    );
+
+    expect(env).not.toHaveProperty('ANTHROPIC_BASE_URL');
+    expect(env).not.toHaveProperty('OPENAI_BASE_URL');
+  });
+
+  it('keeps each backend pointed at exactly one tool', () => {
+    // A backend that claimed two tools, or two backends that claimed one, would
+    // make `DbAgentCredentialHome.resolve` pick by list order — a silent, stable
+    // wrong answer. The relationship is one-to-one and this says so.
+    expect(apiKeyBackendsForAgentTool('claude-code')).toEqual(['kimi']);
+    expect(apiKeyBackendsForAgentTool('codex')).toEqual(['groq']);
+    expect(apiKeyBackendsForAgentTool('gemini')).toEqual([]);
+  });
+});
+
+describe('per-model routing — a Kimi model gets the Kimi key, a Claude model the Anthropic login', () => {
+  // The expected answers are written out as literals rather than derived from
+  // the catalog, so a catalog edit that moves a model to another vendor has to
+  // change this table on purpose.
+  it.each([
+    ['kimi-k2-thinking', 'claude-code', 'kimi'],
+    ['kimi-k2-thinking-turbo', 'claude-code', 'kimi'],
+    ['kimi-k2-turbo-preview', 'claude-code', 'kimi'],
+    ['kimi-k2-0905-preview', 'claude-code', 'kimi'],
+    ['openai/gpt-oss-120b', 'codex', 'groq'],
+    ['openai/gpt-oss-20b', 'codex', 'groq'],
+    // A Kimi model SERVED BY GROQ: routed by who serves it, not by its name.
+    ['moonshotai/kimi-k2-instruct-0905', 'codex', 'groq'],
+    ['llama-3.3-70b-versatile', 'codex', 'groq'],
+    ['qwen/qwen3-32b', 'codex', 'groq'],
+    ['deepseek-r1-distill-llama-70b', 'codex', 'groq'],
+  ] as const)('%s on %s runs on the %s key', (model, agentTool, backend) => {
+    expect(apiKeyBackendForModel(agentTool, model)).toBe(backend);
+  });
+
+  it.each([
+    ['claude-opus-5-5', 'claude-code'],
+    ['claude-opus-5-5[1m]', 'claude-code'],
+    ['claude-sonnet-5', 'claude-code'],
+    ['claude-haiku-4-5-20251001', 'claude-code'],
+    ['gpt-6-astra', 'codex'],
+    ['gpt-5.6-sol', 'codex'],
+  ] as const)('%s on %s keeps the native login (no backend)', (model, agentTool) => {
+    expect(apiKeyBackendForModel(agentTool, model)).toBeNull();
+  });
+
+  it('every catalog row agrees with its provider: moonshot/groq have a backend, the rest none', () => {
+    // The sweep behind the literal tables above — a new catalog row cannot
+    // slip through with no route.
+    for (const entry of LAUNCH_MODEL_CATALOG) {
+      const expected =
+        entry.provider === 'moonshot' ? 'kimi' : entry.provider === 'groq' ? 'groq' : null;
+      expect([entry.model, apiKeyBackendForModel(entry.agentTool, entry.model)]).toEqual([
+        entry.model,
+        expected,
+      ]);
+    }
+  });
+
+  it('unknown, absent, or mismatched-tool models go to the native provider', () => {
+    // Aliases ('opus'), free-typed models, and an unset model are not in the
+    // catalog: they are the tool's own models, so they keep the native login.
+    expect(apiKeyBackendForModel('claude-code', 'opus')).toBeNull();
+    expect(apiKeyBackendForModel('claude-code', null)).toBeNull();
+    expect(apiKeyBackendForModel('claude-code', 'some-future-model')).toBeNull();
+    expect(apiKeyBackendForModel(null, 'kimi-k2-thinking')).toBeNull();
+    // A Kimi model asked for on codex is not the Kimi-on-claude route.
+    expect(apiKeyBackendForModel('codex', 'kimi-k2-thinking')).toBeNull();
+    expect(apiKeyBackendForModel('claude-code', 'qwen/qwen3-32b')).toBeNull();
+  });
+});
+
 describe('drift guard — the agent table and the login-terminal table are one convention', () => {
   /**
    * These two tables are duplicated ON PURPOSE: `credential-env.ts` imports
@@ -392,6 +614,34 @@ describe('drift guard — the agent table and the login-terminal table are one c
     for (const provider of Object.keys(
       AGENT_CREDENTIAL_CONFIG_DIR_VAR,
     ) as AgentCredentialProvider[]) {
+      // API-key backends are exempt, and the exemption is the finding rather
+      // than a hole in the guard.
+      //
+      // For the six vendor providers the two tables describe THE SAME PROGRAM:
+      // `claude` writes the credential during login and reads it during a
+      // session, so one variable name is correct in both and a disagreement is
+      // always a bug. Kimi and Groq are the first providers for which the
+      // writing program and the reading program are different — tm8's paste
+      // harness writes the file, and `claude`/`codex` read it — so the two
+      // tables are answering two questions that no longer have one answer:
+      //
+      //   login  (`CREDENTIAL_CONFIG_DIR_VAR`): which vendor CLI's storage must
+      //          be redirected? None — there is no vendor CLI. Hence `null`.
+      //   spawn  (this table): which variable points the CONSUMING tool at this
+      //          credential home? `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
+      //
+      // Forcing them to agree would break one of the two: `null` at spawn would
+      // let the member's real Anthropic login outrank the Kimi token, and a
+      // non-null value at login would hand tm8's own harness a vendor variable
+      // it does not read. The guard therefore narrows rather than widening, and
+      // says why.
+      if (isApiKeyCredentialProvider(provider)) {
+        expect(CREDENTIAL_CONFIG_DIR_VAR[provider]).toBeNull();
+        expect(AGENT_CREDENTIAL_CONFIG_DIR_VAR[provider]).toBe(
+          AGENT_CREDENTIAL_CONFIG_DIR_VAR[apiKeyBackendNativeProvider(provider)],
+        );
+        continue;
+      }
       expect(AGENT_CREDENTIAL_CONFIG_DIR_VAR[provider]).toBe(CREDENTIAL_CONFIG_DIR_VAR[provider]);
     }
   });

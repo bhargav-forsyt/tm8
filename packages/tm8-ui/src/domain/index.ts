@@ -16,6 +16,7 @@ export type {
   ActionIntent,
   ActionRef,
   AssignControl,
+  AttachPaletteRow,
   BodyArchetype,
   CardFieldRef,
   CardSpec,
@@ -83,11 +84,15 @@ export { tileCountBadgesOf, type TileCountBadge } from './tile-counts';
 export {
   PROCESS_CONTROL,
   REASONS,
+  SHARING_CONTROL,
   allActions,
   deferredActions,
   hasEnded,
   processControlFor,
   resolveAction,
+  sharingControlFor,
+  sessionSharingOf,
+  type SessionSharing,
 } from './actions';
 
 export {
@@ -119,6 +124,9 @@ export {
   defaultLaunchTarget,
   describeCapacity,
   describeLaunchManifest,
+  launchCredentialFacts,
+  launchSpaceCredentialIds,
+  LAUNCH_SOURCE_WORD,
   describeTeammateLoad,
   describeProfile,
   modelsFor,
@@ -128,10 +136,15 @@ export {
   accessModeLabel,
   describeAccessMode,
   nextAccessMode,
+  AGENT_CREDENTIAL_PROVIDER,
+  CREDENTIAL_PROVIDER_LABEL,
+  EFFORT_LABELS,
+  effortLabel,
 } from './launch';
 export type {
   AgentToolDef,
   LaunchAccessMode,
+  LaunchCredentialSource,
   LaunchCapacity,
   LaunchConfig,
   LaunchMode,
@@ -174,6 +187,7 @@ export { CATEGORY_DEFAULT_STATUS } from './status-categories';
 export {
   CHATS_ROOT,
   DEFAULT_HOME_KIND,
+  HOME_RAIL_WITHHELD_KINDS,
   LEGACY_HOME_TAB_KINDS,
   homeRailGroups,
   homeRootKinds,
@@ -189,3 +203,15 @@ export {
  */
 export { CHANNEL_KIND, VIEW_REF_ROUTE, landingOfRoute, navViewOfName, routeViewOf } from './nav-targets';
 export type { Landing } from './nav-targets';
+
+/* SC-5: the launch picker's credential source options (D4/D5/D6a/D10). */
+export {
+  disabledSourcesNote,
+  githubAuthorshipLine,
+  isSpaceCredentialProvider,
+  launchSourceOptions,
+  launchableSpaceCredentials,
+  parseLaunchSourceChoice,
+  sourcePolicyReason,
+} from './launch-sources';
+export type { LaunchSourceChoice, LaunchSourceOption, LaunchSourceOptionsInput } from './launch-sources';

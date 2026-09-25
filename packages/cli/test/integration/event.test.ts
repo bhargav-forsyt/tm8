@@ -155,7 +155,7 @@ describe('the node, measured rather than reported', () => {
     // 155 -> 156 (2026-08-13, MEASURED off /health on main): one route joined
     // between the 2026-08-12 155-pin and the git-track re-measure.
         // 156 -> 157 (2026-08-13, forge write): the tracking.pr.merge route.
-    expect(health.operations).toBe(195) /* 171→195 177: the 24 container HTTP routes — ROUTES, not catalog rows */ /* 168→171 148: spaces.workflows.* — ROUTES, not catalog rows */ /* 162→165 2026-08-16 W4/132: spaces.taskWorkflows.* */ /* 157→158 2026-08-13: #188 chat route */;
+    expect(health.operations).toBe(222) /* 221→222 bug 01a0d2f1: entities.commands.tick, one POST route. MEASURED off /health. */ /* 220→221 change feed step 3: events.changes, one GET route. MEASURED off /health. */ /* 210→220 2026-09-23 SC-3: credentials.space.* (8) + node.credentials.* (2). MEASURED off /health. */ /* 207→210 2026-09-23 Jev lane K: credentials.serviceKeys.{status,put,delete}. MEASURED off /health. */ /* 206→207 2026-09-23 Jev lane F: launch.suggest (placeholder mount). MEASURED off /health. */ /* 197→206 2026-09-23: the nine skills.* routes (#647 + #649). MEASURED off /health. */ /* 196→197 2026-09-19 Changes screen Phase 1 INTEGRATED WITH main: execution.gitStage mounts one more HTTP route on top of 187’s. Both land, so this moves twice from 195. MEASURED on the MERGED tree, never hand-derived. */ /* 195→196 187: execution.sessions.share — POST /v2/entities/:id/commands/sharing, a mounted HTTP route */ /* 171→195 177: the 24 container HTTP routes — ROUTES, not catalog rows */ /* 168→171 148: spaces.workflows.* — ROUTES, not catalog rows */ /* 162→165 2026-08-16 W4/132: spaces.taskWorkflows.* */ /* 157→158 2026-08-13: #188 chat route */;
     // `implemented` is `registry.size` — REGISTERED handlers, not behaviourally
     // implemented ones. No expected number is asserted here on purpose: it moves
     // as composition tranches land, and pinning it would turn another wave's
@@ -335,6 +335,18 @@ describe('events.poll paging — exactly-once, not merely duplicate-free', () =>
     const spaceId = created.space?.id ?? created.id;
     expect(spaceId, `could not read a space id from ${mk.stdout}`).toBeTruthy();
 
+    // THE KNOWN SET IS WHAT THIS TEST SEEDS, not the whole space feed. A new
+    // space is born with its own bootstrap events (menu, channels, members), and
+    // that count only grows: 63 on the CI run that timed this test out at 120s,
+    // because each `--limit 1` page is a fresh `tm8` process (~1.9s on the
+    // runner). Starting the walk at the feed's position BEFORE seeding keeps
+    // every walked row a page boundary, which is the whole point of --limit 1,
+    // while the cost stays proportional to what the test itself wrote.
+    const before = await cli(
+      ['event', 'list', '--space', spaceId!, '--limit', '500', '--format', 'json'], server);
+    expect(before.code, before.stderr).toBe(0);
+    const start = (JSON.parse(before.stdout) as { nextCursor: string | null }).nextCursor ?? '0';
+
     // Seeded over raw HTTP rather than through `tm8 entity create`, DELIBERATELY:
     // that command belongs to another slot and is not wired into the built CLI
     // right now (it answers the kernel's honest exit 8, "in the tm8 grammar but
@@ -354,14 +366,15 @@ describe('events.poll paging — exactly-once, not merely duplicate-free', () =>
       ['event', 'list', '--space', spaceId!, '--limit', '500', '--format', 'json'], server);
     expect(whole.code, whole.stderr).toBe(0);
     const full = JSON.parse(whole.stdout) as { items: Array<{ seq: number }>; nextCursor: string };
-    const fullSeqs = full.items.map((e) => e.seq);
+    const fullSeqs = full.items.map((e) => e.seq).filter((seq) => seq > Number(start));
     measured['events.poll.knownSetSize'] = fullSeqs.length;
     // GUARD AGAINST A VACUOUS SWEEP: a loop over zero rows would satisfy every
-    // assertion below and prove nothing at all.
-    expect(fullSeqs.length).toBeGreaterThan(0);
+    // assertion below and prove nothing at all. Three seeded tasks are at
+    // least three events after `start`.
+    expect(fullSeqs.length).toBeGreaterThanOrEqual(3);
 
     const walked: number[] = [];
-    let cursor = '0';
+    let cursor = start;
     for (let guard = 0; guard < 200; guard++) {
       const r = await cli(
         ['event', 'list', '--space', spaceId!, '--after', cursor, '--limit', '1', '--format', 'json'],

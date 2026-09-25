@@ -19,6 +19,8 @@ import { FIXTURE_SPACE_ID, fixtureSummaries } from '../fixtures';
 import { type ActionContext, type ActionRef } from '../domain';
 import type { SessionLiveness } from '../data/seam';
 import { EntityListPanel } from './index';
+import type { SessionSharingPatch } from './controls/EntityControls';
+import { MobileSurfaceProvider } from '../mobile/surface';
 
 const ctx: ActionContext = { spaceId: FIXTURE_SPACE_ID };
 
@@ -50,14 +52,38 @@ function mount(
     onComplete?: (entityId: string) => void;
     onTerminate?: (entityId: string) => void;
     onResume?: (entityId: string) => void;
+    onShareSession?: (entityId: string, patch: SessionSharingPatch) => void;
+    /** Overwrite every session row's watch dial — see the sharing describe. */
+    shareMode?: string;
+    /** Overwrite every session row's drive dial, provenance and creator. */
+    driveMode?: string;
+    sharingSetAt?: string | null;
+    createdByKind?: string;
     /** The two seam answers the process control turns on — see its describe. */
     liveness?: SessionLiveness;
     category?: StatusCategory;
+    /** Mount inside the phone shell's surface provider. */
+    phone?: boolean;
   } = {},
 ) {
-  const rows = rowsOfKind(kind).map((row) =>
-    handlers.category ? { ...row, category: handlers.category } : row,
-  );
+  const rows = rowsOfKind(kind)
+    .map((row) => (handlers.category ? { ...row, category: handlers.category } : row))
+    .map((row) =>
+      handlers.shareMode === undefined
+        ? row
+        : { ...row, state: { ...row.state, shareMode: handlers.shareMode } as typeof row.state },
+    )
+    .map((row) => ({
+      ...row,
+      state: {
+        ...row.state,
+        ...(handlers.driveMode === undefined ? {} : { driveMode: handlers.driveMode }),
+        ...(handlers.sharingSetAt === undefined ? {} : { sharingSetAt: handlers.sharingSetAt }),
+      } as typeof row.state,
+      ...(handlers.createdByKind === undefined
+        ? {}
+        : { createdBy: { ...row.createdBy, kind: handlers.createdByKind } as typeof row.createdBy }),
+    }));
   return render(
     <EntityListPanel
       kind={kind}
@@ -70,6 +96,7 @@ function mount(
       onComplete={handlers.onComplete ?? vi.fn()}
       onTerminate={handlers.onTerminate ?? vi.fn()}
       onResume={handlers.onResume ?? vi.fn()}
+      onShareSession={handlers.onShareSession ?? vi.fn()}
       /* Collections needs BOTH to be live — the executor and the read its
          checkmarks come from. Without them it renders its not-wired refusal,
          which is honest but tells us nothing about placement. */
@@ -77,6 +104,9 @@ function mount(
       connectionsOf={() => ({ incoming: [], outgoing: [], unresolvedHardDependencyCount: 0 })}
       membershipSets={rowsOfKind('collection')}
     />,
+    handlers.phone
+      ? { wrapper: ({ children }) => <MobileSurfaceProvider sheetHost={null}>{children}</MobileSurfaceProvider> }
+      : undefined,
   );
 }
 
@@ -86,6 +116,15 @@ function firstCluster(container: HTMLElement): HTMLElement {
   if (!cluster) throw new Error('no .lp__cluster on the first tile');
   return cluster as HTMLElement;
 }
+
+/**
+ * The cluster's members in visual order. On the desktop the verbs sit one level
+ * down, inside the floating `.lp__hoverbar`, while the disclosure stays a
+ * direct child — so the ruled sequence is read through the bar, not off
+ * `children`.
+ */
+const membersOf = (cluster: HTMLElement): Element[] =>
+  [...cluster.children].flatMap((el) => (el.classList.contains('lp__hoverbar') ? [...el.children] : [el]));
 
 const verbsIn = (cluster: HTMLElement): string[] =>
   [...cluster.querySelectorAll('[data-action]')].map((el) => el.getAttribute('data-action')!);
@@ -108,6 +147,31 @@ describe('the row action cluster is one shape across all three anatomies', () =>
   });
 
   /**
+   * THE HOVER BAR (user ask 2026-09-24). On the desktop the verbs render inside
+   * `.lp__hoverbar`, which panels.css floats on the tile's top edge, and the
+   * disclosure stays outside it — the opener belongs to the row, not the bar.
+   */
+  it.each(['task', 'work_session', 'doc'])('%s puts its verbs in the hover bar and keeps the disclosure out of it', (kind) => {
+    const { container } = mount(kind, kind === 'work_session' ? SESSION : DELETABLE);
+    const cluster = firstCluster(container);
+    const bars = cluster.querySelectorAll(':scope > .lp__hoverbar');
+    expect(bars.length).toBe(1);
+    expect(verbsIn(bars[0] as HTMLElement)).toEqual(verbsIn(cluster));
+    expect(cluster.lastElementChild?.classList.contains('lp__hoverbar')).toBe(false);
+  });
+
+  /**
+   * The phone shell gets NO wrapper: `mobile-screens.css` sizes and hides these
+   * verbs with `__actions > *` rules, and a wrapper there would turn every one
+   * of them into a rule about the wrapper.
+   */
+  it('renders no hover bar on the phone shell', () => {
+    const { container } = mount('doc', DELETABLE, { phone: true });
+    expect(container.querySelector('.lp__hoverbar')).toBeNull();
+    expect(firstCluster(container).querySelector(':scope > [data-action="archive"]')).not.toBeNull();
+  });
+
+  /**
    * OWNER RULING 2026-08-18 — Archive moved from the far end to the LEAD, and
    * the tick moved in front of Run. Both used to be pinned here the other way
    * round, and flipping the assertions with the JSX is the point of pinning
@@ -118,7 +182,7 @@ describe('the row action cluster is one shape across all three anatomies', () =>
     for (const kind of ['task', 'work_session', 'doc']) {
       const { container, unmount } = mount(kind, DELETABLE);
       const cluster = firstCluster(container);
-      const children = [...cluster.children];
+      const children = membersOf(cluster);
       expect({ kind, first: children[0]?.getAttribute('data-action') })
         .toEqual({ kind, first: 'archive' });
       unmount();
@@ -127,7 +191,7 @@ describe('the row action cluster is one shape across all three anatomies', () =>
 
   it('puts Collections second, right after Archive', () => {
     const { container } = mount('task', DELETABLE);
-    const children = [...firstCluster(container).children];
+    const children = membersOf(firstCluster(container));
     // Collections is not an ActionRef — it is the membership picker, so it is
     // identified by its own wrapper rather than by `data-action`.
     expect(children[1]?.className.includes('lp__assignwrap')).toBe(true);
@@ -158,7 +222,7 @@ describe('the row action cluster is one shape across all three anatomies', () =>
   it('places the session tile\'s Copy between the middle verbs and Terminate', () => {
     const { container } = mount('work_session', SESSION);
     const cluster = firstCluster(container);
-    const marks = [...cluster.children].map(
+    const marks = membersOf(cluster).map(
       (el) =>
         el.getAttribute('data-action')
         ?? el.getAttribute('aria-label')
@@ -181,6 +245,15 @@ describe('the row action cluster is one shape across all three anatomies', () =>
     expect(marks).toEqual([
       'collections',
       'Complete',
+      // ▶ — continue this session in a new one (migration 200). It follows
+      // the tick by `RULED_ORDER`, exactly as on a task row.
+      'run',
+      // THE SHARING SLOT (187), reading `unshare-session` because SESSION's
+      // own `shareMode` is 'space'. Declared as `share-session` and swapped
+      // here by `sharingControlFor` — the same per-row derivation the tail
+      // does for terminate/resume, and the reason the ref in this list is not
+      // the ref in the registry.
+      'unshare-session',
       // `chat-about` is derived onto every kind and unranked, so it keeps its
       // declared position — after the middle verbs, before the anatomy's own
       // affordances and the tail. It is not a session verb; it is the
@@ -191,6 +264,68 @@ describe('the row action cluster is one shape across all three anatomies', () =>
       'terminate',
       'Expand details',
     ]);
+  });
+});
+
+/**
+ * THE DOM HALF OF 7j'' — the two hooks the phone rule selects on.
+ *
+ * `mobile-screens.css` hides every child of the session cluster but its opener
+ * while the row is CLOSED, and it asks two questions to do it: is the row open
+ * (`[data-details]` on `.pn-st`) and which control is the opener
+ * (`.pn-st__btn--ind`). Neither was on the DOM before — the tile kept its
+ * disclosure in `useState` and named its buttons all alike — which is the whole
+ * reason this anatomy could not be given the amendment the other two have.
+ *
+ * `row-cluster-parity.test.ts` pins the selectors; this pins the markup they
+ * aim at. Split deliberately: a CSS test that also had to mount React would
+ * stop being readable as a count, and either half passing alone is a rule that
+ * silently selects nothing. jsdom loads no stylesheets, so what is claimed here
+ * is the ATTRIBUTE and the CLASS — never that anything was actually hidden.
+ */
+describe("the session tile publishes what the phone rule selects on (7j'')", () => {
+  const sessionTile = (container: HTMLElement): HTMLElement => {
+    const tile = container.querySelector('.pn-st');
+    if (!tile) throw new Error('no .pn-st session tile rendered');
+    return tile as HTMLElement;
+  };
+
+  it('reports its disclosure state on the row, closed by default', () => {
+    const { container } = mount('work_session', SESSION);
+    expect(sessionTile(container).getAttribute('data-details')).toBe('closed');
+  });
+
+  it('flips to open when the disclosure is pressed', () => {
+    const { container } = mount('work_session', SESSION);
+    const tile = sessionTile(container);
+    fireEvent.click(within(tile).getByLabelText('Expand details'));
+    expect(tile.getAttribute('data-details')).toBe('open');
+  });
+
+  /**
+   * THE ONE SURVIVOR, AND IT MUST BE EXACTLY ONE. The rule keeps
+   * `*:not(.pn-st__btn--ind)` out of a closed row, so a second control wearing
+   * the opener's class would quietly survive with it — and a row that kept
+   * Terminate pinned open is the defect this whole change is about.
+   */
+  it('marks the disclosure — and nothing else — as the opener', () => {
+    const { container } = mount('work_session', SESSION);
+    const cluster = firstCluster(container).parentElement!;
+    const openers = [...cluster.querySelectorAll('.pn-st__btn--ind')];
+    expect(openers).toHaveLength(1);
+    expect(openers[0]!.getAttribute('aria-label')).toBe('Expand details');
+  });
+
+  /**
+   * And the opener is genuinely INSIDE the container the rule scopes to. It is
+   * rendered outside `RowActionCluster` (the tile draws it after `actions?.()`),
+   * so "it exists" and "it is where the selector looks" are two different
+   * claims, and only the second one keeps the row expandable on a phone.
+   */
+  it('keeps the opener inside the cluster container the rule scopes to', () => {
+    const { container } = mount('work_session', SESSION);
+    const actions = container.querySelector('.pn-st__actions');
+    expect(actions?.querySelector('.pn-st__btn--ind')).not.toBeNull();
   });
 });
 
@@ -227,7 +362,7 @@ describe('Archive is hidden on server truth, and ONLY on server truth', () => {
     expect(cluster.querySelectorAll('.hon-checking').length).toBeGreaterThan(0);
     // The cluster keeps its width: the same number of slots as when permitted.
     const { container: permitted } = mount('doc', DELETABLE);
-    expect(cluster.children.length).toBe(firstCluster(permitted).children.length);
+    expect(membersOf(cluster).length).toBe(membersOf(firstCluster(permitted)).length);
   });
 });
 
@@ -461,5 +596,132 @@ describe('the tail slot resolves to terminate-or-resume, never both and never ne
     });
     const button = firstCluster(container).querySelector('button[data-action="resume"]');
     expect(button?.getAttribute('data-action')).toBe('resume');
+  });
+});
+
+/**
+ * THE SHARING SLOT (187) — one declared verb, two halves, picked per row.
+ *
+ * The structural claim under test is the same one the process control makes
+ * next door and the reason neither can be a registry entry: `rowActions` is
+ * STATIC per-kind data, so a session that is private and a session the whole
+ * space can watch declare the identical list — and must not draw the identical
+ * button. If `sharingControlFor` ever stops consulting the row, both cases
+ * below still render a control and only these assertions notice.
+ */
+describe('the sharing slot reads the ROW, not the registry', () => {
+  it('offers Share on a private session', () => {
+    const { container } = mount('work_session', SESSION, { shareMode: 'none' });
+    const verbs = verbsIn(firstCluster(container));
+    expect(verbs).toContain('share-session');
+    expect(verbs).not.toContain('unshare-session');
+  });
+
+  it('offers Make private on a session the space can watch', () => {
+    const { container } = mount('work_session', SESSION, { shareMode: 'space' });
+    const verbs = verbsIn(firstCluster(container));
+    expect(verbs).toContain('unshare-session');
+    expect(verbs).not.toContain('share-session');
+  });
+
+  /**
+   * A server too old to project `shareMode` answers `undefined`, and the slot
+   * falls back to the DECLARED half. Offering "Share" on a session that may
+   * already be shared is a no-op the server absorbs; offering "Make private"
+   * would claim a state nothing here ever read.
+   */
+  it('falls back to Share when the row carries no shareMode', () => {
+    const { container } = mount('work_session', SESSION, { shareMode: '' });
+    expect(verbsIn(firstCluster(container))).toContain('share-session');
+  });
+
+  /**
+   * THE SLOT IS A PICKER NOW, and each radio sends ONLY its own dial. The
+   * failure this pins is the one the RPC's coalesce exists to prevent: a
+   * click on "who can type" that also sent the watch dial would reset it to
+   * whatever this row last read — `tm8 session share --drive` without
+   * `--share` must not touch sharing, and neither may this.
+   */
+  function openPicker(container: HTMLElement): HTMLElement {
+    const trigger = firstCluster(container).querySelector('[data-testid="row-sharing-trigger"]');
+    if (!trigger) throw new Error('no sharing trigger in the cluster');
+    fireEvent.click(trigger);
+    const menu = document.body.querySelector('[data-testid="row-sharing-menu"]');
+    if (!menu) throw new Error('the sharing picker did not open');
+    return menu as HTMLElement;
+  }
+
+  it.each([
+    ['watch', 'none', 'space', { shareMode: 'space' }],
+    ['watch', 'space', 'none', { shareMode: 'none' }],
+    ['type', 'none', 'space', { driveMode: 'space' }],
+    ['type', 'space', 'owner', { driveMode: 'owner' }],
+  ] as const)('the %s dial on a %s session sends exactly %s', (dial, shareMode, value, sent) => {
+    const onShareSession = vi.fn();
+    const driveMode = value === 'owner' ? 'space' : 'owner';
+    const { container, unmount } = mount('work_session', SESSION, { shareMode, driveMode, onShareSession });
+    const menu = openPicker(container);
+    const group = within(menu).getByTestId(`row-sharing-${dial}`);
+    fireEvent.click(group.querySelector(`[data-value="${value}"]`)!);
+    expect(onShareSession).toHaveBeenCalledTimes(1);
+    expect(onShareSession.mock.calls[0]?.[1]).toEqual(sent);
+    unmount();
+  });
+
+  it('checks the row’s current dials, with an absent driveMode read as owner', () => {
+    const { container, unmount } = mount('work_session', SESSION, { shareMode: 'space' });
+    const menu = openPicker(container);
+    const checked = [...menu.querySelectorAll('[role="radio"][aria-checked="true"]')].map((el) =>
+      el.getAttribute('data-value'),
+    );
+    expect(checked).toEqual(['space', 'owner']);
+    unmount();
+  });
+
+  it('re-clicking the checked option sends nothing', () => {
+    const onShareSession = vi.fn();
+    const { container, unmount } = mount('work_session', SESSION, { shareMode: 'space', onShareSession });
+    const menu = openPicker(container);
+    fireEvent.click(within(menu).getByTestId('row-sharing-watch').querySelector('[data-value="space"]')!);
+    expect(onShareSession).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  /**
+   * 202 — the teammate case is SAID. Before its sharing is set, a teammate-
+   * launched session is reachable by every member who may act as that
+   * teammate, whatever the dials read; once set, the dials bind everyone.
+   * A member-launched session gets neither note: its owner is exempt.
+   */
+  it.each([
+    ['team_member', null, /until someone sets its sharing/],
+    ['team_member', '2026-09-01T00:00:00.000Z', /apply to every member/],
+    ['member', null, null],
+  ] as const)('a %s-launched session with sharingSetAt %s says so', (createdByKind, sharingSetAt, words) => {
+    const { container, unmount } = mount('work_session', SESSION, {
+      shareMode: 'none',
+      createdByKind,
+      sharingSetAt,
+    });
+    const note = within(openPicker(container)).queryByTestId('row-sharing-teammate');
+    if (words === null) expect(note).toBeNull();
+    else expect(note?.textContent).toMatch(words);
+    unmount();
+  });
+
+  it('refuses as not wired when the host passes no handler', () => {
+    const rows = rowsOfKind('work_session');
+    const { container } = render(
+      <EntityListPanel
+        kind="work_session"
+        rowsFor={() => rows}
+        ctx={ctx}
+        capabilitiesOf={() => SESSION}
+        livenessOf={() => 'live'}
+        onAction={vi.fn()}
+        onTerminate={vi.fn()}
+      />,
+    );
+    expect(firstCluster(container).querySelector('[data-testid="row-sharing-trigger"]')).toBeNull();
   });
 });

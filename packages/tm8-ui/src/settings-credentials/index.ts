@@ -32,10 +32,35 @@ export {
   type ProviderStanding,
 } from './setup-gate';
 export {
+  ServiceKeysBlock,
+  SERVICE_KEY_PRESENTATIONS,
+  type ServiceKeysBlockProps,
+} from './ServiceKeysBlock';
+export {
   credentialsPortFromSeam,
+  serviceKeysPortFromSeam,
   disconnectVerdictOf,
   verdictOf,
   type ConnectionVerdict,
   type CredentialsPort,
   type DisconnectVerdict,
+  type ServiceKeysPort,
 } from './port';
+export {
+  SpaceCredentialsSection,
+  type SpaceCredentialsSectionProps,
+} from './SpaceCredentialsSection';
+export {
+  NodeCredentialsSection,
+  NODE_POLICY_ADMIN_ONLY,
+  type NodeCredentialsSectionProps,
+} from './NodeCredentialsSection';
+export {
+  spaceCredentialsPortFromSeam,
+  isSpaceAdminRole,
+  type SpaceCredentialsPort,
+  type SpaceCredentialsViewer,
+  type SpaceLoginProvider,
+  type SpaceLoginTarget,
+} from './space-port';
+export * from './space-credentials-model';

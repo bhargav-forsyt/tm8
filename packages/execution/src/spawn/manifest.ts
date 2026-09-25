@@ -1,3 +1,15 @@
+import { computeEffectiveSkills } from './effective-skills.js';
+import {
+  asHarnessSurface,
+  asMcpServers,
+  asReadHints,
+  laneSkillOverrides,
+  minimalMcpConfig,
+  pluginSettings,
+  readHintHookSettings,
+  type HarnessSurface,
+} from './harness-surface.js';
+import { composePrompt, BYTE_BUDGETS, promptVersionFor, utf8Bytes, serializeSkillIndex, serializeSkillIndexEntry } from '@tm8/prompt';
 // @tm8/execution — launch-config precedence, cwd resolution, command building
 // and manifest composition. Pure functions: no I/O, no graph, no PTY, so every
 // precedence rule below is directly unit-testable.
@@ -30,19 +42,31 @@ import type {
   ReasoningEffort,
   ResolvedCredentialSources,
   SessionLaunchPosture,
+  ManifestSkillContext,
   SpawnContext,
+  SpaceCredentialProvider,
   SpawnRequest,
   Tm8Manifest,
   WorkdirMode,
 } from './types.js';
-import { SpawnError } from './types.js';
+import { SpawnError, isSpaceCredentialProvider } from './types.js';
 import {
   AGENT_CREDENTIAL_CONFIG_DIR_VAR,
   AGENT_CREDENTIAL_SUPPRESSED_ENV_KEYS,
+  SPACE_CREDENTIAL_API_KEY_ENV,
+  SPACE_CREDENTIAL_SUPPRESSED_ENV_KEYS,
   agentCredentialEnv,
+  agentCredentialProviderFor,
   type AgentCredentialHome,
   type AgentCredentialProvider,
 } from './agent-credentials.js';
+// Type-only in the other direction: `api-key-credentials.ts` imports nothing
+// from this module at runtime, so this does not close the cycle the header of
+// `agent-credentials.ts` warns about between `manifest.ts` and `credential-env.ts`.
+import {
+  apiKeyBackendEnv,
+  isApiKeyCredentialProvider,
+} from '../credentials/api-key-credentials.js';
 import { redactSecretsDeep } from './secret-redaction.js';
 
 /** Fallback when neither the request nor the persona names a model. */
@@ -198,6 +222,68 @@ export interface ResolvedLaunchConfig {
   credentialSource: CredentialSource | null;
   /** Independent launch-time choice for every credential provider. */
   credentialSources: ResolvedCredentialSources;
+  /**
+   * Space credential ids known BEFORE the spawn reads the space: the request's
+   * own pins, and the exact id an inherited or resumed `space` source carries.
+   * A `space` source with no entry here takes the space default at spawn.
+   * Optional so a hand-built launch (tests, embedders) means "none".
+   */
+  spaceCredentialIds?: Partial<Record<SpaceCredentialProvider, string>>;
+  /** D9: set by the spawn path once it has resolved auto; absent before that. */
+  effectiveCredentialSources?: Partial<Record<SpaceCredentialProvider, CredentialSource>>;
+  /**
+   * Which harness surface a Claude lane boots with — see `harness-surface.ts`.
+   * `minimal` strips the operator's MCP connectors, non-allowlisted plugins
+   * and the harness Artifact tool; `inherit` is the bare `claude` command.
+   * Absent means `minimal`, the lane default. Ignored for every other tool.
+   */
+  harnessSurface?: HarnessSurface;
+  /**
+   * Plugins a `minimal` lane keeps: `<name>@<marketplace>` or a bare name.
+   * Absent means none.
+   */
+  plugins?: string[];
+  /**
+   * MCP servers a `minimal` lane keeps, `{ name: serverConfig }` as in a
+   * `.mcp.json` `mcpServers` block. Emitted as the lane's `--mcp-config`
+   * under `--strict-mcp-config`. Absent means none.
+   */
+  mcpServers?: Record<string, Record<string, unknown>>;
+  /**
+   * Install the lane read-hint hook (`harness/read-hint.mjs`): a short hint
+   * after a large repository read. OFF by default — the hook ships dark until
+   * the A/B in doc 01a0d2e9 has run, and `TM8_READ_HINTS=on` (node) or
+   * `capabilities.launch.readHints: true` (persona) is how an arm is turned
+   * on. Absent here means off. Independent of `harnessSurface`.
+   */
+  readHints?: boolean;
+}
+
+/**
+ * A teammate's launch preferences, read from `capabilities.launch` on the
+ * persona — a stored JSON bag, so every field is narrowed, never cast:
+ *   { "launch": { "harnessSurface": "inherit", "plugins": ["sales"],
+ *                 "mcpServers": { "linear": { "type": "http", "url": "…" } } } }
+ */
+function memberLaunchPreferences(capabilities: Record<string, unknown> | null | undefined): {
+  harnessSurface: HarnessSurface | null;
+  plugins: string[] | null;
+  mcpServers: Record<string, Record<string, unknown>> | null;
+  readHints: boolean | null;
+} {
+  const raw = capabilities?.launch;
+  const launch = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+  const plugins = Array.isArray(launch.plugins)
+    ? launch.plugins.filter((p): p is string => typeof p === 'string' && p.trim() !== '').map((p) => p.trim())
+    : null;
+  return {
+    harnessSurface: asHarnessSurface(launch.harnessSurface),
+    plugins,
+    mcpServers: asMcpServers(launch.mcpServers),
+    readHints: asReadHints(launch.readHints),
+  };
 }
 
 /**
@@ -360,11 +446,25 @@ export function resolveLaunchConfig(
   // deprecated global carrier; inherited provider keys then outrank an older
   // manifest's global value. Every read is narrowed because inherited posture
   // comes from stored JSON written by arbitrary older builds.
-  const credentialSources = resolveCredentialSources(request, inherited);
-  const commonSources = new Set(Object.values(credentialSources));
-  const credentialSource = commonSources.size === 1
-    ? ([...commonSources][0] ?? null)
-    : null;
+  const { credentialSources, spaceCredentialIds } = resolveCredentialSources(
+    request,
+    inherited,
+    agentTool,
+  );
+  const credentialSource = commonCredentialSource(credentialSources);
+
+  // Operator env over persona over the lane default, like TM8_PERMISSION_MODE:
+  // a node can flip every lane back to `inherit` without editing any persona.
+  const preferences = memberLaunchPreferences(member.capabilities);
+  const harnessSurface =
+    asHarnessSurface(env.TM8_HARNESS_SURFACE) ?? preferences.harnessSurface ?? 'minimal';
+  // Same precedence, but the default is OFF: this hook is an experiment that
+  // has not been through its A/B yet, so merging it changes no lane. Turning
+  // an arm on is `TM8_READ_HINTS=on` node-wide, or the persona's
+  // `capabilities.launch.readHints`.
+  const readHints =
+    agentTool === 'claude-code' &&
+    (asReadHints(env.TM8_READ_HINTS) ?? preferences.readHints ?? false);
 
   return {
     mode,
@@ -375,13 +475,100 @@ export function resolveLaunchConfig(
     reasoningEffort,
     credentialSource,
     credentialSources,
+    spaceCredentialIds,
+    harnessSurface,
+    plugins: preferences.plugins ?? [],
+    ...(preferences.mcpServers && Object.keys(preferences.mcpServers).length > 0
+      ? { mcpServers: preferences.mcpServers }
+      : {}),
+    readHints,
   };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The deprecated common value: one source shared by every provider, else null. */
+export function commonCredentialSource(
+  credentialSources: ResolvedCredentialSources,
+): CredentialSource | null {
+  const commonSources = new Set(Object.values(credentialSources));
+  return commonSources.size === 1 ? ([...commonSources][0] ?? null) : null;
+}
+
+/** Whether THIS request (not an inherited posture) states `space` for `provider`. */
+function requestStatesSpace(request: SpawnRequest, provider: SpaceCredentialProvider): boolean {
+  const own = request.credentialSources?.[provider];
+  return own === 'space' || (own == null && request.credentialSource === 'space');
 }
 
 function resolveCredentialSources(
   request: SpawnRequest,
   inherited: SessionLaunchPosture | null | undefined,
-): ResolvedCredentialSources {
+  agentTool: string,
+): {
+  credentialSources: ResolvedCredentialSources;
+  spaceCredentialIds: Partial<Record<SpaceCredentialProvider, string>>;
+} {
+  // A4: a pin is the request's own statement about a provider it sets to
+  // `space`. An id riding beside `member`, `node`, auto or an inherited
+  // source is refused, never ignored: ignoring it would launch on something
+  // other than what the caller named while reporting success.
+  for (const [provider, id] of Object.entries(request.spaceCredentialIds ?? {})) {
+    if (id == null) continue;
+    if (!isSpaceCredentialProvider(provider)) {
+      throw new SpawnError(
+        `spaceCredentialIds.${provider} names a provider a space cannot hold a credential for — ` +
+          'only anthropic, openai and github have space credentials',
+        'invalid_input',
+        { provider },
+      );
+    }
+    if (!requestStatesSpace(request, provider)) {
+      throw new SpawnError(
+        `spaceCredentialIds.${provider} pins a space credential, but this request does not set ` +
+          `credentialSources.${provider} to 'space' — set it to 'space' to use that credential, ` +
+          'or drop the id',
+        'invalid_input',
+        { provider },
+      );
+    }
+    if (typeof id !== 'string' || !UUID_RE.test(id)) {
+      throw new SpawnError(
+        `spaceCredentialIds.${provider} is not a space credential id`,
+        'invalid_input',
+        { provider },
+      );
+    }
+  }
+  // Scalar `space` covers the tool's own provider (and github). A tool whose
+  // provider a space cannot hold is refused by name rather than quietly run on
+  // some other source — the caller asked for the space and would not get it.
+  const toolProvider = agentCredentialProviderFor(agentTool);
+  if (
+    request.credentialSource === 'space' &&
+    toolProvider !== null &&
+    !isSpaceCredentialProvider(toolProvider) &&
+    request.credentialSources?.[toolProvider] == null
+  ) {
+    throw new SpawnError(
+      `credentialSource 'space' was requested for ${agentTool}, but a space cannot hold a ` +
+        `${toolProvider} credential — launch with 'member' or 'node' for ${toolProvider}`,
+      'invalid_input',
+      { agentTool, provider: toolProvider },
+    );
+  }
+
+
+  // What a scalar `space` covers (A4): the tool's own provider, GitHub, and any
+  // provider the request pinned. NOT every space-capable provider — a codex
+  // launch saying `space` must not demand an anthropic space credential it
+  // will never inject.
+  const scalarSpaceCovers = new Set<string>(['github']);
+  if (toolProvider !== null) scalarSpaceCovers.add(toolProvider);
+  for (const [provider, id] of Object.entries(request.spaceCredentialIds ?? {})) {
+    if (id != null) scalarSpaceCovers.add(provider);
+  }
+
   // The exhaustive FILE-provider table is the runtime provider source here;
   // GitHub is the one string-shaped exception. This avoids another hand-kept
   // list at the manifest seam: a seventh file provider added to the table is
@@ -389,29 +576,98 @@ function resolveCredentialSources(
   const agentProviders = Object.keys(
     AGENT_CREDENTIAL_CONFIG_DIR_VAR,
   ) as AgentCredentialProvider[];
-  return Object.fromEntries([
-    ...agentProviders.map((provider) => [
-      provider,
-      resolveCredentialSource(provider, request, inherited),
-    ] as const),
-    ['github', resolveCredentialSource('github', request, inherited)] as const,
-  ]) as ResolvedCredentialSources;
+  const spaceCredentialIds: Partial<Record<SpaceCredentialProvider, string>> = {};
+  const credentialSources = Object.fromEntries(
+    [...agentProviders, 'github' as const].map((provider) => {
+      const { source, spaceCredentialId } = resolveCredentialSource(
+        provider,
+        request,
+        inherited,
+        scalarSpaceCovers,
+      );
+      if (spaceCredentialId !== undefined && isSpaceCredentialProvider(provider)) {
+        spaceCredentialIds[provider] = spaceCredentialId;
+      }
+      return [provider, source] as const;
+    }),
+  ) as ResolvedCredentialSources;
+  return { credentialSources, spaceCredentialIds };
 }
 
+/**
+ * One provider's source: request key > request scalar > inherited key >
+ * inherited scalar > auto. `space` carries an id — the request's pin, or the
+ * EXACT id an inherited or resumed posture recorded (A4, D6a).
+ *
+ * THE INHERITED HALF FAILS CLOSED (M8a). It is stored JSON, possibly written
+ * by another build, and it names the credential a child or a resume will run
+ * on. A value this build does not understand, or a `space` with no usable id,
+ * is refused rather than narrowed to auto: auto could land on the node key or
+ * on the launcher's own account, which is not what the parent ran on.
+ */
 function resolveCredentialSource(
   provider: keyof ResolvedCredentialSources,
   request: SpawnRequest,
   inherited: SessionLaunchPosture | null | undefined,
-): CredentialSource | null {
-  return asCredentialSource(request.credentialSources?.[provider]) ??
-    asCredentialSource(request.credentialSource) ??
-    asCredentialSource(inherited?.credentialSources?.[provider]) ??
-    asCredentialSource(inherited?.credentialSource) ??
-    null;
+  scalarSpaceCovers: ReadonlySet<string>,
+): { source: CredentialSource | null; spaceCredentialId?: string } {
+  const spaceCapable = isSpaceCredentialProvider(provider);
+  const own = asRequestedSource(request.credentialSources?.[provider]);
+  if (own === 'space' && !spaceCapable) {
+    throw new SpawnError(
+      `credentialSources.${provider} 'space' was requested, but a space cannot hold a ` +
+        `${provider} credential — launch with 'member' or 'node'`,
+      'invalid_input',
+      { provider },
+    );
+  }
+  // A scalar `space` names only what it covers (see `scalarSpaceCovers`); every
+  // other provider stays on auto, uninherited (the tool's own non-space
+  // provider was refused above).
+  const scalar = asRequestedSource(request.credentialSource);
+  const requested =
+    own ?? (scalar === 'space' && (!spaceCapable || !scalarSpaceCovers.has(provider)) ? undefined : scalar);
+  if (requested !== undefined) {
+    if (requested !== 'space') return { source: requested };
+    const pin = spaceCapable ? request.spaceCredentialIds?.[provider] : undefined;
+    return pin ? { source: 'space', spaceCredentialId: pin } : { source: 'space' };
+  }
+  if (own === undefined && scalar === 'space') return { source: null };
+
+  const storedOwn = inherited?.credentialSources?.[provider];
+  const stored = storedOwn != null ? storedOwn : inherited?.credentialSource;
+  if (stored == null) return { source: null };
+  if (stored === 'member' || stored === 'node') return { source: stored };
+  if (stored === 'space') {
+    if (!spaceCapable) {
+      // Only a scalar can reach here for these providers; it never named them.
+      if (storedOwn == null) return { source: null };
+      throw inheritedRefusal(provider, `records 'space' for ${provider}, which a space cannot hold`);
+    }
+    const id = inherited?.spaceCredentialIds?.[provider];
+    if (typeof id !== 'string' || !UUID_RE.test(id)) {
+      throw inheritedRefusal(provider, `records 'space' for ${provider} with no space credential id`);
+    }
+    return { source: 'space', spaceCredentialId: id };
+  }
+  throw inheritedRefusal(
+    provider,
+    `records a ${provider} credential source this build does not understand`,
+  );
 }
 
-function asCredentialSource(value: unknown): CredentialSource | null {
-  return value === 'member' || value === 'node' ? value : null;
+function inheritedRefusal(provider: string, what: string): SpawnError {
+  return new SpawnError(
+    `the parent or resumed session's launch ${what} — refusing rather than launching on a ` +
+      `different credential; name the source explicitly with credentialSources.${provider}`,
+    'conflict',
+    { provider },
+  );
+}
+
+/** Request values are schema-checked upstream; this only narrows the type. */
+function asRequestedSource(value: unknown): CredentialSource | undefined {
+  return value === 'member' || value === 'space' || value === 'node' ? value : undefined;
 }
 
 /**
@@ -580,6 +836,19 @@ export function buildAgentCommand(
      * about it.
      */
     sandboxUnavailable?: boolean;
+    /**
+     * Plugin ids (`<name>@<marketplace>`) installed in the lane's Claude
+     * config home, read at spawn by `readInstalledClaudePlugins`. A `minimal`
+     * launch disables every one not on `launch.plugins`. Passed in rather
+     * than read here so this function stays pure.
+     */
+    installedClaudePlugins?: readonly string[];
+    /**
+     * Plugin names the lane's equipped skills live in (`equippedClaudePlugins`).
+     * Allowlisted alongside `launch.plugins`: equipping a plugin skill is
+     * choosing its plugin.
+     */
+    equippedClaudePlugins?: readonly string[];
   } = {},
 ): string {
   const override = env.TM8_AGENT_CMD?.trim();
@@ -612,6 +881,25 @@ export function buildAgentCommand(
   if (launch.model) args.push('--model', shellQuote(launch.model));
   if (launch.reasoningEffort) args.push('--effort', launch.reasoningEffort);
   if (opts.claudeSessionId) args.push('--session-id', shellQuote(opts.claudeSessionId));
+  // ONE flag-level settings object for everything tm8 layers onto a lane
+  // (Claude Code takes a single `--settings`); each feature adds its own key.
+  const settings: Record<string, unknown> = {};
+  if (launch.harnessSurface !== 'inherit') {
+    // The Artifact half is env, not argv: see `harnessSurfaceEnv`. Resume
+    // builds on this same base command, so these flags survive `--resume`.
+    args.push('--strict-mcp-config', '--mcp-config', shellQuote(minimalMcpConfig(launch.mcpServers)));
+    const plugins = pluginSettings(opts.installedClaudePlugins ?? [], [
+      ...(launch.plugins ?? []),
+      ...(opts.equippedClaudePlugins ?? []),
+    ]);
+    if (Object.keys(plugins).length > 0) settings.enabledPlugins = plugins;
+    settings.skillOverrides = laneSkillOverrides();
+  }
+  // Flag-level hooks merge with the user's own hooks rather than replace them.
+  if (launch.readHints === true) settings.hooks = readHintHookSettings();
+  if (Object.keys(settings).length > 0) {
+    args.push('--settings', shellQuote(JSON.stringify(settings)));
+  }
   return ['claude', ...args].join(' ');
 }
 
@@ -1095,12 +1383,56 @@ export function composeEnv(
     for (const key of AGENT_CREDENTIAL_SUPPRESSED_ENV_KEYS[credentialHome.provider]) {
       delete env[key];
     }
+
+    // API-KEY BACKEND ROUTING — LAST, AND THE ORDER IS THE CORRECTNESS.
+    //
+    // A member who has connected Kimi runs `claude` against Moonshot, and one
+    // who has connected Groq runs `codex` against Groq. Both are expressed the
+    // same way: point the tool's vendor SDK at a different base URL and give it
+    // the member's key. Nothing about the launch changes — same binary, same
+    // manifest, same session row — which is why this is four lines rather than
+    // a second spawn path.
+    //
+    // It must come after the suppression loop above, and for Groq that is not a
+    // stylistic preference: `OPENAI_API_KEY` is BOTH the node key we delete and
+    // the variable we set. Inject first and the delete silently removes the
+    // member's key, leaving a session pointed at Groq's base URL with no
+    // credential — a 401 far from here, with nothing in the environment to
+    // suggest why. Suppress first, then route, and the node's value is gone and
+    // the member's is the only one present.
+    //
+    // `apiKey` is absent for every file-shaped provider, so this branch is
+    // inert for them rather than conditional on a provider list that would need
+    // maintaining in a third place.
+    if (isApiKeyCredentialProvider(credentialHome.provider) && credentialHome.apiKey) {
+      Object.assign(env, apiKeyBackendEnv(credentialHome.provider, credentialHome.apiKey));
+    }
+
+    // A SPACE credential (design 01a0cfa8 §4), under the same law: every node
+    // value for the provider is deleted FIRST and the space's key set LAST
+    // (I4). For both providers the deleted name and the set name coincide, so
+    // reversing the two steps would delete the space key and leave the session
+    // keyless — or, with the order right but a node ANTHROPIC_AUTH_TOKEN left
+    // in place, running on the node's bearer under the space's name.
+    if (credentialHome.space) {
+      for (const key of SPACE_CREDENTIAL_SUPPRESSED_ENV_KEYS[credentialHome.provider] ?? []) {
+        delete env[key];
+      }
+      const keyVar = SPACE_CREDENTIAL_API_KEY_ENV[credentialHome.provider];
+      if (keyVar && credentialHome.space.apiKey) env[keyVar] = credentialHome.space.apiKey;
+    }
   }
 
   // GitHub is universal rather than agent-tool-specific. Apply after the env
   // copy loops and after XDG_CONFIG_HOME is redirected into the identity home,
   // so neither a parent token nor a machine helper/config can win precedence.
-  isolateGitHubCredential(env, gitHubCredential, githubCredentialSource === 'member');
+  // `space` is as strict as `member`: an explicit space token that is absent
+  // must fail authentication, never reach the node's machine gh (M8b).
+  isolateGitHubCredential(
+    env,
+    gitHubCredential,
+    githubCredentialSource === 'member' || githubCredentialSource === 'space',
+  );
 
   // Explicit empty strings also defend wrappers that interpret presence.
   env.CLAUDE_CODE_ENTRYPOINT = '';
@@ -1291,6 +1623,8 @@ export interface ComposeManifestInput {
   /** Why the launch runs unconfined, when it does. See `Tm8Manifest.launch.sandboxDegraded`. */
   sandboxDegraded?: string | null;
   now?: Date;
+  agentConfigDir?: string;
+  homeDir?: string;
 }
 
 /** Assemble the manifest. Pure — every input is already resolved.
@@ -1320,8 +1654,16 @@ export function composeManifest(input: ComposeManifestInput): Tm8Manifest {
   };
   const member = context.teamMember;
 
-  return redactSecretsDeep({
+  const effectiveSkills = computeEffectiveSkills({
+    agentTool: launch.agentTool, workdir: workdir.path, projectRoot: context.project?.workingDir ?? null,
+    equips: context.skillEquips ?? (context.skills ?? []).map(skill => ({ ...skill, depth: 0 })),
+    scannedAt: context.skillsScannedAt, agentConfigDir: input.agentConfigDir, homeDir: input.homeDir,
+  });
+  effectiveSkills.skipped.push(...(context.skippedSkills ?? []));
+  const manifest: Tm8Manifest = redactSecretsDeep({
     manifestVersion: '1',
+    // v1 unless the pinned profile opts a worker into v2 (spec ca8d Q14).
+    promptVersion: promptVersionFor({ mode: launch.mode, profileSnapshot: interactionProfile.snapshot }),
     sessionId,
     spaceId: context.spaceId,
     generatedAt: (input.now ?? new Date()).toISOString(),
@@ -1348,9 +1690,22 @@ export function composeManifest(input: ComposeManifestInput): Tm8Manifest {
       reasoningEffort: launch.reasoningEffort,
       credentialSource: launch.credentialSource,
       credentialSources: launch.credentialSources,
+      // Absent, not `{}`, when nothing ran on a space credential: 206's writer
+      // checks every key against a `space` source, and a launch that never
+      // touched the space writes the manifest it always wrote.
+      ...(launch.spaceCredentialIds && Object.keys(launch.spaceCredentialIds).length > 0
+        ? { spaceCredentialIds: { ...launch.spaceCredentialIds } }
+        : {}),
+      ...(launch.effectiveCredentialSources &&
+      Object.keys(launch.effectiveCredentialSources).length > 0
+        ? { effectiveCredentialSources: { ...launch.effectiveCredentialSources } }
+        : {}),
       commandNetwork: input.commandNetwork ?? resolveCommandNetworkPolicy(launch, {}),
       sandboxDegraded: input.sandboxDegraded ?? null,
       command,
+      // Passed through untouched; absent stays absent so a launch without
+      // Ask Jev writes the same manifest it always did.
+      ...(request.jevRunId ? { jevRunId: request.jevRunId } : {}),
     },
     session: {
       title: resolveSessionTitle(request, context),
@@ -1371,13 +1726,40 @@ export function composeManifest(input: ComposeManifestInput): Tm8Manifest {
     // and already de-duplicated nearest-first. Still defaults to [] — a spawn
     // context predating this (the test fake, an older caller) is "no skills",
     // not an error. This is the value change the shape was held stable for.
-    skills: context.skills ?? [],
+    skills: [...effectiveSkills.native, ...effectiveSkills.indexed].sort((a, b) => {
+      const rows = context.skillEquips ?? context.skills ?? [];
+      return rows.findIndex(row => row.entityId === a.entityId) - rows.findIndex(row => row.entityId === b.entityId);
+    }),
+    effectiveSkills,
+    ...(context.droppedSkills?.length ? { droppedSkills: context.droppedSkills } : {}),
     coordinator: coordinatorSessionId
       ? { sessionId: coordinatorSessionId, kind: resolveCoordinatorKind(context.parentKind) }
       : null,
     directive: null,
     promptExtra: request.promptExtra?.trim() || null,
   });
+  // Measure the real non-skill prompt once, then account for the exact escaped
+  // serializer. This stays linear even when a deep equipment chain has no count cap.
+  const baseline = composePrompt({ ...manifest, skills: [] }, { sessionId, baseUrl });
+  const baseBytes = utf8Bytes(`${baseline.system}\n\n${baseline.task}`);
+  let indexBytes = manifest.skills.length ? utf8Bytes(serializeSkillIndex(manifest.skills)) + 1 : 0;
+  const dropped: ManifestSkillContext[] = [];
+  while (baseBytes + indexBytes > BYTE_BUDGETS.combinedInitialInjection && manifest.skills.length) {
+    const removed = manifest.skills.pop()!;
+    dropped.push(removed);
+    indexBytes = manifest.skills.length ? indexBytes - utf8Bytes(serializeSkillIndexEntry(removed)) - 1 : 0;
+  }
+  if (dropped.length) {
+    dropped.reverse();
+    manifest.droppedSkills = [...(manifest.droppedSkills ?? []), ...dropped.map(skill => skill.name)];
+    const kept = new Set(manifest.skills.map(skill => skill.entityId));
+    const audit = manifest.effectiveSkills!;
+    audit.native = audit.native.filter(skill => kept.has(skill.entityId));
+    audit.indexed = audit.indexed.filter(skill => kept.has(skill.entityId));
+    audit.skipped.push(...dropped.map(skill => ({ entityId: skill.entityId, name: skill.name, hash: skill.hash, sourcePath: skill.sourcePath, reason: 'byte-budget' })));
+  }
+  composePrompt(manifest, { sessionId, baseUrl });
+  return manifest;
 }
 
 /**

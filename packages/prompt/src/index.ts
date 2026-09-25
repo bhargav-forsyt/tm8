@@ -1,3 +1,5 @@
+import { serializeSkillIndex, type PromptSkill } from './skill-index.js';
+export { serializeSkillIndex, serializeSkillIndexEntry, type PromptSkill } from './skill-index.js';
 /**
  * `@tm8/prompt` — the ONE agent-prompt composer, shared by the spawn path and
  * the CLI.
@@ -39,6 +41,8 @@ import {
   type BootstrapControlFacts,
   type CoordinatorKind,
 } from './templates.js';
+import { DEFAULT_PROMPT_VERSION, PROMPT_V2_MODES, PROMPT_VERSION_V2 } from './prompt-version.js';
+import { composeWorkerPromptV2, type TaskContextSnapshot } from './worker-v2.js';
 
 /**
  * The harness surfaces (§5.2 kernel, §8.1 budgets, §14 templates, §18 escaping)
@@ -48,7 +52,9 @@ import {
 export * from './budgets.js';
 export * from './escape.js';
 export * from './kernel.js';
+export * from './prompt-version.js';
 export * from './templates.js';
+export * from './worker-v2.js';
 
 export type AgentMode =
   | 'worker'
@@ -75,6 +81,8 @@ export const AGENT_MODES: readonly AgentMode[] = [
  * stays in `@tm8/execution`.
  */
 export interface PromptManifest {
+  /** The analytics tag the launch was stamped with (`prompt-version.ts`). */
+  promptVersion?: string | undefined;
   sessionId?: string | undefined;
   spaceId?: string | undefined;
   mode?: AgentMode | undefined;
@@ -89,6 +97,11 @@ export interface PromptManifest {
       }
     | undefined;
   project?: { id?: string; name?: string; workingDir?: string } | null | undefined;
+  /**
+   * Where the session actually runs. For a worktree or scratch session this is
+   * NOT the project root, so it wins over `project.workingDir` in the prompt.
+   */
+  session?: { workingDirectory?: string | undefined } | undefined;
   launch?:
     | {
         tool?: string | undefined;
@@ -124,6 +137,14 @@ export interface PromptManifest {
         /** Thread-derived tasks (064/099): the live thread's root and channel. */
         threadRootMessageId?: string | null | undefined;
         threadChannelId?: string | null | undefined;
+        /** Palette-linked references (see `TaskLinkedEntity`); bounded upstream. */
+        linked?: ReadonlyArray<{
+          entityId: string;
+          kind: string;
+          link: string;
+          title?: string | null | undefined;
+        }> | undefined;
+        linkedTotal?: number | undefined;
       }>
     | undefined;
   coordinator?:
@@ -139,7 +160,7 @@ export interface PromptManifest {
     | { subject?: string; message?: string; fromSessionId?: string }
     | null
     | undefined;
-  skills?: ReadonlyArray<{ name?: string | undefined; body?: string | undefined }> | undefined;
+  skills?: ReadonlyArray<PromptSkill> | undefined;
   promptExtra?: string | null | undefined;
 }
 
@@ -147,6 +168,17 @@ export interface PromptRuntime {
   /** Wins over the manifest — it is what the PTY actually set. */
   sessionId?: string | undefined;
   baseUrl?: string | undefined;
+  /**
+   * v2 only: the primary task's `tm8.entity-context.v2` DTO, rendered by the
+   * server at delivery time as the spawned actor. Absent means the v2 header
+   * degrades to "run `tm8 entity context` first" (spec ca8d §2.3).
+   */
+  taskContext?: TaskContextSnapshot | undefined;
+  /**
+   * v2 only: the session cwd holds `graphify-out/merged-graph.json`. The
+   * caller checks the disk; this package has no `fs` (Q9).
+   */
+  codeGraph?: boolean | undefined;
 }
 
 export interface PromptEnvelope {
@@ -158,10 +190,13 @@ export interface PromptEnvelope {
     spaceId: string | null;
     taskCount: number;
     commandCount: number;
+    /** The manifest's `promptVersion`, or the default when it predates the stamp. */
+    promptVersion: string;
   };
 }
 
-const PROMPT_VERSION = '1.0';
+/** The frame attribute the agent reads — not the analytics tag (`promptVersion`). */
+const FRAME_VERSION = '1.0';
 
 function esc(v: string): string {
   return v
@@ -416,7 +451,23 @@ export const COMMAND_SURFACE_INSTRUCTION =
   '`tm8 entity context <id>` for orientation — `entity get` returns the whole ' +
   'entity unbounded, so reach for it only when you need the full body and version. ' +
   'When a command pages, always pass --limit and continue with the returned ' +
-  'cursor. Never re-issue a read you have already made this session.';
+  'cursor. Never re-issue a read you have already made this session. ' +
+  'The same economy governs the REPOSITORY, where most of the tokens actually ' +
+  'go: measured on this fleet, tool results are 93.8% of everything re-read on ' +
+  'every later turn. If the project carries a code graph at ' +
+  '`graphify-out/merged-graph.json`, ask it before you grep — ' +
+  '`graphify affected|path|explain|query "<x>" --graph graphify-out/merged-graph.json` ' +
+  'answers a structural question (what calls this, what breaks if I change it, ' +
+  'where does this path lead) from an AST index in one bounded call. Measured ' +
+  'against grepping and opening candidate files on the same three questions: ' +
+  '40% cheaper, half the tool calls, and it named transitive dependents the ' +
+  'file-reading run never reached. When the graph answers, that IS the answer — ' +
+  'do not re-check it by grepping: it is an AST index of the same files, not a ' +
+  'guess. One or two queries settle a structural question; if three have not, ' +
+  'the question is not structural. Read the files themselves when you need to ' +
+  'understand or change code — the graph answers structure, not intent. ' +
+  'Then read the range you need (`sed -n X,Yp`, Read offset/limit), not the ' +
+  'whole file: every result is re-sent on each later turn.';
 
 /**
  * Codex's legacy read-only sandbox cannot enable command networking. A tm8
@@ -428,6 +479,10 @@ export const CODEX_PLAN_AUTHORIZATION_INSTRUCTION =
   'workspace source files. Codex uses the workspace-write sandbox only so commands ' +
   'can reach the loopback tm8 graph API through its proxy; that transport capability ' +
   'does not grant source-editing authority.';
+
+export const PLAN_AUTHORIZATION_INSTRUCTION =
+  'This is a plan/read-only tm8 session. Do not create, modify, rename, or delete ' +
+  'workspace source files.';
 
 export const NO_TASK_NOTE_V1 =
   'No task is attached to this session. Wait for instructions rather ' +
@@ -722,6 +777,7 @@ function composeBootstrapEnvelope(
   view: BootstrapView,
   manifestPath: string,
   mode: AgentMode,
+  promptVersion: string,
 ): PromptEnvelope {
   const system = composeBootstrapSystem(view, manifestPath);
   const taskIds = view.assignment?.taskIds ?? [];
@@ -748,6 +804,7 @@ function composeBootstrapEnvelope(
       taskCount: taskIds.length,
       // The three discovery roots — the only commands a v2 bootstrap names.
       commandCount: 3,
+      promptVersion,
     },
   };
 }
@@ -764,6 +821,9 @@ export function composePrompt(
   const commands = commandSurface(sessionId !== null);
   const coordinatorSessionId = manifest.coordinator?.sessionId?.trim() || null;
   const coordinatorKind = coordinatorKindOf(manifest.coordinator?.kind);
+  // A manifest written before the stamp existed was, by definition, booted on
+  // today's frame — so absent reads as the default rather than as unknown.
+  const promptVersion = manifest.promptVersion ?? DEFAULT_PROMPT_VERSION;
 
   // A `manifestVersion: "2"` bootstrap manifest takes the harness path: the
   // §5.2 kernel and one §14 control block, with no persona/skill/memory frame
@@ -778,7 +838,7 @@ export function composePrompt(
     ) {
       throw new Error(`${mode} prompt requires a coordinator session id`);
     }
-    return composeBootstrapEnvelope(bootstrap.view, bootstrap.path, mode);
+    return composeBootstrapEnvelope(bootstrap.view, bootstrap.path, mode, promptVersion);
   }
   if (
     (mode === 'coordinated-worker' || mode === 'coordinated-coordinator')
@@ -787,9 +847,30 @@ export function composePrompt(
     throw new Error(`${mode} prompt requires a coordinator session id`);
   }
 
+  const planAuthorization =
+    manifest.launch?.accessMode === 'plan'
+      ? manifest.launch.tool === 'codex'
+        ? CODEX_PLAN_AUTHORIZATION_INSTRUCTION
+        : PLAN_AUTHORIZATION_INSTRUCTION
+      : null;
+
+  // The v2.0 worker frame (spec ca8d). Selected by the stamp alone, and only
+  // for the modes it covers: a stamp on any other mode renders v1 rather than
+  // a frame nobody specified for it.
+  if (promptVersion === PROMPT_VERSION_V2 && PROMPT_V2_MODES.includes(mode)) {
+    return composeWorkerPromptV2(manifest, runtime, {
+      mode,
+      sessionId,
+      spaceId,
+      coordinatorSessionId,
+      planAuthorization,
+      noTaskNote: NO_TASK_NOTE_V2,
+    });
+  }
+
   // ---- system (v1 manifest) ----------------------------------------------
   const s: string[] = [];
-  s.push(`<tm8_system_prompt version="${PROMPT_VERSION}" mode="${esc(mode)}">`);
+  s.push(`<tm8_system_prompt version="${FRAME_VERSION}" mode="${esc(mode)}">`);
 
   s.push('  <identity>');
   s.push(`    <profile>${esc(profileFor(mode))}</profile>`);
@@ -828,21 +909,17 @@ export function composePrompt(
   if (spaceId) s.push(`    <space_id>${esc(spaceId)}</space_id>`);
   if (runtime.baseUrl) s.push(`    <server>${esc(runtime.baseUrl)}</server>`);
   const project = manifest.project;
-  if (project) {
-    if (project.name) s.push(`    <project>${esc(project.name)}</project>`);
-    if (project.workingDir) s.push(`    <working_dir>${esc(project.workingDir)}</working_dir>`);
-  }
+  if (project?.name) s.push(`    <project>${esc(project.name)}</project>`);
+  // The session's own cwd, not the project root: a worktree session told to
+  // work in the shared checkout edits the wrong tree. The project root is only
+  // the fallback for a manifest that predates `session.workingDirectory`.
+  const workingDir = manifest.session?.workingDirectory || project?.workingDir;
+  if (workingDir) s.push(`    <working_dir>${esc(workingDir)}</working_dir>`);
   s.push('  </session_context>');
 
-  if (manifest.launch?.accessMode === 'plan') {
+  if (planAuthorization) {
     s.push('  <authorization access_mode="plan">');
-    s.push(
-      `    <instruction>${
-        manifest.launch.tool === 'codex'
-          ? CODEX_PLAN_AUTHORIZATION_INSTRUCTION
-          : 'This is a plan/read-only tm8 session. Do not create, modify, rename, or delete workspace source files.'
-      }</instruction>`,
-    );
+    s.push(`    <instruction>${planAuthorization}</instruction>`);
     s.push('  </authorization>');
   }
 
@@ -888,23 +965,8 @@ export function composePrompt(
   }
   s.push('  </command_surface>');
 
-  const skills = manifest.skills ?? [];
-  if (skills.length > 0) {
-    // A skill body is `public.skills.content` — graph text any space member can
-    // write through `entities.patch`. The NAME stays a trusted attribute (the
-    // frame owns it as an identifier); the BODY is authored content and travels
-    // as untrusted data like every other authored payload.
-    s.push('  <skills>');
-    for (const skill of skills) {
-      const name = skill.name ?? 'unnamed';
-      if (skill.body) {
-        s.push(untrustedData({ type: 'skill-body', body: skill.body, extraAttrs: { name } }));
-      } else {
-        s.push(`    <skill name="${esc(name)}" />`);
-      }
-    }
-    s.push('  </skills>');
-  }
+  const skillIndex = serializeSkillIndex(manifest.skills ?? []);
+  if (skillIndex) s.push(skillIndex);
 
   if (manifest.promptExtra) {
     // `--context` / `ExecutionSpawnInput.promptExtra`, and the most exposed
@@ -945,6 +1007,8 @@ export function composePrompt(
       attachments: task.attachments,
       threadRootMessageId: task.threadRootMessageId ?? null,
       threadChannelId: task.threadChannelId ?? null,
+      linked: task.linked ?? [],
+      linkedTotal: task.linkedTotal ?? 0,
     }));
   }
   if (tasks.length === 0) {
@@ -1026,6 +1090,7 @@ export function composePrompt(
       spaceId,
       taskCount: tasks.length,
       commandCount: commands.length,
+      promptVersion,
     },
   };
 }

@@ -6,7 +6,7 @@
  * a `Db`, and never reads config beyond what it is handed — so the lane is
  * testable by handing it a fake `Db` and a bare `HandlerRegistry`.
  *
- * Exactly one operation is registered here today: `events.poll`. `events.subscribe`
+ * Two HTTP operations are registered here: `events.poll` and `events.changes`. `events.subscribe`
  * is WS-only (catalog line 128, method `WS`) and is served by the upgrade path in
  * ws-server.ts, not by an HTTP handler — which is also why /health reports 80
  * mounted HTTP routes for an 81-entry catalog.
@@ -20,6 +20,7 @@ import type { HandlerRegistry } from '../facade/index.js';
 import type { ServerConfig } from '../http/config.js';
 import { createLoopbackOwnerResolver, type LoopbackOwner } from '../identity/loopback.js';
 import { json } from '../http/types.js';
+import { PgChangeFeed, parseChangesQuery } from './changes.js';
 import { DEFAULT_POLL_LIMIT, PgDurableEventLog, type DurableEventLog } from './poll.js';
 import { emptyPresence, type PresenceStore } from './presence.js';
 
@@ -33,6 +34,8 @@ export interface EventHandlerDeps {
    * undefined and gets `PgDurableEventLog` over `deps.db`.
    */
   readonly log?: DurableEventLog;
+  /** Override the change feed. Tests inject one; production gets `PgChangeFeed` over `deps.db`. */
+  readonly changes?: Pick<PgChangeFeed, 'read'>;
   /**
    * The ephemeral presence source (DEV-4). ABSENT MEANS `presence.get` IS NOT
    * MOUNTED, and the router keeps answering 501 — see the registration below.
@@ -76,6 +79,19 @@ function parseLimit(raw: string | null): number {
   return value;
 }
 
+/**
+ * `?entity=<id>`: optional. A malformed id is refused rather than matched —
+ * it could never match, and an always-empty filtered page would read as
+ * "nothing happened to that entity".
+ */
+function parseEntity(raw: string | null): string | undefined {
+  if (raw === null || raw === '') return undefined;
+  if (!UUID_RE.test(raw)) {
+    throw new CollabError('invalid_input', `entity must be an entity id (uuid), got '${raw}'`);
+  }
+  return raw.toLowerCase();
+}
+
 export function registerEventHandlers(registry: HandlerRegistry, deps: EventHandlerDeps): void {
   // One identity path (see test/one-identity-path.test.ts). Claims come from
   // facade/context.ts's `claimsFor` and nowhere else — this file used to define
@@ -97,14 +113,30 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
       throw new CollabError('invalid_input', 'spaceId is required');
     }
 
+    const entity = parseEntity(ctx.query.get('entity'));
     const page = await log.since(
       spaceId,
       parseSince(ctx.query.get('since')),
       parseLimit(ctx.query.get('limit')),
       claimsFor(await owner(), ctx),
+      entity === undefined ? {} : { entityId: entity },
     );
 
     return json(page);
+  });
+
+  // The scoped change feed (spec doc 01a0cf35): a per-entity digest of what
+  // changed after `?after=`, over the same visibility rules as the poll above.
+  const feed = deps.changes ?? new PgChangeFeed(deps.db, {
+    onSkip: (message) => console.warn(`events.changes skipped an event: ${message}`),
+  });
+  registry.register('events.changes', async (ctx) => {
+    const spaceId = ctx.params['spaceId'];
+    if (spaceId === undefined || spaceId === '') {
+      throw new CollabError('invalid_input', 'spaceId is required');
+    }
+    const request = parseChangesQuery(ctx.query);
+    return json(await feed.read(spaceId, request, claimsFor(await owner(), ctx)));
   });
 
   // `presence.get` is only mounted when this node actually has a presence

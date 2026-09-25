@@ -1,3 +1,8 @@
+import { loadSkillEquipment, loadTaskSkillEquipment } from '../skills/equipment.js';
+import { SKILL_REFERENCE_SQL, skillReferenceOf } from '../skills/reference.js';
+import { linkSession } from '../jev/store.js';
+import { computeEffectiveSkills, splitTaskSkillCollisions, type ResolvedSkillRow } from '@tm8/execution';
+import { scanSpaceSkills } from '../skills/service.js';
 /**
  * The execution.* handler family (R16) — where the graph meets the terminal.
  *
@@ -25,7 +30,6 @@ import {
   SpawnService,
   PtyHostService,
   PromptSettlementWaiter,
-  resolveSkills,
   readSessionTranscript,
   knownAgentConfigDirs,
   type CreateWorkSessionInput,
@@ -51,10 +55,13 @@ import {
   type WorkdirMode,
   type WorkSessionResumeInfo,
   type WorkSessionStatus,
+  type WorkSessionUsage,
+  type WorkSessionUsageSource,
   WorktreeManager,
   type WorktreeAllocationRow,
   type WorktreeAllocationState,
   type GhostReconcileReport,
+  type AutoResumeReport,
   type WorktreeReconcileReport,
 } from '@tm8/execution';
 import { CollabError, SessionJournalRecordSchema } from '@tm8/contract';
@@ -68,6 +75,7 @@ import type {
   ExecutionLiveness,
   ExecutionPromptInput,
   ExecutionResumeInput,
+  ExecutionSessionsShareInput,
   ExecutionSpawnInput,
   ExecutionTerminalStartInput,
   ExecutionStreamsAttachInput,
@@ -75,21 +83,25 @@ import type {
   SessionJournalPage,
   SessionJournalRecord,
   SessionLaunchRecord,
+  SkippedSkill,
+  SpawnSelection,
 } from '@tm8/contract';
 import { createReadStream } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
-import type { Db, DbClaims } from '../db/types.js';
+import type { Db, DbClaims, Querier } from '../db/types.js';
 import { PgDurableSeqSource } from '../events/seq.js';
 import { DbAgentCredentialHome } from '../credentials/agent-credential-injection.js';
 import { DbGitHubCredentialStore } from '../credentials/github-credential-store.js';
+import { spaceCredentialPort } from '../credentials/space-credential-port.js';
 import type { ServerConfig } from '../http/config.js';
 import { fail } from '../http/errors.js';
 import type { RequestContext } from '../http/types.js';
 import { json } from '../http/types.js';
 import { claimsFor, commandEnvelope, requireUuidParam } from './context.js';
+import { loadContextV2 } from './services/w2/feed-context-v2.js';
 import { toCommandResult, type RpcCommandResult } from './handlers/entities.js';
 import { createLoopbackOwnerResolver, type LoopbackOwner } from '../identity/loopback.js';
 import type { HandlerRegistry } from './registry.js';
@@ -155,23 +167,18 @@ interface TaskRow {
    * envelope's <source>/<thread> elements. */
   thread_root_message_id: string | null;
   thread_channel_id: string | null;
-}
-
-interface SkillRow {
-  entity_id: string;
-  name: string;
-  content: string;
-  /** pg returns `min(...)` over an int as a string via node-postgres. */
-  depth: string | number;
+  /** First LINKED_ROW_CAP linked peers, oldest link first (see the `tl` join). */
+  linked: unknown;
+  linked_total: number;
 }
 
 /**
- * How far the skill resolver will walk up a team member hierarchy. These are
- * org charts, not trees, so this is a runaway guard rather than a real product
- * limit — but it is also what stops a recursive CTE spinning if the hierarchy's
- * acyclicity trigger is ever bypassed (a restore, a direct write).
+ * How many linked peers the spawn read carries per task. The prompt renders
+ * fewer still (its own cap, `LINKED_MANIFEST_CAP`) and declares the rest by
+ * count, so this only bounds the row width. `linked_total` stays exact.
  */
-const MAX_HIERARCHY_DEPTH = 16;
+const LINKED_ROW_CAP = 32;
+
 
 interface MemoryRow {
   entity_id: string;
@@ -234,6 +241,57 @@ function renderMemories(rows: MemoryRow[], requestedIds: string[]): string[] {
   return out;
 }
 
+/**
+ * `execution.spawn.selection` names only live memories and skills of THIS
+ * space that the caller can read (design 01a0cb80 §5.2, §8). Anything else is
+ * refused with `invalid_input` NAMING every bad id — a selected entity deleted
+ * before launch is surfaced, never silently dropped.
+ */
+export async function assertSelectionIds(q: Querier, spaceId: string, selection: SpawnSelection): Promise<void> {
+  const ids = [...selection.memoryIds, ...selection.skillIds];
+  const rows = ids.length === 0 ? [] : await q.query<{ id: string; kind: string }>(
+    `select e.id, e.kind from public.entities e
+      where e.id = any($1::uuid[]) and e.space_id = $2 and e.deleted_at is null`,
+    [ids, spaceId],
+  );
+  const kinds = new Map(rows.map((row) => [row.id, row.kind]));
+  const memoryIds = [...new Set(selection.memoryIds.filter((id) => kinds.get(id) !== 'memory'))];
+  const skillIds = [...new Set(selection.skillIds.filter((id) => kinds.get(id) !== 'skill'))];
+  if (memoryIds.length === 0 && skillIds.length === 0) return;
+  const named = [
+    ...(memoryIds.length ? [`memoryIds ${memoryIds.join(', ')}`] : []),
+    ...(skillIds.length ? [`skillIds ${skillIds.join(', ')}`] : []),
+  ].join('; ');
+  throw fail(
+    'invalid_input',
+    `selection names entities that are not live memories/skills in this space: ${named}`,
+    { invalidMemoryIds: memoryIds, invalidSkillIds: skillIds },
+  );
+}
+
+/**
+ * Selected skills the teammate is NOT equipped with, read by id with the same
+ * metadata projection as `loadSkillEquipment` (never the body). Read only: no
+ * equip edge is written — the skill rides this one session (#646's rule).
+ * Depth 0, as if the teammate itself equipped it: a same-name clash with
+ * another selected skill then refuses loudly in `resolveSkills` instead of one
+ * of them vanishing.
+ */
+async function loadSkillsById(q: Querier, spaceId: string, ids: readonly string[]): Promise<ResolvedSkillRow[]> {
+  if (ids.length === 0) return [];
+  const rows = await q.query<{ entity_id: string; version: number; name: string; description: string; reference: Record<string, unknown> }>(
+    `select sk.entity_id, se.version, sk.name, sk.description, ${SKILL_REFERENCE_SQL} as reference
+       from public.skills sk
+       join public.entities se on se.id = sk.entity_id and se.kind = 'skill' and se.space_id = $2 and se.deleted_at is null
+      where sk.entity_id = any($1::uuid[])`,
+    [ids, spaceId],
+  );
+  return rows.map((row) => ({
+    ...skillReferenceOf(row.reference),
+    entityId: row.entity_id, entityVersion: row.version, name: row.name, description: row.description, depth: 0,
+  }));
+}
+
 export class DbGraphPort implements GraphPort {
   constructor(
     private readonly db: Db,
@@ -267,6 +325,17 @@ export class DbGraphPort implements GraphPort {
    * have been authorised.
    */
   async loadSpawnContext(auth: GraphAuth, input: LoadSpawnContextInput): Promise<SpawnContext> {
+    // The scan REFRESHES cached skill metadata; it is not an authorization
+    // step. A scan that cannot run (a caller the scan's membership check does
+    // not recognise, an unreadable root) leaves the last cached references in
+    // place and the spawn proceeds — RLS on the transaction below is what
+    // decides whether this spawn is allowed at all.
+    let skillsScannedAt: string | null = null;
+    try {
+      skillsScannedAt = (await scanSpaceSkills(this.db, this.claims(auth), input.spaceId, input.projectId ? { root: input.projectId } : { homesOnly: true })).scannedAt;
+    } catch (error) {
+      console.warn(`[tm8:skills] pre-spawn scan skipped for space ${input.spaceId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return this.db.tx(this.claims(auth), async (q) => {
       const members = await q.query<TeamMemberRow>(
         `select tm.entity_id, tm.name, tm.role, tm.identity, tm.memories, tm.model,
@@ -292,9 +361,32 @@ export class DbGraphPort implements GraphPort {
       // `memoryIds` (D3a) are validated hard — a spawn that names a memory the
       // caller cannot read, or that is not a memory, must refuse rather than
       // quietly inject less than was asked.
-      const requestedIds = input.memoryIds ?? [];
+      //
+      // `selection` (design 01a0cb80 §5.2) REPLACES all of that: the session
+      // carries exactly the selected memories, in the selected order, and
+      // nothing else — not the working set, not the task sets, not the legacy
+      // jsonb remainder. Validated first, so a bad id refuses by name.
+      const selection = input.selection;
+      if (selection) await assertSelectionIds(q, input.spaceId, selection);
+      const requestedIds = selection ? selection.memoryIds : input.memoryIds ?? [];
       const spawnTaskIds = input.taskIds ?? [];
-      const memoryRows = await q.query<MemoryRow>(
+      const memoryRows = selection ? await q.query<MemoryRow>(
+        `select m.entity_id, m.statement, e.version,
+                false as remembered, false as task_remembered,
+                exists (select 1 from public.edges s
+                         where s.type = 'supersedes' and s.dst_id = m.entity_id) as superseded,
+                exists (select 1 from public.edges d
+                         where d.type = 'disputes' and d.dst_id = m.entity_id
+                           and (d.props ->> 'pinnedVersion')::int = e.version) as disputed,
+                exists (select 1 from public.edges v
+                         where v.type = 'verifies' and v.dst_id = m.entity_id
+                           and (v.props ->> 'pinnedVersion')::int = e.version) as verified,
+                m.created_at
+           from public.memories m
+           join public.entities e on e.id = m.entity_id and e.deleted_at is null
+          where e.space_id = $2 and m.entity_id = any($1::uuid[])`,
+        [requestedIds, input.spaceId],
+      ) : await q.query<MemoryRow>(
         `select m.entity_id, m.statement, e.version,
                 (r.dst_id is not null) as remembered,
                 exists (select 1 from public.edges t
@@ -326,8 +418,8 @@ export class DbGraphPort implements GraphPort {
       const missing = requestedIds.filter((id) => !foundIds.has(id));
       if (missing.length > 0) {
         throw fail(
-          'not_found',
-          `memoryIds not found in this space (or not memory entities): ${missing.join(', ')}`,
+          selection ? 'invalid_input' : 'not_found',
+          `${selection ? 'selection.memoryIds' : 'memoryIds'} not found in this space (or not memory entities): ${missing.join(', ')}`,
         );
       }
       const injectedMemories = renderMemories(memoryRows, requestedIds);
@@ -388,43 +480,66 @@ export class DbGraphPort implements GraphPort {
       // produce a manifest describing capability the persona no longer has.
       //
       // `depth` is hops from the invoked member (0 = itself). The recursion is
-      // bounded by MAX_HIERARCHY_DEPTH rather than trusting the hierarchy to be
+      // bounded to 16 ancestor hops rather than trusting the hierarchy to be
       // acyclic: 001_core_graph.sql's trigger does enforce acyclicity, but a
       // recursive CTE that meets a cycle anyway spins until it exhausts memory,
       // and this query runs on the spawn path.
-      const skillRows = await q.query<SkillRow>(
-        `with recursive chain as (
-             select e.id, e.parent_id, 0 as depth
-               from public.entities e
-              where e.id = $1 and e.space_id = $2
-                and e.kind = 'team_member' and e.deleted_at is null
-             union all
-             select p.id, p.parent_id, c.depth + 1
-               from chain c
-               join public.entities p on p.id = c.parent_id
-              where p.space_id = $2 and p.kind = 'team_member'
-                and p.deleted_at is null and c.depth < $3
-           )
-         select s.entity_id, s.name, s.content, min(chain.depth) as depth
-           from chain
-           join public.edges ed
-             on ed.src_id = chain.id and ed.type = 'equips' and ed.space_id = $2
-           join public.entities se
-             on se.id = ed.dst_id and se.kind = 'skill' and se.deleted_at is null
-           join public.skills s on s.entity_id = se.id
-          group by s.entity_id, s.name, s.content
-          order by depth, s.name`,
-        [input.teamMemberId, input.spaceId, MAX_HIERARCHY_DEPTH],
-      );
-
-      const resolution = resolveSkills(
-        skillRows.map((r) => ({
-          entityId: r.entity_id,
-          name: r.name,
-          body: r.content,
-          depth: Number(r.depth),
-        })),
-      );
+      // Plus what the spawn's TASKS equip (`equips` task → skill, which the task
+      // attach palette writes). Deduped by id against the persona's rows, which
+      // keep theirs. The union rides everything below unchanged: `selection`
+      // narrows it, `not-selected` audits it, and the manifest's byte budget
+      // drops and declares it, so a task skill is equipped, not merely listed.
+      const personaEquipped = await loadSkillEquipment(q, input.spaceId, input.teamMemberId);
+      const personaIds = new Set(personaEquipped.map((row) => row.entityId));
+      const equipped = [
+        ...(await loadTaskSkillEquipment(q, input.spaceId, input.taskIds ?? []))
+          .filter((row) => !personaIds.has(row.entityId)),
+        ...personaEquipped,
+      ];
+      // `selection`: exactly the selected skills, in the selected order. An
+      // equipped skill keeps its equipment row (and depth); an unequipped one
+      // is read by id for this session only. Equipped skills left out are
+      // audited as `not-selected`, so a smaller index is explained, not silent.
+      let skillEquips = equipped;
+      let skippedSkills: SkippedSkill[] | undefined;
+      if (selection) {
+        const wanted = [...new Set(selection.skillIds)];
+        const byId = new Map(equipped.map((row) => [row.entityId, row]));
+        for (const row of await loadSkillsById(q, input.spaceId, wanted.filter((id) => !byId.has(id)))) {
+          byId.set(row.entityId, row);
+        }
+        skillEquips = wanted.flatMap((id) => {
+          const row = byId.get(id);
+          return row ? [row] : [];
+        });
+        const kept = new Set(wanted);
+        skippedSkills = equipped.filter((row) => !kept.has(row.entityId)).map((row) => ({
+          entityId: row.entityId,
+          name: row.name,
+          ...(row.contentHash ? { hash: row.contentHash } : {}),
+          ...(row.sourcePath ? { sourcePath: row.sourcePath } : {}),
+          reason: 'not-selected',
+        }));
+      }
+      // Two task skills with one name never fail the spawn: the first in task
+      // order (then name, as the loader sorts) wins and the rest are declared.
+      // Applied AFTER `selection`, so a selection naming both still spawns.
+      const collisions = splitTaskSkillCollisions(skillEquips);
+      if (collisions.collided.length > 0) {
+        skillEquips = collisions.kept;
+        skippedSkills = [
+          ...(skippedSkills ?? []),
+          ...collisions.collided.map((row) => ({
+            entityId: row.entityId,
+            name: row.name,
+            ...(row.contentHash ? { hash: row.contentHash } : {}),
+            ...(row.sourcePath ? { sourcePath: row.sourcePath } : {}),
+            reason: 'task-name-collision',
+          })),
+        ];
+      }
+      // Candidates stay untruncated; native scope is resolved with the actual launch later.
+      const candidates = computeEffectiveSkills({ agentTool: '', workdir: '/', projectRoot: null, equips: skillEquips });
 
       const taskIds = input.taskIds ?? [];
       const tasks =
@@ -441,7 +556,9 @@ export class DbGraphPort implements GraphPort {
                       t.acceptance_criteria,
                       coalesce(ta.attachments, '[]'::jsonb) as attachments,
                       dm.root_id as thread_root_message_id,
-                      dm.anchor_id as thread_channel_id
+                      dm.anchor_id as thread_channel_id,
+                      coalesce(tl.items, '[]'::jsonb) as linked,
+                      coalesce(tl.total, 0) as linked_total
                  from public.tasks t
                  join public.entities e on e.id = t.entity_id
                  left join lateral (
@@ -468,6 +585,48 @@ export class DbGraphPort implements GraphPort {
                     where a.type = 'attached_to'
                       and a.dst_id = t.entity_id
                  ) ta on true
+                 -- Everything else the task attach palette links, as
+                 -- REFERENCES: outgoing relates_to (teammates, sessions) and
+                 -- incoming attached_to from anything that is not a file
+                 -- (drawings, docs, artifacts; files ride ta above). NOT
+                 -- remembers (D9 injects those memories whole) and NOT
+                 -- equips (task skills join the skill index). Live, same-space
+                 -- peers only. A work_session's title is never read: a session
+                 -- is referenced by id alone.
+                 left join lateral (
+                   select jsonb_agg(
+                            jsonb_build_object(
+                              'entityId', x.peer_id, 'kind', x.kind,
+                              'link', x.link, 'title', x.title
+                            ) order by x.rn
+                          ) filter (where x.rn <= ${LINKED_ROW_CAP}) as items,
+                          count(*)::int as total
+                     from (
+                       select l.peer_id, pe.kind, l.link,
+                              case when pe.kind = 'work_session' then null
+                                   else coalesce(ld.title, ldr.title, lar.name, ltm.name, ltt.title)
+                              end as title,
+                              row_number() over (order by l.created_at, l.edge_id) as rn
+                         from (
+                           select r.dst_id as peer_id, 'relates_to'::text as link, r.created_at, r.id as edge_id
+                             from public.edges r
+                            where r.src_id = t.entity_id and r.type = 'relates_to'
+                           union all
+                           select a.src_id, 'attached_to', a.created_at, a.id
+                             from public.edges a
+                            where a.dst_id = t.entity_id and a.type = 'attached_to'
+                         ) l
+                         join public.entities pe
+                           on pe.id = l.peer_id and pe.space_id = e.space_id
+                          and pe.deleted_at is null
+                          and not (l.link = 'attached_to' and pe.kind = 'file')
+                         left join public.documents ld on ld.entity_id = pe.id
+                         left join public.drawings ldr on ldr.entity_id = pe.id
+                         left join public.artifacts lar on lar.entity_id = pe.id
+                         left join public.team_members ltm on ltm.entity_id = pe.id
+                         left join public.tasks ltt on ltt.entity_id = pe.id
+                     ) x
+                 ) tl on true
                 where t.entity_id = any($1::uuid[])
                   and e.space_id = $2 and e.deleted_at is null`,
               [taskIds, input.spaceId],
@@ -486,7 +645,7 @@ export class DbGraphPort implements GraphPort {
           // writers) rides along so no entry silently vanishes mid-cutover.
           memories: [
             ...injectedMemories,
-            ...(Array.isArray(member.memories) ? member.memories : []),
+            ...(!selection && Array.isArray(member.memories) ? member.memories : []),
           ],
           model: member.model,
           agentTool: member.agent_tool,
@@ -525,9 +684,29 @@ export class DbGraphPort implements GraphPort {
               : [],
             threadRootMessageId: t.thread_root_message_id ?? null,
             threadChannelId: t.thread_channel_id ?? null,
+            linked: Array.isArray(t.linked)
+              ? t.linked.flatMap((value) => {
+                  if (!value || typeof value !== 'object') return [];
+                  const item = value as Record<string, unknown>;
+                  return typeof item.entityId === 'string' &&
+                    typeof item.kind === 'string' &&
+                    typeof item.link === 'string'
+                    ? [{
+                        entityId: item.entityId,
+                        kind: item.kind,
+                        link: item.link,
+                        title: typeof item.title === 'string' ? item.title : null,
+                      }]
+                    : [];
+                })
+              : [],
+            linkedTotal: Number(t.linked_total ?? 0),
           })),
-        skills: resolution.skills,
-        droppedSkills: resolution.dropped,
+        skills: candidates.indexed,
+        skillEquips,
+        ...(skippedSkills ? { skippedSkills } : {}),
+        skillsScannedAt,
+        droppedSkills: [],
       };
     });
   }
@@ -696,6 +875,24 @@ export class DbGraphPort implements GraphPort {
     };
   }
 
+  /**
+   * Prompt v2's embedded orientation read (spec ca8d §2.2): the exact
+   * `entities.context` v2 projection, all default sections, as the NEW
+   * session's actor — `internal.actor_id()` then resolves the persona through
+   * `participates_in`, so `you:true` is the agent's own view, not the
+   * spawner's. Read-only; the spawner's identity still bounds visibility.
+   */
+  async loadTaskContextSnapshot(
+    auth: GraphAuth,
+    input: { sessionId: string; taskId: string; totalBytes: number },
+  ): Promise<Record<string, unknown>> {
+    const claims: DbClaims = { ...this.claims(auth), actorId: input.sessionId };
+    const view = await this.db.tx(claims, (q) =>
+      loadContextV2(q, input.taskId, { sections: null, totalBytes: input.totalBytes }),
+    );
+    return view as unknown as Record<string, unknown>;
+  }
+
   async issueWorkSessionAgentToken(
     auth: GraphAuth,
     sessionId: string,
@@ -839,12 +1036,14 @@ export class DbGraphPort implements GraphPort {
       permission_mode: string | null;
       credential_source: string | null;
       credential_sources: unknown;
+      space_credential_ids: unknown;
     }>(
       this.claims(auth),
       `select sm.manifest #>> '{launch,accessMode}'       as access_mode,
               sm.manifest #>> '{launch,permissionMode}'   as permission_mode,
               sm.manifest #>> '{launch,credentialSource}' as credential_source,
-              sm.manifest #>  '{launch,credentialSources}' as credential_sources
+              sm.manifest #>  '{launch,credentialSources}' as credential_sources,
+              sm.manifest #>  '{launch,spaceCredentialIds}' as space_credential_ids
          from public.session_manifests sm
         where sm.work_session_id = $1`,
       [sessionId],
@@ -873,6 +1072,14 @@ export class DbGraphPort implements GraphPort {
           storedCredentialSources[provider] ?? null,
         ]),
       ) as SessionLaunchPosture['credentialSources'],
+      // The EXACT ids a child and a resume inherit (A4). Narrowed downstream,
+      // where a `space` source without a well-formed id refuses (M8a).
+      spaceCredentialIds:
+        typeof row.space_credential_ids === 'object' &&
+        row.space_credential_ids !== null &&
+        !Array.isArray(row.space_credential_ids)
+          ? (row.space_credential_ids as Record<string, unknown>)
+          : null,
     };
   }
 
@@ -917,6 +1124,30 @@ export class DbGraphPort implements GraphPort {
         nativeSessionId,
         null, // p_actor_id — derived from claims
       ],
+    );
+    return stored === true;
+  }
+
+  /**
+   * The usage instrument (185). A SEPARATE RPC from `work_session_transition`
+   * on purpose: that function is R29's single writer of status, and 171/177
+   * show what a signature change there costs (DROP + CREATE, five positional
+   * callers, a re-armed PUBLIC grant). This writes only the three usage
+   * columns, which 001's status guard does not cover, and bumps
+   * `entities.version` so the fact reaches clients the way 107's does. The
+   * document goes over as text: `rpc` binds it as a parameter and Postgres
+   * casts it to the function's jsonb argument, exactly as `record_session_manifest`.
+   */
+  async recordWorkSessionUsage(
+    auth: GraphAuth,
+    sessionId: string,
+    usage: WorkSessionUsage,
+    source: WorkSessionUsageSource,
+  ): Promise<boolean> {
+    const stored = await this.db.rpc<boolean>(
+      this.claims(auth),
+      'public.record_work_session_usage',
+      [sessionId, JSON.stringify(usage), source],
     );
     return stored === true;
   }
@@ -972,6 +1203,38 @@ export class DbGraphPort implements GraphPort {
       [nodeId],
     );
     return rows.map((r) => ({ sessionId: r.entity_id, status: r.status as WorkSessionStatus }));
+  }
+
+  /**
+   * Agent sessions on `nodeId` a server restart interrupted since `since` —
+   * boot-time auto-resume's candidates. Same posture as the read above: a
+   * plain RLS-scoped read, node-local maintenance rather than a contract
+   * surface, and `deleted_at is null` for the same reason.
+   *
+   * `status = 'failed'` alongside the ending is not redundant: a session
+   * already resumed by hand is back at spawning/running/idle and keeps its old
+   * `ended_kind` until it next ends, so the ending alone would pick it up again.
+   */
+  async listNodeInterruptedSessions(
+    auth: GraphAuth,
+    nodeId: string,
+    since: Date,
+  ): Promise<Array<{ sessionId: string; exitedAt: Date }>> {
+    const rows = await this.db.query<{ entity_id: string; exited_at: Date }>(
+      this.claims(auth),
+      `select ws.entity_id, ws.exited_at
+         from public.work_sessions ws
+         join public.entities e on e.id = ws.entity_id
+        where ws.node_id = $1
+          and ws.session_kind = 'agent'
+          and ws.status = 'failed'
+          and ws.ended_kind = 'server_restart'
+          and ws.exited_at >= $2
+          and e.deleted_at is null
+        order by ws.exited_at desc`,
+      [nodeId, since],
+    );
+    return rows.map((r) => ({ sessionId: r.entity_id, exitedAt: new Date(r.exited_at) }));
   }
 
   // --- worktree provisioning (design §4) --------------------------------------
@@ -1164,6 +1427,28 @@ export class DbGraphPort implements GraphPort {
       null,
     ]);
   }
+
+  /** execution.sessions.share — turns the two dials `grantStreamAttach`
+   *  reads (187). Kept next to it deliberately: this is the only write that
+   *  can change whether the call above succeeds for anyone but the owner. */
+  async setWorkSessionSharing(
+    auth: GraphAuth,
+    sessionId: string,
+    input: { shareMode?: string; driveMode?: string; expectedVersion?: number },
+    clientMutationId: string | null,
+  ): Promise<unknown> {
+    return this.db.rpc(this.claims(auth), 'public.set_work_session_sharing', [
+      sessionId,
+      input.expectedVersion ?? null,
+      // `null` MERGES in the RPC, so an omitted dial is left alone rather
+      // than reset — a client that only wants to stop drive must not
+      // silently re-close the session to viewers as a side effect.
+      input.shareMode ?? null,
+      input.driveMode ?? null,
+      null, // p_actor_id — derived from claims
+      clientMutationId,
+    ]);
+  }
 }
 
 // --- runtime -----------------------------------------------------------------
@@ -1201,6 +1486,36 @@ export class DbGraphPort implements GraphPort {
  *  type this value has to pass through, so it is the largest "unlimited" that
  *  cannot overflow on the way to the guard. */
 const UNLIMITED_SESSION_CAP = 2_147_483_647;
+
+/**
+ * Boot-time auto-resume policy, from the environment.
+ *
+ *   TM8_AUTO_RESUME               on by default; `0|off|false|no` disables it
+ *   TM8_AUTO_RESUME_WINDOW_HOURS  how old an interruption may be (default 24)
+ *   TM8_AUTO_RESUME_STAGGER_MS    gap between resumes (default 2000)
+ *
+ * ON BY DEFAULT because the ending it acts on already promises the user a
+ * resume ("it can be resumed to pick up where it left off"), and a node that
+ * makes that promise and then waits for sixty clicks has not kept it.
+ * Unparseable numbers fall back to the default rather than refusing to boot.
+ */
+export function resolveAutoResumePolicy(env: NodeJS.ProcessEnv = process.env): {
+  enabled: boolean;
+  windowMs: number;
+  staggerMs: number;
+} {
+  const flag = env['TM8_AUTO_RESUME']?.trim().toLowerCase();
+  const enabled = !(flag !== undefined && /^(0|off|false|no)$/.test(flag));
+  const positive = (raw: string | undefined, fallback: number): number => {
+    const n = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  return {
+    enabled,
+    windowMs: positive(env['TM8_AUTO_RESUME_WINDOW_HOURS'], 24) * 3_600_000,
+    staggerMs: positive(env['TM8_AUTO_RESUME_STAGGER_MS'], 2_000),
+  };
+}
 
 export function resolveSessionCap(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env['TM8_SESSION_CAP']?.trim();
@@ -1300,6 +1615,14 @@ export interface ExecutionRuntime {
    * shutdown must not hang or fail because bookkeeping did.
    */
   recordShutdown(signal: string): Promise<number>;
+  /**
+   * Resume the agent sessions the last restart interrupted, per
+   * `resolveAutoResumePolicy`. Call once, AFTER the listener is up and after
+   * `reconcileGhosts` (which is what files a SIGKILLed session under
+   * `server_restart` in the first place). Never rejects; resolves to
+   * `{ resumed: [], errors: [] }` when the policy is off.
+   */
+  resumeInterrupted(): Promise<AutoResumeReport>;
 }
 
 /**
@@ -1371,9 +1694,15 @@ export function createExecutionRuntime(deps: ExecutionRuntimeDeps): ExecutionRun
             dataDir: deps.dataDir,
             ...(deps.logger ? { logger: deps.logger } : {}),
           }),
+          // SC-2: the space rung of D4. Same data-root condition: the sealed
+          // key and every per-session home live under it.
+          spaceCredentials: spaceCredentialPort(deps.db, deps.dataDir, deps.logger),
         }
       : {}),
     ...(worktrees ? { worktrees } : {}),
+    // Model routing. `undefined` unless this node has BOTH a policy and a key,
+    // and undefined spreads to nothing — so a fleet that sets neither resolves
+    // every model exactly as it did before this existed.
     worktreeCap: resolveWorktreeCap(process.env),
   });
 
@@ -1394,6 +1723,14 @@ export function createExecutionRuntime(deps: ExecutionRuntimeDeps): ExecutionRun
       //
       // Wrapped because resolving the owner touches the database, and a node
       // whose graph is briefly unreachable at boot must still start.
+      // SC-2: scrub space API keys a crash left in per-session homes. Runs
+      // BEFORE the owner lookup — it needs no identity, and a node whose graph
+      // is briefly unreachable must still take the keys off its disk.
+      await spawnService.sweepSpaceSessionSecrets().catch((error: unknown) => {
+        deps.logger?.warn?.('execution: space credential sweep failed', {
+          code: (error as NodeJS.ErrnoException).code ?? 'unknown',
+        });
+      });
       try {
         const o = await owner();
         return await spawnService.reconcileNodeGhosts({
@@ -1431,6 +1768,8 @@ export function createExecutionRuntime(deps: ExecutionRuntimeDeps): ExecutionRun
         return 0;
       }
     },
+    // See `runAutoResume` — shared with the legacy builder below.
+    resumeInterrupted: () => runAutoResume(spawnService, owner, deps.logger),
     reconcileWorktrees: async () => {
       // Same identity story as ghost reconciliation and for the same reason:
       // the doors below go through `require_space_member`, which has no
@@ -1481,6 +1820,34 @@ function resolveWorktreeCap(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 /**
+ * `ExecutionRuntime.resumeInterrupted`, for both runtime builders.
+ *
+ * Runs as the loopback owner, like ghost reconciliation: they launched these
+ * sessions (or own the node that did), and resume's own membership checks run
+ * against them. Never rejects — an owner lookup that fails becomes one error
+ * row in the report.
+ */
+async function runAutoResume(
+  spawnService: SpawnService,
+  owner: () => Promise<LoopbackOwner>,
+  logger: Logger | undefined,
+): Promise<AutoResumeReport> {
+  const policy = resolveAutoResumePolicy(process.env);
+  if (!policy.enabled) return { resumed: [], errors: [] };
+  try {
+    const o = await owner();
+    return await spawnService.resumeInterruptedSessions(
+      { identityId: o.identityId, nodeAdmin: o.isNodeAdmin, requestId: 'startup-auto-resume' },
+      { windowMs: policy.windowMs, staggerMs: policy.staggerMs },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger?.warn?.('execution: auto-resume skipped', { error: message });
+    return { resumed: [], errors: [{ sessionId: '*', message }] };
+  }
+}
+
+/**
  * The signature from the lane brief, kept so main.ts can use either shape.
  *
  * ⚠ It CANNOT wire the exit sink, because the `pty` it is handed was already
@@ -1528,9 +1895,15 @@ export function registerExecutionHandlers(
             dataDir: deps.dataDir,
             ...(deps.logger ? { logger: deps.logger } : {}),
           }),
+          // SC-2: the space rung of D4. Same data-root condition: the sealed
+          // key and every per-session home live under it.
+          spaceCredentials: spaceCredentialPort(deps.db, deps.dataDir, deps.logger),
         }
       : {}),
     ...(worktrees ? { worktrees } : {}),
+    // Model routing. `undefined` unless this node has BOTH a policy and a key,
+    // and undefined spreads to nothing — so a fleet that sets neither resolves
+    // every model exactly as it did before this existed.
     worktreeCap: resolveWorktreeCap(process.env),
   });
   const owner = deps.owner ?? createLoopbackOwnerResolver(deps.db);
@@ -1545,6 +1918,14 @@ export function registerExecutionHandlers(
     // Same reconciliation as createExecutionRuntime — a node wired through the
     // legacy shape leaves the same ghosts behind and deserves the same cleanup.
     reconcileGhosts: async () => {
+      // SC-2: scrub space API keys a crash left in per-session homes. Runs
+      // BEFORE the owner lookup — it needs no identity, and a node whose graph
+      // is briefly unreachable must still take the keys off its disk.
+      await spawnService.sweepSpaceSessionSecrets().catch((error: unknown) => {
+        deps.logger?.warn?.('execution: space credential sweep failed', {
+          code: (error as NodeJS.ErrnoException).code ?? 'unknown',
+        });
+      });
       try {
         const o = await owner();
         return await spawnService.reconcileNodeGhosts({
@@ -1577,6 +1958,7 @@ export function registerExecutionHandlers(
         return 0;
       }
     },
+    resumeInterrupted: () => runAutoResume(spawnService, owner, deps.logger),
     reconcileWorktrees: async () => {
       try {
         const o = await owner();
@@ -2471,10 +2853,11 @@ function registerHandlers(
       workdir_mode: string | null;
       agent_tool: string | null;
       agent_config_dir: string | null;
+      model: string | null;
     }>(
       claims,
       `select ws.native_session_id, ws.workdir_path, ws.workdir_mode, ws.agent_tool,
-              ws.agent_config_dir
+              ws.agent_config_dir, ws.model
          from public.entities e
          join public.work_sessions ws on ws.entity_id = e.id
         where e.id = $1 and e.kind = 'work_session' and e.deleted_at is null`,
@@ -2548,6 +2931,9 @@ function registerHandlers(
         last,
         ...(before === undefined ? {} : { before }),
         includeFileChanges,
+        // The launch model, for the context reading's capacity — a column of
+        // the same authorized row, never a request parameter.
+        runtimeModel: session.model,
       }),
     );
   });
@@ -2557,6 +2943,16 @@ function registerHandlers(
     const owner = await resolveOwner();
     const envelope = commandEnvelope(ctx);
     const claims = claimsFor(owner, ctx, envelope);
+
+    // `selection` names exact memories and skills (design 01a0cb80 §5.2).
+    // Refused by name BEFORE anything is written — resolving the anchors
+    // below may mint a derived task, and a launch that is going to be refused
+    // must not leave one behind. loadSpawnContext re-checks inside its own
+    // transaction, for an id deleted in between.
+    if (input.selection) {
+      const selection = input.selection;
+      await db.tx(claims, (q) => assertSelectionIds(q, input.spaceId, selection));
+    }
 
     // Any entity may be launched; the anchor is always a task. See
     // `resolveAssignmentAnchors` — a task passes through untouched.
@@ -2606,9 +3002,14 @@ function registerHandlers(
       accessMode: input.accessMode ?? null,
       credentialSources: input.credentialSources ?? null,
       credentialSource: input.credentialSource ?? null,
+      // A space credential id only — never an account id (I1). Membership and
+      // the credential's space are re-checked at spawn (206).
+      spaceCredentialIds: input.spaceCredentialIds ?? null,
       title: input.title ?? null,
       promptExtra: input.promptExtra ?? null,
       ...(input.memoryIds?.length ? { memoryIds: input.memoryIds } : {}),
+      ...(input.selection ? { selection: input.selection } : {}),
+      ...(input.jevRunId ? { jevRunId: input.jevRunId } : {}),
       // Spread rather than `?? undefined` so an absent geometry stays ABSENT:
       // PtyHostService's clampDim falls back to 80x24 on any falsy value, and
       // an explicit `cols: undefined` would read the same way — but only the
@@ -2620,6 +3021,22 @@ function registerHandlers(
     };
 
     const result = await rethrowing(() => spawnService.spawn(claims, request));
+
+    // The Ask Jev run this launch came from (§6: per-launch cost). Only after
+    // a SUCCESSFUL spawn, and never at its expense: the session is live, so a
+    // run that is absent, in another space or someone else's is logged, not
+    // turned into a failed launch.
+    if (input.jevRunId) {
+      const runId = input.jevRunId;
+      try {
+        const linked = await db.tx(claims, (q) => linkSession(q, runId, result.sessionId, input.spaceId));
+        if (!linked) {
+          console.warn(`[tm8:jev] run ${runId} not linked to session ${result.sessionId}: no such run of this caller in space ${input.spaceId}`);
+        }
+      } catch (error) {
+        console.warn(`[tm8:jev] run ${runId} not linked to session ${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     /**
      * `dispatched_by` provenance (§4.3), written by the SERVER rather than
@@ -2837,6 +3254,38 @@ function registerHandlers(
       }),
     );
     return json(await assembleCommandResult(db, claims, result.commandResult, owner.identityId));
+  });
+
+  /**
+   * execution.sessions.share — the write side of the attach gate (187).
+   *
+   * Thin on purpose: every rule that matters (who may turn the dials, which
+   * words are legal, and the revocation of live grants when the posture
+   * narrows) lives in `public.set_work_session_sharing`, because the same
+   * rules have to hold for the CLI and for any future caller that never
+   * passes through this process. The RPC returns an `internal.command_result`,
+   * so it assembles exactly like terminate above.
+   */
+  registry.register('execution.sessions.share', async (ctx) => {
+    const owner = await resolveOwner();
+    const envelope = commandEnvelope(ctx);
+    const claims = claimsFor(owner, ctx, envelope);
+    const input = ctx.body as ExecutionSessionsShareInput;
+    const raw = await rethrowing(() =>
+      graph.setWorkSessionSharing(
+        claims,
+        requireUuidParam(ctx, 'id'),
+        {
+          ...(input.shareMode === undefined ? {} : { shareMode: input.shareMode }),
+          ...(input.driveMode === undefined ? {} : { driveMode: input.driveMode }),
+          ...(input.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: input.expectedVersion }),
+        },
+        envelope.clientMutationId ?? null,
+      ),
+    );
+    return json(await assembleCommandResult(db, claims, raw, owner.identityId));
   });
 
   registry.register('execution.streams.attach', async (ctx) => {

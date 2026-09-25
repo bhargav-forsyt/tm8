@@ -1,3 +1,5 @@
+import { SkillCreateInputSchema, SkillEditInputSchema, SkillEquipInputSchema } from '../skills/mutations.js';
+import { SkillScanInputSchema } from '../skills/handlers.js';
 /**
  * Operation → zod input schema bindings.
  *
@@ -50,6 +52,14 @@ import {
   CollectionQuerySchema,
   CredentialsDeleteInputSchema,
   CredentialsLoginSessionFinishInputSchema,
+  CredentialsServiceKeyDeleteInputSchema,
+  CredentialsServiceKeyPutInputSchema,
+  CredentialsSpaceCommandInputSchema,
+  CredentialsSpaceCreateInputSchema,
+  CredentialsSpacePolicySetInputSchema,
+  CredentialsSpaceRekeyInputSchema,
+  CredentialsSpaceRenameInputSchema,
+  NodeCredentialsPolicySetInputSchema,
   CredentialsLoginSessionStartInputSchema,
   CreateAttentionRequestInputSchema,
   CorrectProjectAssociationInputSchema,
@@ -66,13 +76,16 @@ import {
   ExecutionResumeInputSchema,
   ExecutionDispatchInputSchema,
   ExecutionSpawnInputSchema,
+  LaunchSuggestInputSchema,
   ExecutionGitCheckpointInputSchema,
   ExecutionGitRollbackInputSchema,
   ExecutionGitCommitInputSchema,
   ExecutionGitMergeInputSchema,
   ExecutionGitCherryPickInputSchema,
   ExecutionGitBranchInputSchema,
+  ExecutionGitStageInputSchema,
   ExecutionGitStashInputSchema,
+  ExecutionSessionsShareInputSchema,
   ExecutionTerminalStartInputSchema,
   ExecutionStreamsAttachInputSchema,
   ExecutionTerminateInputSchema,
@@ -80,6 +93,7 @@ import {
   FileUploadCompleteInputSchema,
   FileUploadInitInputSchema,
   GateTaskInputSchema,
+  TickCriteriaInputSchema,
   GrantPointsInputSchema,
   GraphQuerySchema,
   IdentityProfileUpdateInputSchema,
@@ -185,6 +199,16 @@ export const INPUT_SCHEMAS: Partial<Record<OperationName, ZodTypeAny>> = {
   'credentials.delete': CredentialsDeleteInputSchema,
   'credentials.loginSessions.start': CredentialsLoginSessionStartInputSchema,
   'credentials.loginSessions.finish': CredentialsLoginSessionFinishInputSchema,
+  // The key is the put body's one field; the provider rides the path.
+  'credentials.serviceKeys.put': CredentialsServiceKeyPutInputSchema,
+  'credentials.serviceKeys.delete': CredentialsServiceKeyDeleteInputSchema,
+  'credentials.space.create': CredentialsSpaceCreateInputSchema,
+  'credentials.space.rekey': CredentialsSpaceRekeyInputSchema,
+  'credentials.space.setDefault': CredentialsSpaceCommandInputSchema,
+  'credentials.space.rename': CredentialsSpaceRenameInputSchema,
+  'credentials.space.delete': CredentialsSpaceCommandInputSchema,
+  'credentials.space.policy.set': CredentialsSpacePolicySetInputSchema,
+  'node.credentials.policy.set': NodeCredentialsPolicySetInputSchema,
 
   // node-local named Server routes
   'serverConnections.create': ServerConnectionCreateInputSchema,
@@ -232,6 +256,7 @@ export const INPUT_SCHEMAS: Partial<Record<OperationName, ZodTypeAny>> = {
   'entities.commands.linkPr': LinkPrInputSchema,
   'entities.commands.linkCommit': LinkCommitInputSchema,
   'entities.commands.gate': GateTaskInputSchema,
+  'entities.commands.tick': TickCriteriaInputSchema,
   'tracking.refresh': TrackingRefreshInputSchema,
   'tracking.pr.merge': TrackingPrMergeInputSchema,
 
@@ -264,6 +289,13 @@ export const INPUT_SCHEMAS: Partial<Record<OperationName, ZodTypeAny>> = {
 
   // projects (AM-2 §1)
   'projects.create': ProjectCreateInputSchema,
+  'skills.create': SkillCreateInputSchema,
+  'skills.edit': SkillEditInputSchema,
+  'skills.equip': SkillEquipInputSchema,
+  'skills.unequip': SkillEquipInputSchema,
+  'skills.scan': SkillScanInputSchema,
+  // Jev's launch-sheet advice (design 01a0cb80 §5.1): validated for real from day one.
+  'launch.suggest': LaunchSuggestInputSchema,
   'projects.update': ProjectUpdateInputSchema,
   'projects.link': ProjectLinkInputSchema,
   'projects.unlink': RequiredCommandContextSchema,
@@ -301,6 +333,7 @@ export const INPUT_SCHEMAS: Partial<Record<OperationName, ZodTypeAny>> = {
   'execution.prompt': ExecutionPromptInputSchema,
   'execution.terminate': ExecutionTerminateInputSchema,
   'execution.streams.attach': ExecutionStreamsAttachInputSchema,
+  'execution.sessions.share': ExecutionSessionsShareInputSchema,
   'execution.resume': ExecutionResumeInputSchema,
 
   // session git rail (Git UI wave)
@@ -310,6 +343,7 @@ export const INPUT_SCHEMAS: Partial<Record<OperationName, ZodTypeAny>> = {
   'execution.gitMerge': ExecutionGitMergeInputSchema,
   'execution.gitCherryPick': ExecutionGitCherryPickInputSchema,
   'execution.gitBranch': ExecutionGitBranchInputSchema,
+  'execution.gitStage': ExecutionGitStageInputSchema,
   'execution.gitStash': ExecutionGitStashInputSchema,
 
   // custom entity kinds (T-L4)

@@ -416,6 +416,8 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
       restoreEntity: (id, ctx) => ops.restoreEntity(id, ctx),
       complete: (id, input) => ops.complete(id, input),
       work: (id, input) => ops.work(id, input),
+      skills: ops.skills,
+      jev: ops.jev,
       createEdge: (input) => ops.createEdge(input),
       deleteEdge: (edgeId, ctx) => ops.deleteEdge(edgeId, ctx),
       addToCollection: (collectionId, input) => ops.addToCollection(collectionId, input),
@@ -429,6 +431,7 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
       updateAttentionRequest: (requestId, input) => ops.updateAttentionRequest(requestId, input),
       updateProfile: (input) => ops.updateProfile(input),
       setMemberRole: (spaceId, memberId, input) => ops.setMemberRole(spaceId, memberId, input),
+      updateSpace: (spaceId, input) => ops.updateSpace(spaceId, input),
       createInvite: (spaceId, input) => ops.createInvite(spaceId, input),
       // `ctx` defaults to `{}` rather than being forwarded as `undefined`: the
       // revoke body binds `RequiredCommandContextSchema`, so a missing body is
@@ -459,10 +462,12 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
       dispatch: (input) => ops.dispatch(input),
       prompt: (id, input) => ops.prompt(id, input),
       terminate: (id, input) => ops.terminate(id, input),
+      shareSession: (id, input) => ops.shareSession(id, input),
       resume: (id, input) => ops.resume(id, input),
       gitCheckpoint: (id, input) => ops.gitCheckpoint(id, input),
       gitRollback: (id, input) => ops.gitRollback(id, input),
       gitCommit: (id, input) => ops.gitCommit(id, input),
+      gitStage: (id, input) => ops.gitStage(id, input),
       gitMerge: (id, input) => ops.gitMerge(id, input),
       gitCherryPick: (id, input) => ops.gitCherryPick(id, input),
       gitBranch: (id, input) => ops.gitBranch(id, input),
@@ -480,8 +485,26 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
     credentials: {
       status: () => ops.credentialsStatus(),
       disconnect: (provider) => ops.credentialsDisconnect(provider),
-      startLogin: (spaceId, provider) => ops.credentialsStartLogin(spaceId, provider),
+      startLogin: (spaceId, provider, spaceCredential) => ops.credentialsStartLogin(spaceId, provider, spaceCredential),
       finishLogin: (workSessionId) => ops.credentialsFinishLogin(workSessionId),
+      serviceKeys: () => ops.credentialsServiceKeys(),
+      saveServiceKey: (provider, apiKey) => ops.credentialsSaveServiceKey(provider, apiKey),
+      removeServiceKey: (provider) => ops.credentialsRemoveServiceKey(provider),
+      space: {
+        list: (spaceId) => ops.spaceCredentialsList(spaceId),
+        create: (spaceId, input) => ops.spaceCredentialsCreate(spaceId, input),
+        rekey: (credentialId, secret) => ops.spaceCredentialsRekey(credentialId, secret),
+        rename: (credentialId, label) => ops.spaceCredentialsRename(credentialId, label),
+        setDefault: (credentialId) => ops.spaceCredentialsSetDefault(credentialId),
+        remove: (credentialId) => ops.spaceCredentialsDelete(credentialId),
+        policy: (spaceId) => ops.spaceCredentialsPolicy(spaceId),
+        setPolicy: (spaceId, provider, allowedSources) =>
+          ops.spaceCredentialsSetPolicy(spaceId, provider, allowedSources),
+      },
+      node: {
+        status: () => ops.nodeCredentialsStatus(),
+        setPolicy: (provider, allowNode) => ops.nodeCredentialsSetPolicy(provider, allowNode),
+      },
     },
 
     // -- liveness ------------------------------------------------------------

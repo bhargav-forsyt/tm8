@@ -18,6 +18,9 @@ import {
   NoticeHost,
   SpaceSwitcher,
   SpaceTabBar,
+  SpaceTabBarLegacy,
+  topBarVersion,
+  setTopBarVersion,
   groupIdOfTarget,
   isRaillessGroup,
   primaryTargetOfGroup,
@@ -37,7 +40,6 @@ import { UNADDRESSED_HASH, createBrowserTarget, type RouterTarget } from '../rou
 import { forgetSpaceScopedPanels } from '../auth/session-reset';
 import { CommandPalette, type PaletteView } from '../shell/CommandPalette';
 import { CopyLinkControl } from '../share';
-import { UiVersionSwitch } from '../ui-version';
 import { useShellKind } from '../mobile';
 import { MobileShell } from './MobileShell';
 import { isUnbuiltViewRef } from './view-ref-screens';
@@ -53,7 +55,7 @@ import { allKinds, KindIcon, VIEW_ART, landingOfRoute, navViewOfName, routeViewO
 import type { Landing } from '../domain/nav-targets';
 import type { NavView } from '../routes';
 import { getKind } from '../domain';
-import { buildSpawnInput, newLaunchMutationId } from '../domain/launch';
+import { buildSpawnInput, launchTitleFor, newLaunchMutationId } from '../domain/launch';
 import type { DispatchSelection, LaunchSelection } from './LaunchSheet';
 import type { DetailReasons } from '../panels';
 import { BootLoader, VectorIcon, usePanelFlag } from '../kit';
@@ -64,7 +66,7 @@ import {
   presenceHollowReason,
 } from '../fixtures';
 import type { Seam } from '../data/seam';
-import { JoinScreen, clearPendingJoin, newJoinMutationId } from '../join';
+import { JoinScreen, arriveInSpace, clearPendingJoin, newJoinMutationId } from '../join';
 import { useGateData } from './useGateData';
 import { useSidePanelKinds } from './useSidePanelKinds';
 import { useLaunchSheet } from './useLaunchSheet';
@@ -81,7 +83,7 @@ import { GraphScreen } from '../graph';
 import { AddServerDialog, LOCAL_SERVER, type AddServerInput, type UiServer } from '../servers';
 import { ChannelView } from './ChannelView';
 import { channelFeedPortFromGateData } from './channel-feed-port';
-import { SettingsShell, settingsPortFromSeam } from '../settings-space';
+import { SettingsShell, ownerRoleRef, settingsPortFromSeam } from '../settings-space';
 import { FilesExplorerScreen, filesExplorerPortFromSeam } from '../files-explorer';
 import { InboxView } from './InboxView';
 import { MessagesView } from './MessagesView';
@@ -89,8 +91,12 @@ import { nodeKeyOf } from '../data/launch-cache';
 import {
   CredentialsSection,
   CredentialsSetupDialog,
+  NodeCredentialsSection,
+  SpaceCredentialsSection,
   credentialSetupState,
   credentialsPortFromSeam,
+  spaceCredentialsPortFromSeam,
+  serviceKeysPortFromSeam,
   readSetupDismissed,
   setupNudgeOf,
   shouldOfferSetup,
@@ -133,6 +139,19 @@ const LIVE_COUNT_KIND = 'work_session';
 
 /** The three-panel workspace — the handoff destination entity opens use. */
 const WORKSPACE_TARGET: MenuTarget = { type: 'view', ref: 'workspace' };
+
+/* WHICH TOP BAR THIS DEVICE GETS (R21) — read ONCE, at module scope, and that
+   is deliberate. Both bars mount at the top of the tree above the router, so
+   swapping them under a live tree would remount every screen below; the flag is
+   therefore a boot-time fact and `setTopBarVersion` reloads. Reading it here
+   rather than in a hook also keeps it out of every render.
+
+   `SpaceTabBarLegacy` is the bar as it stood at origin/main 4790333c, kept
+   verbatim for one release so that "go back" returns the bar that was there
+   rather than a reconstruction of it. See `shell/topbar-version.ts` for why the
+   UI-2.0 switch is NOT this control. */
+const LEGACY_BAR = topBarVersion() === 'legacy';
+const TopBar = LEGACY_BAR ? SpaceTabBarLegacy : SpaceTabBar;
 /**
  * The screen a viewer with no remembered place lands on (single-home ruling,
  * 2026-08-14): the merged Home page. A viewer's OWN remembered place still
@@ -1096,6 +1115,7 @@ export function GateApp(props: GateAppProps = {}) {
     launchInFlight.current = true;
     setLaunching(true);
     setLaunchRefusal(null);
+    const subject = data.detailOf(config.subjectId);
     void data
       .spawn(
         buildSpawnInput({
@@ -1104,7 +1124,8 @@ export function GateApp(props: GateAppProps = {}) {
           config,
           // Any kind: the server derives the task anchor (064).
           taskIds: [config.subjectId],
-          title: data.detailOf(config.subjectId)?.title,
+          // A session subject is CONTINUED: the new session is not its namesake.
+          title: subject ? launchTitleFor(subject) : undefined,
         }),
       )
       .then((sessionId) => {
@@ -1336,8 +1357,14 @@ export function GateApp(props: GateAppProps = {}) {
       const textEntry =
         !!target &&
         (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+      /* A surface that binds plain keys of its own marks itself, and the shell
+         asks for the MARKER, never for a kind (§15.2): a canvas's `g`, `t` and
+         `/` are tools, not chords and palette. `closest` is optional-chained
+         because a keydown can target the document itself. */
+      const surfaceOwnsKeys = !!target?.closest?.('[data-owns-keys]');
       kb.setContext({
         textEntry,
+        surfaceOwnsKeys,
         modalDepth:
           paletteOpen || promptsOpen || (launch.isModalOpen?.() ?? false) ? 1 : 0,
       });
@@ -1491,6 +1518,15 @@ export function GateApp(props: GateAppProps = {}) {
   // without editing each other's files.
   const credentialsPort = useMemo(
     () => (data.spaceId ? credentialsPortFromSeam(data.seam, data.spaceId) : null),
+    [data.seam, data.spaceId],
+  );
+  // Service keys (TypeSafe, for ✦ Ask Jev) ride the same section; account-
+  // scoped, so no space is bound.
+  const serviceKeysPort = useMemo(() => serviceKeysPortFromSeam(data.seam), [data.seam]);
+  // SC-5: the space's own credentials and the node's fallback policy. One
+  // port for both sections, bound to the same (seam, space) pair.
+  const spaceCredentialsPort = useMemo(
+    () => (data.spaceId ? spaceCredentialsPortFromSeam(data.seam, data.spaceId, ownerRoleRef()) : null),
     [data.seam, data.spaceId],
   );
 
@@ -1814,13 +1850,15 @@ export function GateApp(props: GateAppProps = {}) {
             : {})}
           onJoined={(spaceId) => {
             clearPendingJoin();
-            // A FULL RELOAD, not a state flip. Membership is an INPUT to boot:
-            // the spaces list, the menu, the counts and the socket
-            // subscription were all resolved for an account that was not in
-            // this space, and there is no partial-refresh path that re-derives
-            // them. Landing on the space's own address is the honest arrival,
-            // and this happens once per invite, never on a hot path.
-            location.assign(`/#/s/${spaceId}`);
+            // A FULL RELOAD, not a state flip — and until 01a0baf5 the line
+            // here said so while doing the opposite. `location.assign` to a
+            // url that differs only in its FRAGMENT does not reload anything,
+            // and `capturePendingJoin` has already stripped the path to `/`,
+            // so a successful join left the viewer staring at a disabled
+            // "Joining…" button over a membership that had already committed.
+            // `arriveInSpace` sets the address and then loads it. See
+            // `join/arrive.ts` for the measurement.
+            arriveInSpace(spaceId);
           }}
           onDismiss={() => {
             clearPendingJoin();
@@ -1844,7 +1882,7 @@ export function GateApp(props: GateAppProps = {}) {
       data-theme={theme === 'dark' ? 'dark' : undefined}
     >
       <div className="shell-root">
-        <SpaceTabBar
+        <TopBar
           /* R1 (2026-08-15): the identity block lives in the TOP ROW now.
              Still ONE control — the single-home rule holds, only the address
              changed; the old read-only server label is not restored. The
@@ -1904,6 +1942,11 @@ export function GateApp(props: GateAppProps = {}) {
              nothing — `copyLinkUrl` would return null and the control would be
              a button that cannot perform, which is the shape this codebase
              refuses everywhere else. */
+          /* Only the LEGACY bar draws this; the current bar hosts copy-link
+             as a row in the account menu. Passing it to both is harmless —
+             `SpaceTabBar` renders `shareSlot` only when it is also hosting the
+             other utilities — but it is passed conditionally anyway, so the
+             intent is readable rather than inferred from another file. */
           shareSlot={
             data.spaceId ? (
               <CopyLinkControl
@@ -1913,16 +1956,6 @@ export function GateApp(props: GateAppProps = {}) {
               />
             ) : undefined
           }
-          /* THE DOOR TO THE ALTERNATE 2.0 UI, and only when this bundle is
-             actually serving the root. `BASE_URL` is `/` in the product build,
-             in dev and in tests, and would be a mount path in any build served
-             under one — so the control appears exactly where it means
-             something. Offering it from a mounted build would be a link out of
-             the alternate UI into itself.
-
-             It refuses with its own reason when the server serves no 2.0
-             bundle, so it needs no further gate here. */
-          uiSwitchSlot={import.meta.env.BASE_URL === '/' ? <UiVersionSwitch /> : undefined}
           accountSlot={
             authAccount && data.viewerActor ? (
               <AccountMenu
@@ -1931,6 +1964,47 @@ export function GateApp(props: GateAppProps = {}) {
                 onThemeChange={setTheme}
                 agentToolsNudge={setupNudge}
                 {...(credentialsPort ? { onOpenAgentTools: () => setSetupOpen(true) } : {})}
+                /* R21 — THE UTILITY GROUP, and it is wired ONLY for the current
+                   bar. On the legacy bar these three verbs are still in the row
+                   itself, and handing them to the menu as well would draw every
+                   one of them twice. One control, one home, in both bars. */
+                {...(LEGACY_BAR
+                  ? {}
+                  : {
+                      onOpenInbox: () => navigateTo({ type: 'view', ref: 'inbox' }),
+                      onOpenPrompts: () => setPromptsOpen(true),
+                      utilityRows: (
+                        <>
+                          {data.spaceId ? (
+                            <CopyLinkControl
+                              className="auth-menu__row auth-menu__row--live"
+                              spaceId={data.spaceId}
+                              target={activeTarget ?? WORKSPACE_TARGET}
+                              openEntity={openOnScreen}
+                            />
+                          ) : null}
+                          {/* THE ROLLBACK, and the only control that performs
+                              it. Deliberately the last row of the group and
+                              deliberately plain: it is an escape hatch for one
+                              release, not a feature. */}
+                          <button
+                            type="button"
+                            className="auth-menu__row auth-menu__row--live"
+                            data-testid="use-previous-topbar"
+                            title="Go back to the previous top bar on this device"
+                            onClick={() => {
+                              setTopBarVersion('legacy');
+                              window.location.reload();
+                            }}
+                          >
+                            <span className="auth-menu__glyph" aria-hidden>
+                              ↩
+                            </span>
+                            Use the previous top bar
+                          </button>
+                        </>
+                      ),
+                    })}
               />
             ) : undefined
           }
@@ -2377,6 +2451,13 @@ export function GateApp(props: GateAppProps = {}) {
                Sections another module owns (projects/kinds) keep their honest
                not-mounted state inside the shell itself. */
             <SettingsShell
+              /* `/settings/<section>` opens on that section — e.g. the Jev
+                 launch surface's "add your TypeSafe key" link lands on
+                 credentials. Keyed so arriving by a new address re-opens. */
+              key={navView.view === 'settings' ? navView.section ?? 'default' : 'default'}
+              {...(navView.view === 'settings' && navView.section
+                ? { initialSection: navView.section }
+                : {})}
               port={settingsPort}
               nodeKey={nodeKeyOf(activeServer.routeBaseUrl)}
               /* W2 -> W1/W3: an axis write must reach the workspace's own
@@ -2384,8 +2465,14 @@ export function GateApp(props: GateAppProps = {}) {
                  event will do it. */
               onAxesChanged={data.refreshTaskAxes}
               sections={
-                credentialsPort || branchesPort
+                credentialsPort || branchesPort || spaceCredentialsPort
                   ? {
+                      ...(spaceCredentialsPort
+                        ? {
+                            'space-credentials': <SpaceCredentialsSection port={spaceCredentialsPort} serverBaseUrl={activeServer.routeBaseUrl} />,
+                            'node-credentials': <NodeCredentialsSection port={spaceCredentialsPort} />,
+                          }
+                        : {}),
                       ...(branchesPort
                         ? { projects: <ProjectBranchesSection port={branchesPort} /> }
                         : {}),
@@ -2394,6 +2481,7 @@ export function GateApp(props: GateAppProps = {}) {
                             credentials: (
                               <CredentialsSection
                                 port={credentialsPort}
+                                serviceKeysPort={serviceKeysPort}
                                 serverBaseUrl={activeServer.routeBaseUrl}
                                 /* Settings is the OTHER reader of the same
                                    derivation. Without this, connecting GitHub

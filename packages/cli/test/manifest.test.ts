@@ -21,6 +21,16 @@ describe('parseManifest', () => {
     ).toEqual({ tool: 'codex', permissionMode: 'readOnly', accessMode: 'plan' });
   });
 
+  it('keeps the session working directory, which is not the project root for a worktree', () => {
+    const m = parseManifest({
+      sessionId: 'ws_wt',
+      project: { id: 'p1', name: 'tm8', workingDir: '/Users/agent/tm8' },
+      session: { title: 't', workingDirectory: '/data/worktrees/p1/ws_wt', workdirMode: 'worktree' },
+    });
+    expect(m.session).toEqual({ workingDirectory: '/data/worktrees/p1/ws_wt' });
+    expect(parseManifest({ sessionId: 'ws_old' }).session).toBeUndefined();
+  });
+
   it('reads every field the CLI consumes from the sample manifest', () => {
     const m = readManifest(FIXTURE);
     expect(m.sessionId).toBe('ws_01HZPHOENIXSESSION');
@@ -81,4 +91,12 @@ describe('parseManifest', () => {
   it('the sample fixture is valid JSON on disk (it is the shape Draco reconciles against)', () => {
     expect(() => JSON.parse(readFileSync(FIXTURE, 'utf8'))).not.toThrow();
   });
+});
+
+
+it('retains the compact skill index on worker-init reads and drops legacy bodies', () => {
+  const skill = { entityId: 'skill', name: 'demo', description: 'Load when needed', provider: 'agents', level: 'project', sourcePath: '/repo/.agents/skills/demo/SKILL.md', loadPointer: '$demo', native: true, hash: 'hash', allowImplicitInvocation: false };
+  const result = parseManifest({ manifestVersion: '1', skills: [{ ...skill, body: 'PRIVATE LEGACY BODY' }] });
+  expect(result.skills).toEqual([skill]);
+  expect(JSON.stringify(result)).not.toContain('PRIVATE LEGACY BODY');
 });

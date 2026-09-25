@@ -1,3 +1,6 @@
+import { SkillPreview } from '../skills/SkillPreview';
+import type { SkillPort } from '../skills/port';
+import type { SkillPreviewResult } from '@tm8/contract';
 /**
  * LaunchSheet — the full launch configuration (D44/D51, T5-5 anatomy).
  *
@@ -58,13 +61,23 @@
  * one dialog, which is what a screen reader is entitled to.
  */
 import { useEffect, useId, useMemo, useState } from 'react';
-import type { CredentialProviderName, CredentialsStatusView, EntityId } from '@tm8/contract';
+import type {
+  CredentialProviderName,
+  CredentialsSpaceListView,
+  CredentialsSpacePolicyView,
+  CredentialsStatusView,
+  EntityId,
+  SpaceCredentialView,
+} from '@tm8/contract';
 import { Avatar } from '../kit';
 import { MobileSheet, useMobileSurface } from '../mobile';
 import './launch-sheet-mobile.css';
 import {
   accessModeLabel,
   agentTool,
+  AGENT_CREDENTIAL_PROVIDER,
+  CREDENTIAL_PROVIDER_LABEL,
+  currentNodeKey,
   describeAccessMode,
   LAUNCH_MODES,
   nextAccessMode,
@@ -78,9 +91,37 @@ import {
   type LaunchTarget,
   type LaunchTeammate,
 } from '../domain/launch';
+import {
+  disabledSourcesNote,
+  githubAuthorshipLine,
+  launchSourceOptions,
+  parseLaunchSourceChoice,
+  type LaunchSourceChoice,
+  type LaunchSourceOption,
+} from '../domain/launch-sources';
 import { MEMORY_IDS_MAX } from '../domain/memory';
+import { modelCatalog } from '../domain/model-catalog';
+import {
+  AskJevButton,
+  JevChecklist,
+  JevGroupStatus,
+  JevModelHint,
+  JevRunBar,
+  JevTeammateRanks,
+  modelApplyRefusal,
+  modelLabel,
+  useJevSuggestions,
+  type JevPort,
+} from '../jev';
 
 export interface LaunchSheetProps {
+  /**
+   * ✦ Ask Jev (design 01a0cb80 §3.1). Absent ⇒ the button renders refused
+   * with the reason, never hidden. `spaceId` addresses the request.
+   */
+  jev?: JevPort;
+  spaceId?: string;
+  loadSkillPreview?: (input: Parameters<SkillPort['preview']>[1]) => Promise<SkillPreviewResult>;
   /** The entity being launched from. The sheet is bound to it and dies with it. */
   subjectId: EntityId;
   /** T5-5's FROM strip: the launch context, named honestly. */
@@ -103,6 +144,13 @@ export interface LaunchSheetProps {
   launching?: boolean;
   /** Reads only the viewer's display-safe connection metadata; never a token. */
   loadCredentialStatus?(): Promise<CredentialsStatusView>;
+  /**
+   * SC-5: the space's credentials and its source policy, so the picker can
+   * offer Space ▸ credential and grey out what policy turns off (D5), with the
+   * reason. Absent ⇒ the Space option draws disabled, saying why.
+   */
+  loadSpaceCredentials?(spaceId: string): Promise<CredentialsSpaceListView>;
+  loadSpacePolicy?(spaceId: string): Promise<CredentialsSpacePolicyView>;
   onLaunch(config: LaunchSelection): void;
   /**
    * D5 — route the subject through the space's resident dispatcher instead of
@@ -132,27 +180,10 @@ const RESOLUTION_ORDER = ['teammate default', 'space default', 'node default'] a
 /** Rosters longer than this get the filter input. Below it, a search box over
  * a list that fits on screen whole is only friction. */
 const TEAMMATE_SEARCH_FROM = 5;
-type CredentialChoice = '' | 'member' | 'node';
-// The FILE-shaped providers an agent tool can consume. `github` is excluded
-// because its credential injects universally rather than being chosen per tool.
-const AGENT_CREDENTIAL_PROVIDER: Readonly<Partial<Record<string, CredentialProviderName>>> = {
-  'claude-code': 'anthropic',
-  codex: 'openai',
-  gemini: 'gemini',
-  hermes: 'hermes',
-  cursor: 'cursor',
-};
-
-// Vendor names, not product names: this sheet is choosing WHOSE credential to
-// inject. The home and settings tiles name the product the member recognises.
-const CREDENTIAL_PROVIDER_LABEL: Record<CredentialProviderName, string> = {
-  anthropic: 'Anthropic',
-  openai: 'OpenAI',
-  github: 'GitHub',
-  gemini: 'Google',
-  hermes: 'Nous',
-  cursor: 'Cursor',
-};
+type CredentialChoice = LaunchSourceChoice;
+// The tool→provider map and the vendor labels live in `domain/launch` now —
+// the New Session composer is their second consumer, and two private copies
+// of a vocabulary is the copy-drift class (D34).
 
 export function LaunchSheet(props: LaunchSheetProps) {
   const { teammates, projects, profiles, memories } = props;
@@ -249,6 +280,21 @@ export function LaunchSheet(props: LaunchSheetProps) {
   const teammate = teammates.find((t) => t.id === teammateId);
   const models = modelsFor(agentToolId);
 
+  /* ✦ ASK JEV. Reads the SAVED subject (no draft: this sheet does not edit the
+     task's text) and ranks memories and skills for the teammate picked above —
+     changing it re-asks those two groups, in the same run. */
+  const jev = useJevSuggestions({
+    port: props.jev,
+    spaceId: props.spaceId ?? '',
+    subjectId: props.subjectId,
+    teammateId: teammateId || null,
+  });
+  const selectTeammate = (t: LaunchTeammate) => {
+    setTeammateId(t.id);
+    setAgentToolId(t.agentTool);
+    setModel(t.model);
+  };
+
   // Fetch on sheet mount, not at workspace boot: this is attribution evidence
   // needed at commitment time, and a login/disconnect performed in Settings
   // immediately beforehand must not be replaced by a boot-time cached answer.
@@ -274,6 +320,35 @@ export function LaunchSheet(props: LaunchSheetProps) {
     };
   }, [props.loadCredentialStatus]);
 
+  // Same moment, same reason: the space's credentials and policy as they are
+  // NOW. A failed read leaves the Space option disabled with the reason; it
+  // never hides the Yours/Node choices that do not depend on it.
+  const [spaceCredentials, setSpaceCredentials] = useState<SpaceCredentialView[] | null>(null);
+  const [spaceUnavailable, setSpaceUnavailable] = useState<string>(
+    props.loadSpaceCredentials && props.spaceId ? 'reading the space’s credentials…' : 'space credentials are not available here',
+  );
+  const [spacePolicy, setSpacePolicy] = useState<CredentialsSpacePolicyView | null>(null);
+  useEffect(() => {
+    const load = props.loadSpaceCredentials;
+    const spaceId = props.spaceId;
+    if (!load || !spaceId) return undefined;
+    let cancelled = false;
+    void load(spaceId).then(
+      (view) => { if (!cancelled) setSpaceCredentials(view.credentials); },
+      () => { if (!cancelled) setSpaceUnavailable('the space’s credentials could not be read'); },
+    );
+    return () => { cancelled = true; };
+  }, [props.loadSpaceCredentials, props.spaceId]);
+  useEffect(() => {
+    const load = props.loadSpacePolicy;
+    const spaceId = props.spaceId;
+    if (!load || !spaceId) return undefined;
+    let cancelled = false;
+    // Unreadable policy ⇒ nothing is greyed here; the server still enforces it.
+    void load(spaceId).then((view) => { if (!cancelled) setSpacePolicy(view); }, () => {});
+    return () => { cancelled = true; };
+  }, [props.loadSpacePolicy, props.spaceId]);
+
   const agentCredentialProvider = AGENT_CREDENTIAL_PROVIDER[agentToolId] ?? null;
   const agentCredentialSource = agentCredentialProvider
     ? credentialChoices[agentCredentialProvider] ?? ''
@@ -297,6 +372,7 @@ export function LaunchSheet(props: LaunchSheetProps) {
         credentialStatusState,
         identity: agentIdentity,
         strictMissing: true,
+        spaceCredentials,
       })
     : 'This agent tool has no personal credential provider';
   const githubIdentityCopy = describeProviderLaunchIdentity({
@@ -306,6 +382,35 @@ export function LaunchSheet(props: LaunchSheetProps) {
     credentialStatusState,
     identity: githubHandle,
     strictMissing: false,
+    spaceCredentials,
+  });
+  const agentSourceOptions = agentCredentialProvider
+    ? launchSourceOptions({
+        provider: agentCredentialProvider,
+        autoText: 'Auto · yours, else the space’s, else the node’s',
+        memberText: agentIdentity
+          ? `My ${CREDENTIAL_PROVIDER_LABEL[agentCredentialProvider]} · ${agentIdentity}`
+          : 'My credential · refuse if this provider is not connected',
+        nodeText: 'Node credential · this server’s agent account',
+        spaceCredentials,
+        spaceUnavailable,
+        policy: spacePolicy,
+      })
+    : [];
+  const githubSourceOptions = launchSourceOptions({
+    provider: 'github',
+    autoText: 'Auto · yours, else the space’s, else the node’s',
+    memberText: githubHandle ? `My GitHub · ${githubHandle}` : 'My GitHub · block node fallback if not connected',
+    nodeText: 'Node GitHub · this server’s account',
+    spaceCredentials,
+    spaceUnavailable,
+    policy: spacePolicy,
+  });
+  const githubAuthorship = githubAuthorshipLine({
+    choice: githubCredentialSource,
+    memberHandle: githubHandle,
+    spaceCredentials,
+    policy: spacePolicy,
   });
 
   /**
@@ -360,6 +465,30 @@ export function LaunchSheet(props: LaunchSheetProps) {
     : 'Terminal + Chat · starts in Chat · no authored override';
 
   const atCapacity = props.capacity !== undefined && props.capacity.slotsFree <= 0;
+
+  /* The model hint's words and its Apply verdict. The credential half refuses
+     only what this sheet KNOWS will fail: the viewer chose their own
+     credential for that provider, and it is not connected. */
+  const jevModel = jev.groups.model.status === 'ok' ? jev.groups.model.value : null;
+  const jevCatalog = jevModel ? modelCatalog(currentNodeKey()) : [];
+  const jevModelLabel = jevModel ? modelLabel(jevModel, jevCatalog) : '';
+  const jevModelRefusal = jevModel
+    ? modelApplyRefusal(jevModel, {
+        catalog: jevCatalog,
+        credentialRefusal: (tool) => {
+          const provider = AGENT_CREDENTIAL_PROVIDER[tool];
+          if (!provider || credentialChoices[provider] !== 'member' || !credentialStatus) return null;
+          const connected = credentialStatus.providers.find((p) => p.provider === provider)?.connected;
+          return connected
+            ? null
+            : `This sheet is set to use your ${CREDENTIAL_PROVIDER_LABEL[provider]} credential, and it isn’t connected.`;
+        },
+      })
+    : null;
+  const jevModelApplied = Boolean(jevModel)
+    && jevModel?.agentTool === agentToolId
+    && jevModel?.model === model
+    && jevModel?.effort === reasoningEffort;
 
   const sheet = (
     <div
@@ -441,11 +570,7 @@ export function LaunchSheet(props: LaunchSheetProps) {
                   role="radio"
                   aria-checked={on}
                   className={`ls__row ${on ? 'ls__row--on' : ''}`}
-                  onClick={() => {
-                    setTeammateId(t.id);
-                    setAgentToolId(t.agentTool);
-                    setModel(t.model);
-                  }}
+                  onClick={() => selectTeammate(t)}
                 >
                   <Avatar
                     actorId={t.id}
@@ -475,6 +600,18 @@ export function LaunchSheet(props: LaunchSheetProps) {
               </p>
             )}
           </div>
+          {jev.groups.teammates.status !== 'idle' ? (
+            <JevTeammateRanks
+              state={jev.groups.teammates}
+              selectedId={teammateId || null}
+              roster={teammates}
+              onSelect={(id) => {
+                const picked = teammates.find((t) => t.id === id);
+                if (picked) selectTeammate(picked);
+              }}
+              onRetry={jev.retry}
+            />
+          ) : null}
         </section>
 
         <section className="ls__section">
@@ -511,6 +648,28 @@ export function LaunchSheet(props: LaunchSheetProps) {
               </select>
             </span>
           </label>
+          {jev.groups.model.status !== 'idle'
+            && !(jev.groups.model.status === 'failed' && jev.groups.model.reason === 'no_key') ? (
+            <div className="ls__row ls__row--inert">
+              <span className="ls__rowtext">
+                <JevModelHint
+                  state={jev.groups.model}
+                  label={jevModelLabel}
+                  refusal={jevModelRefusal}
+                  applied={jevModelApplied}
+                  onApply={(suggestion) => {
+                    /* TOGETHER, through the sheet's own setters: a model
+                       without its tool is a pair `canLaunch` refuses, and a
+                       tool without its effort is half a suggestion. */
+                    setAgentToolId(suggestion.agentTool);
+                    setModel(suggestion.model);
+                    setReasoningEffort(suggestion.effort);
+                  }}
+                  onRetry={jev.retry}
+                />
+              </span>
+            </div>
+          ) : null}
           <label className="ls__row ls__row--inert">
             <span className="ls__rowtext">
               <span className="ls__rowname">Permission mode</span>
@@ -575,13 +734,9 @@ export function LaunchSheet(props: LaunchSheetProps) {
                   }));
                 }}
               >
-                <option value="">Auto · mine if connected, else the node&apos;s</option>
-                <option value="member">
-                  {agentCredentialProvider && agentIdentity
-                    ? `My ${CREDENTIAL_PROVIDER_LABEL[agentCredentialProvider]} · ${agentIdentity}`
-                    : 'My credential · refuse if this provider is not connected'}
-                </option>
-                <option value="node">Node credential · this server&apos;s agent account</option>
+                {agentCredentialProvider
+                  ? <SourceOptions options={agentSourceOptions} />
+                  : <option value="">Auto · mine if connected, else the node&apos;s</option>}
               </select>
               <span
                 className="ls__rowsub"
@@ -590,6 +745,7 @@ export function LaunchSheet(props: LaunchSheetProps) {
               >
                 {agentIdentityCopy}
               </span>
+              <SourcesNote options={agentSourceOptions} testId="launch-agent-sources-note" />
             </span>
           </label>
           <label className="ls__row ls__row--inert">
@@ -605,13 +761,7 @@ export function LaunchSheet(props: LaunchSheetProps) {
                   setCredentialChoices((current) => ({ ...current, github: source }));
                 }}
               >
-                <option value="">Auto · mine if connected, else the node&apos;s</option>
-                <option value="member">
-                  {githubHandle
-                    ? `My GitHub · ${githubHandle}`
-                    : 'My GitHub · block node fallback if not connected'}
-                </option>
-                <option value="node">Node GitHub · this server&apos;s account</option>
+                <SourceOptions options={githubSourceOptions} />
               </select>
               <span
                 className="ls__rowsub"
@@ -619,6 +769,10 @@ export function LaunchSheet(props: LaunchSheetProps) {
                 aria-live="polite"
               >
                 {githubIdentityCopy}
+              </span>
+              <SourcesNote options={githubSourceOptions} testId="launch-github-sources-note" />
+              <span className="ls__rowsub" data-testid="launch-github-authorship">
+                {githubAuthorship}
               </span>
             </span>
           </label>
@@ -814,6 +968,27 @@ export function LaunchSheet(props: LaunchSheetProps) {
           </span>
         </section>
 
+        {/* IN JEV MODE the read-only preview gives way to Jev's checklist: the
+            ticks become the exact skill set, so the preview of the teammate's
+            equipped set would describe a launch that is not going to happen. */}
+        {jev.jevMode ? (
+          <section className="ls__section">
+            <div className="ls__eyebrow">SKILLS</div>
+            <JevChecklist
+              kind="skill"
+              state={jev.groups.skills}
+              ticked={jev.ticked.skill}
+              refusal={jev.tickRefusal?.kind === 'skill' ? jev.tickRefusal : null}
+              onToggle={(id) => jev.toggle('skill', id)}
+              onRetry={jev.retry}
+            />
+          </section>
+        ) : (
+          <SkillPreview load={props.loadSkillPreview} teamMemberId={teammateId} projectId={target.kind === 'project' ? target.projectId : undefined} agentTool={agentToolId || undefined}>
+            <JevGroupStatus group="skills" state={jev.groups.skills} onRetry={jev.retry} />
+          </SkillPreview>
+        )}
+
         {/*
           * MEMORIES — the spawn-time hand-off (D3a, `memoryIds`).
           *
@@ -829,8 +1004,26 @@ export function LaunchSheet(props: LaunchSheetProps) {
           * and a picker that quietly taught a persona something permanent
           * would be a very quiet surprise.
           */}
+        {jev.jevMode ? (
+          <section className="ls__section">
+            <div className="ls__eyebrow">MEMORIES</div>
+            {/* JEV MODE REPLACES THE ADDITIVE PICKER. The picker ADDS to the
+                teammate's working set (`memoryIds`); Jev's ticks ARE the set
+                (`selection`). The contract refuses both at once, so the sheet
+                offers one meaning at a time. */}
+            <JevChecklist
+              kind="memory"
+              state={jev.groups.memories}
+              ticked={jev.ticked.memory}
+              refusal={jev.tickRefusal?.kind === 'memory' ? jev.tickRefusal : null}
+              onToggle={(id) => jev.toggle('memory', id)}
+              onRetry={jev.retry}
+            />
+          </section>
+        ) : (
         <section className="ls__section">
           <div className="ls__eyebrow">MEMORIES</div>
+          <JevGroupStatus group="memories" state={jev.groups.memories} onRetry={jev.retry} />
           <div className="ls__row ls__row--inert">
             <span className="ls__glyph" aria-hidden="true">◈</span>
             <span className="ls__rowtext">
@@ -928,6 +1121,7 @@ export function LaunchSheet(props: LaunchSheetProps) {
             </div>
           ) : null}
         </section>
+        )}
 
         {props.refusal && (
           // T5-5: refusal renders IN the sheet — red word, cause, what did NOT
@@ -942,6 +1136,8 @@ export function LaunchSheet(props: LaunchSheetProps) {
         )}
       </div>
 
+      <JevRunBar jev={jev} />
+
       <footer className="ls__foot">
         <span className="ls__capacity">
           node loopback ·{' '}
@@ -955,6 +1151,7 @@ export function LaunchSheet(props: LaunchSheetProps) {
         <button type="button" className="ls__cancel" disabled={launching} onClick={props.onCancel}>
           Cancel
         </button>
+        <AskJevButton state={jev.state} askRefusal={jev.askRefusal} onAsk={() => jev.ask()} />
         {/*
           * DISPATCH — D5, beside the manual flow rather than inside it.
           *
@@ -999,10 +1196,22 @@ export function LaunchSheet(props: LaunchSheetProps) {
           onClick={() => {
             if (!teammate || atCapacity || launching) return;
             const credentialSources: NonNullable<LaunchConfig['credentialSources']> = {};
-            if (agentCredentialProvider && agentCredentialSource) {
-              credentialSources[agentCredentialProvider] = agentCredentialSource;
-            }
-            if (githubCredentialSource) credentialSources.github = githubCredentialSource;
+            const spaceCredentialIds: NonNullable<LaunchConfig['spaceCredentialIds']> = {};
+            const pick = (provider: CredentialProviderName, choice: CredentialChoice) => {
+              const parsed = parseLaunchSourceChoice(choice);
+              if (!parsed) return;
+              credentialSources[provider] = parsed.source;
+              // Only the three space providers can pin; the contract refuses others.
+              if (parsed.spaceCredentialId && (provider === 'anthropic' || provider === 'openai' || provider === 'github')) {
+                spaceCredentialIds[provider] = parsed.spaceCredentialId;
+              }
+            };
+            if (agentCredentialProvider) pick(agentCredentialProvider, agentCredentialSource);
+            pick('github', githubCredentialSource);
+            /* `{}` until Ask Jev is pressed, so a launch without Jev is exactly
+               today's. With a selection, the additive `memoryIds` is NOT sent:
+               the contract refuses the pair, and the picker is hidden anyway. */
+            const jevFields = jev.toSpawnFields();
             props.onLaunch({
               subjectId: props.subjectId,
               teamMemberId: teammate.id,
@@ -1011,12 +1220,14 @@ export function LaunchSheet(props: LaunchSheetProps) {
               reasoningEffort,
               accessMode,
               ...(Object.keys(credentialSources).length > 0 ? { credentialSources } : {}),
+              ...(Object.keys(spaceCredentialIds).length > 0 ? { spaceCredentialIds } : {}),
               mode,
               target,
               ...(profileId ? { interactionProfileId: profileId } : {}),
               /* Omitted when nothing was picked: an absent field and an empty
                  array are not the same statement to the node. */
-              ...(memoryIds.length > 0 ? { memoryIds } : {}),
+              ...(!jevFields.selection && memoryIds.length > 0 ? { memoryIds } : {}),
+              ...jevFields,
             });
           }}
         >
@@ -1061,7 +1272,19 @@ function describeProviderLaunchIdentity(input: {
   identity: string | null;
   /** Missing personal agent auth refuses launch; missing GitHub only blocks fallback. */
   strictMissing: boolean;
+  spaceCredentials: readonly SpaceCredentialView[] | null;
 }): string {
+  const providerName = CREDENTIAL_PROVIDER_LABEL[input.provider];
+  const space = parseLaunchSourceChoice(input.source);
+  if (space?.source === 'space') {
+    const rows = (input.spaceCredentials ?? []).filter((c) => c.provider === input.provider);
+    const row = space.spaceCredentialId
+      ? rows.find((c) => c.id === space.spaceCredentialId)
+      : rows.find((c) => c.isDefault);
+    return row
+      ? `${providerName} for this session: the space’s “${row.label}” · shared by the space, not your account`
+      : `${providerName} for this session: the space’s default · none is set, so launch will be refused`;
+  }
   const label = CREDENTIAL_PROVIDER_LABEL[input.provider];
   if (input.credentialStatusState === 'loading') return `Checking your ${label} identity…`;
   if (input.credentialStatusState === 'error') {
@@ -1108,4 +1331,22 @@ function profileSurfaceDescription(profile: LaunchProfile): string {
     surface === 'terminal' ? 'Terminal' : 'Chat').join(' + ');
   const initial = profile.initialContentSurface === 'terminal' ? 'Terminal' : 'Chat';
   return `${surfaces} · starts in ${initial}`;
+}
+
+/** A provider's source options. A disabled one keeps its reason in its text AND its title. */
+function SourceOptions({ options }: { options: readonly LaunchSourceOption[] }) {
+  return (
+    <>
+      {options.map((o) => (
+        <option key={o.value} value={o.value} disabled={o.disabled} title={o.reason ?? undefined}>
+          {o.text}
+        </option>
+      ))}
+    </>
+  );
+}
+
+function SourcesNote({ options, testId }: { options: readonly LaunchSourceOption[]; testId: string }) {
+  const note = disabledSourcesNote(options);
+  return note ? <span className="ls__rowsub" data-testid={testId}>{note}</span> : null;
 }

@@ -1,3 +1,5 @@
+import type { SkillPort } from '../../skills/port';
+import type { JevPort } from '../../jev/port';
 /**
  * Typed wrappers for EXACTLY the operations the seam exposes (LLD §5:
  * "one typed function per seam-exposed op. No generic op-name dispatcher, no
@@ -34,6 +36,7 @@ import {
   type RedeemInviteInput,
   type SpaceInviteView,
   type UpdateMemberRoleInput,
+  type UpdateSpaceInput,
   bindPath,
   type ActivityItem,
   type ArtifactPreviewSession,
@@ -61,8 +64,23 @@ import {
   type CredentialProviderName,
   type CredentialsDeleteResult,
   type CredentialsLoginSessionFinishResult,
+  type CredentialsLoginSessionStartInput,
   type CredentialsLoginSessionStartResult,
   type CredentialsStatusView,
+  type CredentialsServiceKeyDeleteResult,
+  type CredentialPolicySource,
+  type CredentialsSpaceCreateInput,
+  type CredentialsSpaceDeleteResult,
+  type CredentialsSpaceListView,
+  type CredentialsSpacePolicySetResult,
+  type CredentialsSpacePolicyView,
+  type NodeCredentialPolicyEntry,
+  type NodeCredentialsStatusView,
+  type SpaceCredentialProviderName,
+  type SpaceCredentialView,
+  type CredentialsServiceKeysStatusView,
+  type ServiceKeyProviderName,
+  type ServiceKeyView,
   type DurableWorkspaceEvent,
   type EdgeView,
   type EntityDetail,
@@ -76,6 +94,7 @@ import {
   type ExecutionSpawnInput,
   type ExecutionTerminalStartInput,
   type ExecutionResumeInput,
+  type ExecutionSessionsShareInput,
   type ExecutionTerminateInput,
   type FileUploadAbortInput,
   type FileUploadCompleteInput,
@@ -121,6 +140,7 @@ import {
   type ExecutionGitMergeInput,
   type ExecutionGitCherryPickInput,
   type ExecutionGitBranchInput,
+  type ExecutionGitStageInput,
   type ExecutionGitStashInput,
   type ExecutionGitRollbackInput,
   type SessionGitCheckpointResult,
@@ -129,6 +149,7 @@ import {
   type SessionGitMergeResult,
   type SessionGitCherryPickResult,
   type SessionGitBranchResult,
+  type SessionGitStageResult,
   type SessionGitStashResult,
   type SessionGitRollbackResult,
   type SessionGitStatus,
@@ -295,6 +316,10 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
       });
     },
 
+    updateSpace(spaceId: SpaceId, input: UpdateSpaceInput): Promise<SpaceSummary> {
+      return http.call<SpaceSummary>('spaces.update', { params: { spaceId }, body: input });
+    },
+
     createInvite(spaceId: SpaceId, input: CreateInviteInput): Promise<SpaceInviteView> {
       return http.call<SpaceInviteView>('spaces.invites.create', { params: { spaceId }, body: input });
     },
@@ -410,11 +435,13 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
     credentialsStartLogin(
       spaceId: SpaceId,
       provider: CredentialProviderName,
+      spaceCredential?: CredentialsLoginSessionStartInput['spaceCredential'],
     ): Promise<CredentialsLoginSessionStartResult> {
       return http.call<CredentialsLoginSessionStartResult>('credentials.loginSessions.start', {
         body: withMeasuredGeometry({
           spaceId,
           provider,
+          ...(spaceCredential ? { spaceCredential } : {}),
           clientMutationId: newId('credlogin'),
         }),
       });
@@ -425,6 +452,104 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
       return http.call<CredentialsLoginSessionFinishResult>('credentials.loginSessions.finish', {
         params: { id: workSessionId },
         body: { clientMutationId: newId('credfin') },
+      });
+    },
+
+    /** `credentials.serviceKeys.status` — which service keys the viewer has stored (hints only). */
+    credentialsServiceKeys(): Promise<CredentialsServiceKeysStatusView> {
+      return http.call<CredentialsServiceKeysStatusView>('credentials.serviceKeys.status');
+    },
+
+    /**
+     * `credentials.serviceKeys.put` — paste or replace. The key goes out once,
+     * in this body, and the answer carries only its last four characters.
+     */
+    credentialsSaveServiceKey(provider: ServiceKeyProviderName, apiKey: string): Promise<ServiceKeyView> {
+      return http.call<ServiceKeyView>('credentials.serviceKeys.put', {
+        params: { provider },
+        body: { apiKey, clientMutationId: newId('credkey') },
+      });
+    },
+
+    /** `credentials.serviceKeys.delete` — idempotent. */
+    credentialsRemoveServiceKey(provider: ServiceKeyProviderName): Promise<CredentialsServiceKeyDeleteResult> {
+      return http.call<CredentialsServiceKeyDeleteResult>('credentials.serviceKeys.delete', {
+        params: { provider },
+        body: { clientMutationId: newId('credkeyrm') },
+      });
+    },
+
+    // -- space credentials (`credentials.space.*`, SC-3) ------------------------
+    // The secret travels in exactly two bodies (create, rekey) and in no answer.
+
+    spaceCredentialsList(spaceId: SpaceId): Promise<CredentialsSpaceListView> {
+      return http.call<CredentialsSpaceListView>('credentials.space.list', { params: { spaceId } });
+    },
+
+    spaceCredentialsCreate(
+      spaceId: SpaceId,
+      input: Omit<CredentialsSpaceCreateInput, 'clientMutationId'>,
+    ): Promise<SpaceCredentialView> {
+      return http.call<SpaceCredentialView>('credentials.space.create', {
+        params: { spaceId },
+        body: { ...input, clientMutationId: newId('spcred') },
+      });
+    },
+
+    spaceCredentialsRekey(credentialId: string, secret: string): Promise<SpaceCredentialView> {
+      return http.call<SpaceCredentialView>('credentials.space.rekey', {
+        params: { credentialId },
+        body: { secret, clientMutationId: newId('spcredkey') },
+      });
+    },
+
+    spaceCredentialsRename(credentialId: string, label: string): Promise<SpaceCredentialView> {
+      return http.call<SpaceCredentialView>('credentials.space.rename', {
+        params: { credentialId },
+        body: { label, clientMutationId: newId('spcredname') },
+      });
+    },
+
+    spaceCredentialsSetDefault(credentialId: string): Promise<SpaceCredentialView> {
+      return http.call<SpaceCredentialView>('credentials.space.setDefault', {
+        params: { credentialId },
+        body: { clientMutationId: newId('spcreddef') },
+      });
+    },
+
+    spaceCredentialsDelete(credentialId: string): Promise<CredentialsSpaceDeleteResult> {
+      return http.call<CredentialsSpaceDeleteResult>('credentials.space.delete', {
+        params: { credentialId },
+        body: { clientMutationId: newId('spcredrm') },
+      });
+    },
+
+    spaceCredentialsPolicy(spaceId: SpaceId): Promise<CredentialsSpacePolicyView> {
+      return http.call<CredentialsSpacePolicyView>('credentials.space.policy.get', { params: { spaceId } });
+    },
+
+    spaceCredentialsSetPolicy(
+      spaceId: SpaceId,
+      provider: SpaceCredentialProviderName,
+      allowedSources: CredentialPolicySource[] | null,
+    ): Promise<CredentialsSpacePolicySetResult> {
+      return http.call<CredentialsSpacePolicySetResult>('credentials.space.policy.set', {
+        params: { spaceId, provider },
+        body: { allowedSources, clientMutationId: newId('spcredpol') },
+      });
+    },
+
+    nodeCredentialsStatus(): Promise<NodeCredentialsStatusView> {
+      return http.call<NodeCredentialsStatusView>('node.credentials.status');
+    },
+
+    nodeCredentialsSetPolicy(
+      provider: SpaceCredentialProviderName,
+      allowNode: boolean | null,
+    ): Promise<NodeCredentialPolicyEntry> {
+      return http.call<NodeCredentialPolicyEntry>('node.credentials.policy.set', {
+        params: { provider },
+        body: { allowNode, clientMutationId: newId('nodecredpol') },
       });
     },
 
@@ -645,7 +770,7 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
     gitDiff(workSessionId: EntityId, opts?: GitDiffOpts): Promise<SessionGitDiff> {
       return http.call<SessionGitDiff>('execution.gitDiff', {
         params: { workSessionId },
-        query: { maxBytes: opts?.maxBytes },
+        query: { maxBytes: opts?.maxBytes, path: opts?.path, scope: opts?.scope },
       });
     },
     gitCheckpoint(workSessionId: EntityId, input: ExecutionGitCheckpointInput): Promise<SessionGitCheckpointResult> {
@@ -662,6 +787,12 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
     },
     gitCommit(workSessionId: EntityId, input: ExecutionGitCommitInput): Promise<SessionGitCommitResult> {
       return http.call<SessionGitCommitResult>('execution.gitCommit', {
+        params: { workSessionId },
+        body: input,
+      });
+    },
+    gitStage(workSessionId: EntityId, input: ExecutionGitStageInput): Promise<SessionGitStageResult> {
+      return http.call<SessionGitStageResult>('execution.gitStage', {
         params: { workSessionId },
         body: input,
       });
@@ -875,6 +1006,27 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
       return http.call<CommandResult>('entities.commands.work', { params: { id }, body: input });
     },
 
+    skills: {
+      roots(spaceId) { return http.call('skills.roots', { params: { spaceId } }); },
+      async list(spaceId, kind) {
+        const items: EntitySummary[] = [];
+        let cursor: string | undefined;
+        do {
+          const result = await http.call<CollectionResult>('collections.query', { body: { spaceId, kinds: [kind], limit: 100, cursor } });
+          items.push(...result.page.items); cursor = result.page.nextCursor ?? undefined;
+        } while (cursor);
+        return items;
+      },
+      equip(id, teamMemberId, equipped) { return http.call(equipped ? 'skills.equip' : 'skills.unequip', { params: { id }, body: { teamMemberId, clientMutationId: newId('skill') } }); },
+      create(spaceId, input) { return http.call('skills.create', { params: { spaceId }, body: { ...input, clientMutationId: newId('skill') } }); },
+      edit(id, input) { return http.call('skills.edit', { params: { id }, body: { ...input, clientMutationId: newId('skill') } }); },
+      preview(spaceId, input) { return http.call('skills.preview', { params: { spaceId }, query: input }); },
+    } satisfies SkillPort,
+    jev: {
+      // A command row (POST), so the body carries the input; the facade may
+      // inject a `clientMutationId`, which the contract tolerates.
+      suggest(spaceId, input) { return http.call('launch.suggest', { params: { spaceId }, body: input }); },
+    } satisfies JevPort,
     createEdge(input: CreateEdgeInput): Promise<CommandResult> {
       return http.call<CommandResult>('edges.create', { body: input });
     },
@@ -1057,6 +1209,16 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
 
     terminate(id: EntityId, input: ExecutionTerminateInput): Promise<CommandResult> {
       return http.call<CommandResult>('execution.terminate', { params: { id }, body: input });
+    },
+
+    /**
+     * The two sharing dials (187). The body goes through VERBATIM: the
+     * server's `.strict()` schema refuses a field the contract does not name,
+     * and — the part that matters — it refuses a patch that names NEITHER
+     * dial, so an empty object is a 400 rather than a silent no-op.
+     */
+    shareSession(id: EntityId, input: ExecutionSessionsShareInput): Promise<CommandResult> {
+      return http.call<CommandResult>('execution.sessions.share', { params: { id }, body: input });
     },
 
     /** A resume re-spawns the PTY, so it carries the same geometry as `spawn`. */

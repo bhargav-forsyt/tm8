@@ -57,11 +57,17 @@
 import { readJsonSource } from '../args.js';
 import { requireSpace } from '../context.js';
 import { ApiError } from '../errors.js';
+import { journal } from '../journal.js';
 import { CliError, EXIT_OK, EXIT_USAGE, type ExitCode } from '../exit.js';
 import { refuseMutationId, resolveMutationId } from '../mutation.js';
 import { clientFor, observedInvoke } from '../discovery/observe.js';
 import { commandDiscovery } from '../discovery/operations.js';
 import type { CommandContext, CommandModule } from '../run.js';
+import { callerMutationId, successReceipt, type ReceiptRef, type ReceiptWarning } from '../receipt.js';
+import { errorInput, withErrorReceipt } from '../receipt-error.js';
+import { renderContextBrief } from '../context-brief.js';
+import { isAgentCaller, resolveWireSchema, schemaOption, type WireSchema } from '../wire-schema.js';
+import { boundEntityDetail, isEntityDetail } from '../entity-bounded.js';
 
 // ── shared local validation, used by every module in this slot ─────────────
 
@@ -323,6 +329,9 @@ function renderFeed(dto: unknown): string {
 }
 
 function renderContext(dto: unknown): string {
+  if ((dto as { schemaVersion?: unknown } | undefined)?.schemaVersion === 'tm8.entity-context.v2') {
+    return renderContextBrief(dto as Record<string, unknown>);
+  }
   const view = dto as
     | { root?: SummaryLike; parents?: unknown; children?: unknown; edges?: unknown; messages?: unknown; truncated?: unknown }
     | undefined;
@@ -343,6 +352,13 @@ async function entityGet(cmd: CommandContext): Promise<ExitCode> {
   assertKnownOptions(cmd, []);
   const id = requireArg(cmd, 0, '<entity-id>');
   const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.get', { params: { id } });
+  // Bounded by default (see ../entity-bounded.ts): `--full` is the only thing
+  // that sets receipts to 'full', so it doubles as the explicit escape hatch.
+  // The human render reads one summary line either way.
+  if (cmd.out.format !== 'human' && cmd.out.receipts !== 'full' && isEntityDetail(data)) {
+    cmd.out.data(boundEntityDetail(data), renderEntity, { minify: isAgentCaller(), raw: true });
+    return EXIT_OK;
+  }
   cmd.out.data(data, renderEntity);
   return EXIT_OK;
 }
@@ -423,6 +439,8 @@ async function entityFeed(cmd: CommandContext): Promise<ExitCode> {
 
 /** The closed section set — `EntityContextQuery.sections`, spelled once. */
 const CONTEXT_SECTIONS = ['summary', 'hierarchy', 'connections', 'messages', 'activity', 'actions'] as const;
+/** The v2 section set (c904 §2.10): `summary` aliases `assignment`, `activity` is gone. */
+const CONTEXT_V2_SECTIONS = ['assignment', 'summary', 'hierarchy', 'blockers', 'connections', 'messages', 'actions'] as const;
 
 /**
  * A byte-budget option, range-checked locally: the schema bounds are frozen
@@ -439,6 +457,45 @@ function byteBudgetOption(cmd: CommandContext, name: string, min: number, max: n
 }
 
 /**
+ * Which shape `entity context` asks for (c761 §9, the rollout matrix):
+ *   - `--schema v1|v2` wins, always — `--schema v1` is the escape;
+ *   - a flag only one shape has picks that shape: `--section-bytes` and the
+ *     `activity` section are v1's, `--offset`/`--cursor`/`--edge-type` and the
+ *     `assignment`/`blockers` sections are v2's (the server's expands carry no
+ *     `--schema`, and must run verbatim for every caller);
+ *   - otherwise text output and agent-class `--format json` get v2 now, and a
+ *     non-agent `--format json|jsonl` keeps v1 for one release with a stderr
+ *     notice (`resolveWireSchema`, the rule `action list` rolled out under).
+ * `defaultV2` is false for `chat show`, whose render reads v1's `root`.
+ */
+function contextSchema(cmd: CommandContext, defaultV2: boolean): WireSchema {
+  const explicit = schemaOption(cmd, 'schema');
+  if (explicit) return explicit;
+  const sections = (cmd.options.value('sections') ?? '').split(',').map((s) => s.trim());
+  if (cmd.options.value('section-bytes') !== undefined || sections.includes('activity')) {
+    // The switch is silent otherwise, and the v1 brief carries no body: an
+    // agent trimming output with --section-bytes would lose its assignment.
+    if (defaultV2) {
+      const flag = cmd.options.value('section-bytes') !== undefined ? '--section-bytes' : '--sections activity';
+      cmd.out.note(
+        `note: ${flag} is v1-only, so this read is tm8.entity-context.v1 (no body text). ` +
+          'v2 budgets are total-only: use --total-bytes <1024..32768>, or pass --schema v1 to keep v1 explicitly.',
+      );
+    }
+    return 'v1';
+  }
+  const v2Only = ['offset', 'cursor', 'edge-type'].some((flag) => cmd.options.value(flag) !== undefined)
+    || sections.includes('assignment') || sections.includes('blockers');
+  if (v2Only) return 'v2';
+  if (!defaultV2) return 'v1';
+  return resolveWireSchema(cmd, {
+    flag: 'schema',
+    subject: '`tm8 entity context`',
+    v2Name: 'tm8.entity-context.v2 (the narrow per-kind read with omitted/notLoaded expands)',
+  });
+}
+
+/**
  * The `entities.context` query, validated once.
  *
  * EXPORTED because `tm8 chat show` is a second spelling of this read, and two
@@ -447,7 +504,9 @@ function byteBudgetOption(cmd: CommandContext, name: string, min: number, max: n
  * command and as a wire 400 quoting zod internals on the other, for the same
  * typo. The three flags are ALL that bind (`EntityContextQuery`).
  */
-export function contextQuery(cmd: CommandContext): Record<string, string> {
+export function contextQuery(cmd: CommandContext, rollout: { defaultV2?: boolean } = {}): Record<string, string> {
+  const schema = contextSchema(cmd, rollout.defaultV2 === true);
+  const sectionSet: readonly string[] = schema === 'v2' ? CONTEXT_V2_SECTIONS : CONTEXT_SECTIONS;
   // One comma-separated value, exactly as the Server splits it. Each part is
   // validated HERE against the closed enum — a typoed section name must fail
   // as a usage error, not as a wire 400 quoting zod internals.
@@ -457,39 +516,97 @@ export function contextQuery(cmd: CommandContext): Record<string, string> {
     const parts = rawSections.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
     if (parts.length === 0) {
       throw new CliError('--sections expects a comma-separated list of sections', EXIT_USAGE, {
-        hint: `sections: ${CONTEXT_SECTIONS.join('|')}`,
+        hint: `sections: ${sectionSet.join('|')}`,
       });
     }
     for (const part of parts) {
-      if (!(CONTEXT_SECTIONS as readonly string[]).includes(part)) {
+      if (!sectionSet.includes(part)) {
         throw new CliError(`--sections has no section ${JSON.stringify(part)}`, EXIT_USAGE, {
-          hint: `sections: ${CONTEXT_SECTIONS.join('|')}`,
+          hint: `sections: ${sectionSet.join('|')}`,
         });
       }
     }
     sections = parts.join(',');
   }
   const totalBytes = byteBudgetOption(cmd, 'total-bytes', 1024, 32_768);
+  // c904 Q17: v2 has no per-section budget; refused before any request.
+  if (schema === 'v2' && cmd.options.value('section-bytes') !== undefined) {
+    throw new CliError('v2 budgets are total-only; see --total-bytes', EXIT_USAGE);
+  }
   const sectionBytes = byteBudgetOption(cmd, 'section-bytes', 512, 8192);
+  // c904 §2.4: `--offset` pages the v2 body. It is copied from the server's
+  // `assignment.expand`, never computed, and means nothing without that section.
+  const offset = cmd.options.integer('offset');
+  if (offset !== undefined) {
+    if (offset < 0) throw new CliError(`--offset expects a byte offset >= 0, got ${offset}`, EXIT_USAGE);
+    if (schema !== 'v2' || (sections !== 'assignment' && sections !== 'summary')) {
+      throw new CliError('--offset pages the v2 body: use it with --schema v2 --sections assignment', EXIT_USAGE, {
+        hint: 'copy the command from the body\'s `expand`; the server fills in the offset',
+      });
+    }
+  }
+  // c761 §5: a context cursor continues exactly ONE paged v2 section, and
+  // --edge-type filters the v2 connections section. Both are the server's
+  // own expands, so a misuse is a usage error here, before any request.
+  const cursor = cmd.options.value('cursor');
+  const edgeType = cmd.options.value('edge-type');
+  const only = sections !== undefined && !sections.includes(',') ? sections : undefined;
+  if (cursor !== undefined
+    && !(schema === 'v2' && only !== undefined && ['hierarchy', 'blockers', 'connections', 'messages'].includes(only))) {
+    throw new CliError('--cursor continues exactly one v2 section: --schema v2 --sections hierarchy|blockers|connections|messages', EXIT_USAGE);
+  }
+  if (edgeType !== undefined && !(schema === 'v2' && only === 'connections')) {
+    throw new CliError('--edge-type filters the v2 connections section: --schema v2 --sections connections', EXIT_USAGE);
+  }
+  // The actions section rolls out to `tm8.actions.v2` rows like `action list`
+  // does. Only asked about when the section is in a view that prints it: the
+  // human render shows no actions, so it keeps sending no query at all.
+  const wantsActions = schema === 'v1' && cmd.out.format !== 'human'
+    && (sections === undefined || sections.split(',').includes('actions'));
+  const actionsSchema = wantsActions
+    ? resolveWireSchema(cmd, {
+      flag: 'actions-schema',
+      subject: `\`tm8 ${cmd.path.join(' ')}\` actions section under`,
+      v2Name: 'tm8.actions.v2 rows (target and epoch once, cursors.actions continues in `tm8 action list --cursor`)',
+    })
+    : schemaOption(cmd, 'actions-schema');
 
   return {
+    ...(schema === 'v2' || cmd.options.value('schema') !== undefined ? { schema } : {}),
     ...(sections === undefined ? {} : { sections }),
     ...(totalBytes === undefined ? {} : { totalBytes: String(totalBytes) }),
     ...(sectionBytes === undefined ? {} : { sectionBytes: String(sectionBytes) }),
+    ...(offset === undefined ? {} : { offset: String(offset) }),
+    ...(actionsSchema === 'v2' ? { actionsSchema } : {}),
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(edgeType === undefined ? {} : { edgeType }),
   };
 }
 
 async function entityContext(cmd: CommandContext): Promise<ExitCode> {
   refuseMutationId('entity context', cmd.options.value('mutation-id'));
-  assertKnownOptions(cmd, ['sections', 'total-bytes', 'section-bytes']);
+  assertKnownOptions(cmd, ['schema', 'sections', 'total-bytes', 'section-bytes', 'offset', 'actions-schema', 'cursor', 'edge-type']);
   const id = requireArg(cmd, 0, '<entity-id>');
 
   const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.context', {
     params: { id },
-    query: contextQuery(cmd),
+    query: contextQuery(cmd, { defaultV2: true }),
   });
-  cmd.out.data(data, renderContext);
+  const version = contextSchemaVersion(data);
+  journal.noteContextRead(version);
+  // c761 §8 / c904 Q6: v2 json is the minified DTO — byte for byte what the
+  // server sent, which is also the budget and hash unit. So no projection:
+  // `--terse`/`--full`/TM8_NO_TERSE_DEFAULT are no-ops here. v1 is unchanged.
+  if (version === 'tm8.entity-context.v2') cmd.out.data(data, renderContext, { minify: true, raw: true });
+  else cmd.out.data(data, renderContext);
   return EXIT_OK;
+}
+
+/** The response's `schemaVersion`, or `null` — a journal field, never a gate. */
+function contextSchemaVersion(data: unknown): string | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const version = (data as { schemaVersion?: unknown }).schemaVersion;
+  return typeof version === 'string' ? version : null;
 }
 
 // ── entity query (collections.query) ───────────────────────────────────────
@@ -581,7 +698,7 @@ function initialConnections(cmd: CommandContext): Array<{ type: string; targetId
   // why that function stands down when the caller named one.
   const seen = new Set<string>();
   return tuples.filter((t) => {
-    const key = `${t.type} ${t.targetId}`;
+    const key = `${t.type}\u0000${t.targetId}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -620,17 +737,17 @@ async function linkCreatedInSession(
   cmd: CommandContext,
   created: unknown,
   explicitConnections: ReadonlyArray<{ type: string; targetId: string }>,
-): Promise<void> {
+): Promise<{ ref?: ReceiptRef; warning?: ReceiptWarning }> {
   const sessionId = cmd.ctx.sessionId;
-  if (sessionId === undefined) return;
-  if (cmd.options.bool('no-session-link')) return;
+  if (sessionId === undefined) return {};
+  if (cmd.options.bool('no-session-link')) return {};
   // One entity has one birth session (`edges_created_in_source_idx`), so an
   // explicit claim wins outright rather than racing the inferred one.
-  if (explicitConnections.some((c) => c.type === 'created_in')) return;
+  if (explicitConnections.some((c) => c.type === 'created_in')) return {};
 
   const entityId = (created as { entity?: { id?: unknown } } | null)?.entity?.id;
-  if (typeof entityId !== 'string' || entityId === '') return;
-  if (entityId === sessionId) return; // nothing is born in itself
+  if (typeof entityId !== 'string' || entityId === '') return {};
+  if (entityId === sessionId) return {}; // nothing is born in itself
 
   // A session id that is not a UUID can never be the benign cross-database
   // answer the catch below swallows — it is a misconfigured TM8_SESSION_ID.
@@ -638,15 +755,15 @@ async function linkCreatedInSession(
   // (22P02 maps to 404), so without this check the misconfiguration is
   // indistinguishable from the harness leak and stays invisible forever.
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
-    cmd.out.warn(
-      `note: TM8_SESSION_ID ${JSON.stringify(sessionId)} is not a UUID, so the ` +
-        'created_in session link was not attempted. The entity was created.',
-    );
-    return;
+    const message =
+      `TM8_SESSION_ID ${JSON.stringify(sessionId)} is not a UUID, so the ` +
+      'created_in session link was not attempted. The entity was created.';
+    cmd.out.warn(`note: ${message}`);
+    return { warning: { code: 'session_link_skipped', message } };
   }
 
   try {
-    await clientFor(cmd.ctx).invoke('edges.create', {
+    const edge = await clientFor(cmd.ctx).invoke<unknown>('edges.create', {
       body: {
         srcId: entityId,
         dstId: sessionId,
@@ -654,6 +771,9 @@ async function linkCreatedInSession(
         clientMutationId: resolveMutationId(undefined),
       },
     });
+    // The receipt's `refs` is where a chained caller finds this edge (D2.4).
+    const edgeId = (edge as { edge?: { id?: unknown } } | null)?.edge?.id;
+    return typeof edgeId === 'string' ? { ref: { kind: 'edge', type: 'created_in', id: edgeId } } : {};
   } catch (err) {
     // `not_found` on the session is not a failure — it is the answer to a
     // question we were right to ask. It means this invocation is not operating
@@ -667,11 +787,12 @@ async function linkCreatedInSession(
     // Anything else — forbidden, invalid_input, a transport failure, a 500 — is a
     // claim we SHOULD have been able to record and could not, so it is surfaced.
     // Silent absence is the exact failure mode this change exists to remove.
-    if (err instanceof ApiError && err.code === 'not_found') return;
-    cmd.out.warn(
-      `note: could not record this entity as created in session ${sessionId} ` +
-        `(${err instanceof Error ? err.message : String(err)}). The entity was created.`,
-    );
+    if (err instanceof ApiError && err.code === 'not_found') return {};
+    const message =
+      `could not record this entity as created in session ${sessionId} ` +
+      `(${err instanceof Error ? err.message : String(err)}). The entity was created.`;
+    cmd.out.warn(`note: ${message}`);
+    return { warning: { code: 'session_link_failed', message } };
   }
 }
 
@@ -694,8 +815,9 @@ async function entityCreate(cmd: CommandContext): Promise<ExitCode> {
   const kind = requireArg(cmd, 0, '<kind>');
   const title = requireArg(cmd, 1, '<title>');
 
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
   const body: Record<string, unknown> = {
-    clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
+    clientMutationId: mutationId,
     spaceId: requireSpace(cmd.ctx),
     kind,
     title,
@@ -709,12 +831,18 @@ async function entityCreate(cmd: CommandContext): Promise<ExitCode> {
   const connections = initialConnections(cmd);
   if (connections.length > 0) body.connections = connections;
 
-  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.create', {
-    body: withActor(cmd, body),
-  });
+  const data = await withErrorReceipt(cmd, errorInput(cmd, 'entity.create', { mutationId }), () =>
+    observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.create', {
+      body: withActor(cmd, body),
+    }));
   // After the create has landed, never before it — see linkCreatedInSession.
-  await linkCreatedInSession(cmd, data, connections);
-  cmd.out.data(data, renderCommandResult);
+  const claim = await linkCreatedInSession(cmd, data, connections);
+  cmd.out.mutation('entity.create', data, renderCommandResult, () =>
+    successReceipt('entity.create', data, {
+      ...callerMutationId(cmd.options),
+      ...(claim.ref ? { refs: [claim.ref] } : {}),
+      ...(claim.warning ? { warnings: [claim.warning] } : {}),
+    }));
   return EXIT_OK;
 }
 
@@ -724,14 +852,12 @@ async function entityUpdate(cmd: CommandContext): Promise<ExitCode> {
   const expectedVersion = cmd.options.integer('expect-version');
   if (expectedVersion === undefined) {
     throw new CliError('`tm8 entity update` requires --expect-version <n>', EXIT_USAGE, {
-      hint: 'read the current version with `tm8 entity get <entity-id>`',
+      hint: 'read the current version with `tm8 entity context <entity-id>` (its first line)',
     });
   }
 
-  const body: Record<string, unknown> = {
-    clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
-    expectedVersion,
-  };
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
+  const body: Record<string, unknown> = { clientMutationId: mutationId, expectedVersion };
   const title = cmd.options.value('title');
   if (title !== undefined) body.title = title;
   const content = cmd.options.value('content');
@@ -743,11 +869,17 @@ async function entityUpdate(cmd: CommandContext): Promise<ExitCode> {
     });
   }
 
-  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.patch', {
-    params: { id },
-    body: withActor(cmd, body),
-  });
-  cmd.out.data(data, renderCommandResult);
+  const data = await withErrorReceipt(
+    cmd,
+    errorInput(cmd, 'entity.update', { id, mutationId, expectedVersion }),
+    () =>
+      observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.patch', {
+        params: { id },
+        body: withActor(cmd, body),
+      }),
+  );
+  cmd.out.mutation('entity.update', data, renderCommandResult, () =>
+    successReceipt('entity.update', data, { expectedVersion, ...callerMutationId(cmd.options) }));
   return EXIT_OK;
 }
 
@@ -874,7 +1006,7 @@ async function entityPull(cmd: CommandContext): Promise<ExitCode> {
   const pinnedVersion = cmd.options.integer('pinned-version');
   if (pinnedVersion === undefined) {
     throw new CliError('`tm8 entity pull` requires --pinned-version <n>', EXIT_USAGE, {
-      hint: 'read the current version with `tm8 entity get <entity-id>`',
+      hint: 'read the current version with `tm8 entity context <entity-id>` (its first line)',
     });
   }
   const body: Record<string, unknown> = {

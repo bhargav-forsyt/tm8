@@ -1,0 +1,121 @@
+/*
+ * The drawing block.
+ *
+ * The stage is the whole point: Excalidraw measures its own container, so a
+ * canvas in a height-less parent renders at zero and looks like a failed
+ * import. `min-height` is therefore load-bearing, not cosmetic — and it is a
+ * `min`, not a fixed height, so the block still grows into a tall panel.
+ *
+ * Every colour resolves through a token (§14). No raw hex, including as a
+ * fallback: a fallback hex is a second source of truth that silently wins
+ * wherever the token is missing, which is exactly the drift the law exists to
+ * stop — and it would be wrong in one theme by construction.
+ */
+.drw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pn-space-2);
+  min-width: 0;
+}
+
+.drw__bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--pn-space-2);
+  min-height: 18px;
+}
+
+.drw__status {
+  font-size: var(--pn-fs-fine);
+  color: var(--pn-ink-3);
+}
+
+/*
+ * The embedded-image notice. `--pn-block` is the BLOCKED colour and that is
+ * the honest reading: saving is stopped until the image goes, which is the
+ * same state a blocked task is in — not an error the user made.
+ */
+.drw__notice {
+  margin: 0;
+  padding: var(--pn-space-2) var(--pn-space-3);
+  border: 1px solid var(--pn-block);
+  border-radius: var(--pn-r-sm);
+  background: var(--pn-block-soft);
+  color: var(--pn-ink);
+  font-size: var(--pn-fs-sm);
+  line-height: var(--pn-lh-body);
+}
+
+.drw__stage {
+  /* Excalidraw reads its container's box; zero height renders nothing. */
+  min-height: 420px;
+  height: 52vh;
+  border: 1px solid var(--pn-line);
+  border-radius: var(--pn-r-sm);
+  overflow: hidden;
+  /* Its own stacking context: Excalidraw's toolbars are absolutely positioned
+     and would otherwise escape over the panel's chrome. */
+  position: relative;
+  isolation: isolate;
+}
+
+/*
+ * THE LIBRARY'S ROOT, NEVER ITS CANVASES. Excalidraw sizes its own stacked
+ * canvases from the box it measures, at devicePixelRatio; this sheet only
+ * says the root fills the stage. (It used to name `canvas` as well — a no-op
+ * in practice, since the library's inline sizes outrank it, and a rule that
+ * would decouple bitmap from box the day they did not.)
+ *
+ * THE ZOOM RECIPROCAL IS THE CURSOR FIX. `app.css` puts `zoom: 1.1` on
+ * `.cv2-root`. Excalidraw reads its root with `getBoundingClientRect` — which
+ * already includes that zoom — and writes the result back as each canvas's
+ * CSS width and height, where the zoom applies a SECOND time. Measured in a
+ * 440px panel: root 390 CSS px, canvases 429 CSS px, drawn 472px wide; ink
+ * landed 1.1x as far from the stage's top-left as the pointer did — 4px off
+ * near that corner, 36px right and 38px down at the far one, identically at
+ * DPR 1, 1.1 and 2. Counter-zooming the root puts the library at a true 1.0,
+ * where its measurements and its CSS pixels agree.
+ *
+ * Same lever, same literal and same mobile half as `terminal.css`'s
+ * `.term-host`: the mobile shell declines the 1.1 (`mobile-chrome.css`), so
+ * there the reciprocal would shrink the canvas to 0.909 instead. If
+ * `app.css`'s 1.1 ever moves, these move with it.
+ */
+.drw__stage > .excalidraw {
+  height: 100%;
+  width: 100%;
+  zoom: calc(1 / 1.1);
+}
+
+.cv2-root[data-shell='mobile'] .drw__stage > .excalidraw {
+  zoom: 1;
+}
+
+/*
+ * FULLSCREEN — the artifact viewer's state (`panels.css`, `.pn-preview--
+ * fullscreen`), same altitude: `z-index: 60` covers the panel chrome and
+ * stays under dialogs (120+) and the palette (200). The stage drops its
+ * in-panel height and takes whatever the bar leaves.
+ */
+.drw--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  margin: 0;
+  padding: var(--pn-space-3);
+  background: var(--pn-card);
+}
+
+.drw--fullscreen .drw__stage {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.drw__loading {
+  margin: 0;
+  padding: var(--pn-space-4);
+  font-size: var(--pn-fs-sm);
+  color: var(--pn-ink-3);
+}

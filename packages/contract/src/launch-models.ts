@@ -19,11 +19,29 @@ export type LaunchModelEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'u
 export const CLAUDE_CODE_EFFORTS = ['low', 'medium', 'high', 'max'] as const satisfies readonly LaunchModelEffort[];
 export const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly LaunchModelEffort[];
 export const CODEX_ULTRA_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const satisfies readonly LaunchModelEffort[];
+/**
+ * The three stops OpenAI's open-weight models accept when Codex is pointed at
+ * Groq. Deliberately NOT `CODEX_EFFORTS`: `xhigh` and `max` are OpenAI-hosted
+ * vocabulary, and offering them here would put a value in
+ * `model_reasoning_effort` that the Groq endpoint rejects at the first turn.
+ */
+export const GROQ_GPT_OSS_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonly LaunchModelEffort[];
 
 export interface LaunchModelCatalogEntry {
   readonly model: string;
   readonly label: string;
-  readonly provider: 'anthropic' | 'openai';
+  /**
+   * The vendor that SERVES the model, which is not always the vendor whose
+   * wire protocol carries it. `moonshot` is the case that makes the
+   * distinction load-bearing: Kimi speaks Anthropic's protocol, so its
+   * `agentTool` is `claude-code` while its provider is Moonshot. Spawn routes
+   * on it: `apiKeyBackendForModel` in `@tm8/execution` sends a `moonshot` row
+   * to the member's Kimi key and a `groq` row to their Groq key, and every
+   * other row to the tool's native login. The UI's own catalog widens it to a
+   * free string so a browser-added model can name a vendor nobody here listed;
+   * such a model is not in this catalog and runs on the native login.
+   */
+  readonly provider: 'anthropic' | 'openai' | 'moonshot' | 'groq';
   readonly agentTool: 'claude-code' | 'codex';
   readonly note: string;
   readonly seedName: string;
@@ -48,6 +66,24 @@ export const LAUNCH_MODEL_CATALOG = [
     agentTool: 'claude-code',
     note: '1M-context variant via Claude Code',
     seedName: 'Opus 5 1M Teammate',
+    efforts: CLAUDE_CODE_EFFORTS,
+  },
+  {
+    model: 'claude-opus-5-5',
+    label: 'Claude Opus 5.5',
+    provider: 'anthropic',
+    agentTool: 'claude-code',
+    note: 'Anthropic model via Claude Code',
+    seedName: 'Opus 5.5 Teammate',
+    efforts: CLAUDE_CODE_EFFORTS,
+  },
+  {
+    model: 'claude-opus-5-5[1m]',
+    label: 'Claude Opus 5.5 (1M)',
+    provider: 'anthropic',
+    agentTool: 'claude-code',
+    note: '1M-context variant via Claude Code',
+    seedName: 'Opus 5.5 1M Teammate',
     efforts: CLAUDE_CODE_EFFORTS,
   },
   {
@@ -139,6 +175,132 @@ export const LAUNCH_MODEL_CATALOG = [
     note: 'Version-pinned fast Anthropic model via Claude Code',
     seedName: 'Haiku 4.5 Teammate',
     efforts: CLAUDE_CODE_EFFORTS,
+  },
+
+  // ---------------------------------------------------------------------
+  // Kimi (Moonshot AI) — the cross-provider rungs.
+  //
+  // WHY THEY SAY `claude-code`. Moonshot serves an Anthropic-wire-compatible
+  // surface at api.moonshot.ai/anthropic, so these run on the SAME binary as
+  // the Anthropic rows above: `claude --model kimi-k2-thinking`. The redirect
+  // is `API_KEY_BACKEND_ROUTING.kimi` in the execution package, which sets
+  // ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN for the session.
+  //
+  // THE REDIRECT IS PER MODEL. `apiKeyBackendForModel` applies it only to the
+  // rows below (`provider: 'moonshot'`), so a Kimi row runs on the member's
+  // Kimi key and the Anthropic rows above keep running on their Anthropic
+  // login whether or not a Kimi key is connected. A Kimi row launched by a
+  // member with no Kimi key is refused at spawn, naming the key. The catalog
+  // cannot see credential state (a per-member fact), so each `note` says which
+  // key the row needs, and the picker renders the note.
+  //
+  // EFFORT IS EMPTY, not merely unspecified. Claude Code's `--effort` maps to
+  // Anthropic's extended-thinking budget; Moonshot's models decide their own,
+  // and `kimi-k2-thinking` reasons whether or not a flag asks it to. An empty
+  // list makes the composer draw the dial disabled with "has one fixed effort
+  // level" rather than offering four stops the backend would ignore.
+  {
+    model: 'kimi-k2-thinking',
+    label: 'Kimi K2 Thinking',
+    provider: 'moonshot',
+    agentTool: 'claude-code',
+    note: 'Moonshot reasoning model on Claude Code — runs on your own Kimi key (Settings → Connections)',
+    seedName: 'Kimi K2 Thinking Teammate',
+    efforts: [],
+  },
+  {
+    model: 'kimi-k2-thinking-turbo',
+    label: 'Kimi K2 Thinking (Turbo)',
+    provider: 'moonshot',
+    agentTool: 'claude-code',
+    note: 'Faster-serving variant of K2 Thinking — runs on your own Kimi key (Settings → Connections)',
+    seedName: 'Kimi K2 Thinking Turbo Teammate',
+    efforts: [],
+  },
+  {
+    model: 'kimi-k2-turbo-preview',
+    label: 'Kimi K2 Turbo',
+    provider: 'moonshot',
+    agentTool: 'claude-code',
+    note: 'Non-reasoning K2 at turbo throughput — runs on your own Kimi key (Settings → Connections)',
+    seedName: 'Kimi K2 Turbo Teammate',
+    efforts: [],
+  },
+  {
+    model: 'kimi-k2-0905-preview',
+    label: 'Kimi K2 (0905)',
+    provider: 'moonshot',
+    agentTool: 'claude-code',
+    note: 'Date-pinned K2 — runs on your own Kimi key (Settings → Connections)',
+    seedName: 'Kimi K2 0905 Teammate',
+    efforts: [],
+  },
+
+  // ---------------------------------------------------------------------
+  // Groq — the same cross-provider arrangement on the Codex side.
+  //
+  // `API_KEY_BACKEND_ROUTING.groq` points OPENAI_BASE_URL at
+  // api.groq.com/openai/v1 for these rows only, so they run on the
+  // Codex binary: `codex --model openai/gpt-oss-120b`. The same per-model
+  // rule applies: only these rows use the Groq key, and the GPT rows above
+  // keep running on the member's OpenAI login.
+  //
+  // THE MODEL IDS CARRY THEIR VENDOR PREFIX (`openai/`, `moonshotai/`,
+  // `qwen/`) because that is literally what Groq's API expects; they are not
+  // decoration and must not be tidied away.
+  {
+    model: 'openai/gpt-oss-120b',
+    label: 'GPT-OSS 120B (Groq)',
+    provider: 'groq',
+    agentTool: 'codex',
+    note: 'OpenAI open-weight 120B on Groq — runs on your own Groq key (Settings → Connections)',
+    seedName: 'GPT-OSS 120B Teammate',
+    efforts: GROQ_GPT_OSS_EFFORTS,
+  },
+  {
+    model: 'openai/gpt-oss-20b',
+    label: 'GPT-OSS 20B (Groq)',
+    provider: 'groq',
+    agentTool: 'codex',
+    note: 'Smallest open-weight rung, for cheap mechanical work — runs on your own Groq key (Settings → Connections)',
+    seedName: 'GPT-OSS 20B Teammate',
+    efforts: GROQ_GPT_OSS_EFFORTS,
+  },
+  {
+    model: 'moonshotai/kimi-k2-instruct-0905',
+    label: 'Kimi K2 Instruct (Groq)',
+    provider: 'groq',
+    agentTool: 'codex',
+    note: 'Kimi K2 served by Groq on the Codex side — a DIFFERENT route to Moonshot than the Kimi rows above, which use Claude Code',
+    seedName: 'Kimi K2 Instruct Groq Teammate',
+    efforts: [],
+  },
+  {
+    model: 'llama-3.3-70b-versatile',
+    label: 'Llama 3.3 70B (Groq)',
+    provider: 'groq',
+    agentTool: 'codex',
+    note: 'Meta Llama 3.3 70B on Groq — runs on your own Groq key (Settings → Connections)',
+    seedName: 'Llama 3.3 70B Teammate',
+    efforts: [],
+  },
+  {
+    model: 'qwen/qwen3-32b',
+    label: 'Qwen3 32B (Groq)',
+    provider: 'groq',
+    agentTool: 'codex',
+    note: 'Qwen3 32B on Groq — runs on your own Groq key (Settings → Connections)',
+    seedName: 'Qwen3 32B Teammate',
+    efforts: [],
+  },
+  {
+    model: 'deepseek-r1-distill-llama-70b',
+    label: 'DeepSeek R1 Distill 70B (Groq)',
+    provider: 'groq',
+    agentTool: 'codex',
+    note: 'Reasoning distill on Groq — runs on your own Groq key (Settings → Connections)',
+    seedName: 'DeepSeek R1 Distill 70B Teammate',
+    efforts: [],
   },
 ] as const satisfies readonly LaunchModelCatalogEntry[];
 

@@ -17,6 +17,7 @@
  * are constrained to them — drift fails the build.
  */
 
+import type { EffectiveSkills, SkillReference } from './skill-reference.js';
 import type { OperationName } from './catalog.js';
 
 // ===========================================================================
@@ -55,7 +56,13 @@ export type CoreEntityKind =
   // Containers (TM8-CONTAINERS-DESIGN §3.1, migration 177): a machine an
   // agent runs IN or drives. It is an entity so hierarchy, edges, messages
   // and attention all work on it for free; the RUNTIME behind it is not.
-  | 'container';
+  | 'container'
+  // Drawings (migration 194, 2026-09-17): a hand-drawn canvas as an entity.
+  // The scene is Excalidraw's own three parts — elements, appState, files —
+  // and `format` is a SLUG, not a closed list, so a second canvas format
+  // later costs no migration (135's R3 lesson). Phase 1 is single-writer and
+  // refuses embedded images; both are rulings, not omissions.
+  | 'drawing';
 
 /** tm8: runtime-registered custom kinds are namespaced (T-L4). */
 export type CustomEntityKind = `c:${string}`;
@@ -294,10 +301,36 @@ export type CoreEntityState =
       headRef?: string | null }
   | { kind: 'commit'; repository: string; sha: string; message: string; committedAt?: string | null }
   | { kind: 'file'; name: string; mimeType: string; sizeBytes: number }
-  | { kind: 'spell' | 'skill'; description?: string; equipped: boolean }
+  | { kind: 'spell'; description?: string; equipped: boolean }
+  | ({ kind: 'skill'; description?: string; equipped: boolean; changedOnDisk: boolean } & SkillReference)
   // tm8 additions (03 §1) — see §2 for the enums.
-  | { kind: 'work_session'; status: WorkSessionStatus; agentTool: string | null;
+  | { kind: 'work_session'; skills?: EffectiveSkills; status: WorkSessionStatus; agentTool: string | null;
       model: string | null; shareMode: WorkSessionShareMode;
+      /**
+       * OPTIONAL, AND ITS ABSENCE MEANS `owner` — the same degrade-to-the-old-
+       * behaviour rule `sessionKind` states below. A node that predates 187, or
+       * a payload cached before the column shipped, carries no value here, and
+       * `owner` is exactly what every such session did.
+       *
+       * Never render a drive affordance on absence: "we do not know" must read
+       * as "no" for a write capability.
+       */
+      driveMode?: WorkSessionDriveMode;
+      /**
+       * WHEN A HUMAN LAST SET THIS SESSION'S DIALS, OR null IF NOBODY HAS — 202.
+       * Only `set_work_session_sharing` writes it.
+       *
+       * It matters only on an agent-launched session (`createdBy` a teammate).
+       * There, 075 lets any active member act as the teammate, and while this is
+       * null that arm still opens BOTH gates: every member may watch and type,
+       * whatever the two dials above say. Once it is set the dials hold, for
+       * every member. On a member-launched session the dials always held, and
+       * this is bookkeeping.
+       *
+       * OPTIONAL: a pre-202 node omits it, and that node is enforcing the
+       * null case for every session — so absence and null read the same way.
+       */
+      sharingSetAt?: string | null;
       startedAt: string | null; exitedAt: string | null;
       /**
        * WHAT KIND OF SESSION THIS IS — the discriminator that lets a client
@@ -440,6 +473,12 @@ export type CoreEntityState =
    * needs them and they can be large.
    */
   | { kind: 'graph'; graphType: string; nodeCount: number; edgeCount: number }
+  /**
+   * A drawing's row facts: which canvas format, and how big. The elements
+   * themselves are content, never state — a list row never needs them and a
+   * scene is the largest payload any kind carries.
+   */
+  | { kind: 'drawing'; format: string; elementCount: number }
   /**
    * A chat's row facts (176). Everything here answers a question a list row
    * asks — who is it with, what is it running, is it busy — without a second
@@ -761,6 +800,21 @@ export type CoreEntityContent =
   | { kind: 'graph'; graphType: string; nodes: GraphNode[]; edges: GraphEdgeSpec[];
       layout: Record<string, { x: number; y: number }>; source: string | null }
   /**
+   * The whole Excalidraw scene in one row (194 D2).
+   *
+   * The three members are Excalidraw's own, passed through unchanged so the
+   * editor can hand `elements`/`appState` straight back to it with no
+   * translation layer to drift. They are deliberately UNTYPED beyond their
+   * containers: an element is ~30 fields of Excalidraw's private shape and
+   * pinning it here would make every upstream release a contract change.
+   *
+   * `files` is the embedded-image map. It is always `{}` today — the doors
+   * refuse a non-empty one by name — and phase 2 fills it after splitting
+   * image bytes to `public.files`.
+   */
+  | { kind: 'drawing'; format: string; elements: Record<string, unknown>[];
+      appState: Record<string, unknown>; files: Record<string, unknown> }
+  /**
    * Containers (§4.2), hydrated in the panel.
    *
    * THERE IS NO `runtimeRef` HERE, and there must never be one (R5). This arm
@@ -920,6 +974,9 @@ export interface CollectionQuery {
     /** Tasks with any current assignment performed by one of these actors. */
     assignedByIds?: EntityId[];
     edge?: { type: string; direction: 'incoming'|'outgoing'; entityId: EntityId };
+    skillProvider?: string; skillLevel?: string; skillRoot?: string; skillMissing?: boolean;
+    /** Skills (or spells) that some actor currently equips: an incoming `equips` edge from anyone. */
+    skillEquipped?: boolean;
     readyToPull?: boolean; inReviewForActorId?: EntityId; mentionedActorId?: EntityId;
     /**
      * Additive (board/people wave): entities this actor WORKED, resolved
@@ -990,6 +1047,29 @@ export interface CollectionQuery {
      */
     category?: StatusCategory[];
     deleted?: 'exclude'|'only'|'include';
+    /**
+     * Additive (2026-09-15): memories whose statement, mechanism, subject
+     * scope or does-not-establish text contains ANY of these terms as a
+     * case-insensitive substring — any-of, like every other array filter
+     * here. Same kind-narrowing semantics as `status`: the four columns live
+     * on the memory arm only, so while present the query returns memories
+     * exclusively.
+     *
+     * It exists because the MCP `memory_search` tool scanned a summary's
+     * title/excerpt — a ~200-char prefix of a statement that averages 1,752
+     * chars on the launch node — and so could not reach 71% of the words it
+     * held. Memory-only on purpose: nothing searches another kind's text yet,
+     * and a predicate over columns nobody asked for is a feature, not a fix.
+     */
+    terms?: string[];
+    /**
+     * Additive (2026-09-23, task attach palette): entities whose TITLE
+     * contains this text as a case-insensitive substring. Kind-neutral — pair
+     * it with `kinds` to search one kind by title, which is what an entity
+     * picker needs and what the reserved `search.query` never delivered.
+     * Trimmed and non-empty: a blank needle matches everything.
+     */
+    titleContains?: string;
   };
   layout?: 'list'|'board'|'tree'|'feed'|'gallery'|'graph';
   /** `priority` added 2026-08-16 (Board tab wave) — same additive posture as the rest of the union. */
@@ -1498,7 +1578,9 @@ export type CommandErrorCode =
   | 'unauthenticated' | 'forbidden' | 'not_found'
   | 'version_conflict' | 'conflict' | 'invariant_violation'
   | 'payload_too_large' | 'rate_limited' | 'limit_exceeded'
-  | 'not_implemented' | 'upstream_unavailable';
+  | 'not_implemented' | 'upstream_unavailable'
+  /** c904 §2.5: the never-drop core does not fit the caller's `totalBytes`. */
+  | 'context_budget_too_small';
 
 export const ERROR_STATUS: Record<CommandErrorCode, number> = {
   invalid_input: 400, invalid_cursor: 400,
@@ -1506,6 +1588,7 @@ export const ERROR_STATUS: Record<CommandErrorCode, number> = {
   version_conflict: 409, conflict: 409, invariant_violation: 409,
   payload_too_large: 413, rate_limited: 429, limit_exceeded: 429,
   not_implemented: 501, upstream_unavailable: 503,
+  context_budget_too_small: 422,
 };
 
 export const RETRYABLE_BY_DEFAULT = new Set<CommandErrorCode>(['rate_limited', 'limit_exceeded', 'upstream_unavailable']);
@@ -1927,7 +2010,49 @@ export type CredentialProviderName =
   | 'github'
   | 'gemini'
   | 'hermes'
-  | 'cursor';
+  | 'cursor'
+  | 'kimi'
+  | 'groq';
+
+/**
+ * What a connected credential CHANGES about the agent sessions a member runs.
+ *
+ * This type exists because two of the eight providers are not additional tools
+ * — they are alternative BACKENDS for a tool that already exists. Connecting
+ * Kimi does not give a member a "kimi" agent to choose; it lets the Kimi models
+ * in the launch catalog run on `claude-code` against Moonshot's Anthropic-wire
+ * endpoint. Every other `claude-code` model keeps using the member's Anthropic
+ * login. Groq does the same for its models on `codex`.
+ *
+ * Routing is decided per model at spawn (`apiKeyBackendForModel` in
+ * `@tm8/execution`). The server computes this view from the same table rather
+ * than leaving the UI to hardcode a pair of provider names it would then have
+ * to keep in step with `api-key-credentials.ts`.
+ */
+export interface CredentialRoutingView {
+  /** The agent tool this provider's models run on, e.g. `claude-code`. */
+  agentTool: string;
+  /**
+   * Always `backend`: THIS provider serves its own models on `agentTool`.
+   *
+   * There was a second role, `displaced`, for the native provider's card while
+   * a backend outranked it account-wide. Routing is per model now, so a native
+   * provider is never displaced and its card carries no routing.
+   */
+  role: 'backend';
+  /**
+   * The native provider that keeps serving every other model on `agentTool`,
+   * e.g. `anthropic` for Kimi.
+   */
+  counterpart: CredentialProviderName;
+  /**
+   * Whether this provider is connected right now, as opposed to what would
+   * happen if it were. A `kimi` card that nobody has connected still carries
+   * routing with `active: false`, because what connecting it does is exactly
+   * what a member needs to know BEFORE they press Connect.
+   */
+  active: boolean;
+}
 
 /** One provider's card on the Connections screen. */
 export interface CredentialConnectionView {
@@ -1964,6 +2089,16 @@ export interface CredentialConnectionView {
   status: 'active' | 'stale' | 'revoked' | 'unavailable' | null;
   connectedAt: string | null;
   lastVerifiedAt: string | null;
+  /**
+   * Which models this provider serves on which tool, or `null` for the six
+   * providers that are not a backend for another tool.
+   *
+   * Nullable rather than optional for the same reason `login` is: "this
+   * provider has no routing" is a permanent fact about anthropic, openai,
+   * github, gemini, hermes and cursor, and a UI that rendered "missing"
+   * differently from "null" would draw two cards for one state.
+   */
+  routing: CredentialRoutingView | null;
 }
 
 /**
@@ -1980,7 +2115,7 @@ export interface CredentialConnectionView {
  * a node where the table exists.
  */
 export interface CredentialsStatusView {
-  /** One entry per provider in `CredentialProviderName`, always all six. */
+  /** One entry per provider in `CredentialProviderName` — always all of them. */
   providers: CredentialConnectionView[];
   /**
    * `present` — the table exists and was read.
@@ -2041,6 +2176,14 @@ export interface CredentialsLoginSessionStartInput {
   /** Terminal geometry only — the one client input, and it cannot reach argv. */
   cols?: number;
   rows?: number;
+  /**
+   * Log into a SPACE credential instead of your own (206, SC-4); anthropic
+   * and openai only. `label` opens a new pending credential (any member,
+   * D1); `credentialId` logs in again onto an existing login credential (its
+   * creator or a space admin, D11). Exactly one. A refusal is `conflict` with
+   * `details.reason` `login_open` (with `expiresAt`) or `label_taken`.
+   */
+  spaceCredential?: { label: string; credentialId?: never } | { credentialId: string; label?: never };
   clientMutationId?: string;
 }
 
@@ -2052,6 +2195,8 @@ export interface CredentialsLoginSessionStartResult {
   expiresAt: string;
   /** The exact table entry that WAS launched. Recorded so a caller can assert it. */
   command: string;
+  /** A space login: the new pending credential, or the one being logged into. */
+  spaceCredential?: SpaceCredentialView;
 }
 
 /**
@@ -2084,6 +2229,215 @@ export interface CredentialsLoginSessionFinishResult {
   stored: boolean;
   /** Whether this node's PTY was killed, as the PTY itself reported it. */
   terminated: boolean;
+  /**
+   * A space login: the credential as the PROBED finish left it (I6). Render
+   * from its `status`, not from `connected`.
+   */
+  spaceCredential?: SpaceCredentialView;
+}
+
+/**
+ * A key tm8 uses ON THE SERVER, on the member's behalf — NOT an agent
+ * credential.
+ *
+ * `typesafe` is the TypeSafe key behind Jev. It is used only when this member
+ * presses ✦ Ask Jev (`launch.suggest`), and it is never injected into a spawned
+ * session's environment, manifest, credential home or PTY. That is why it is
+ * its own union rather than a ninth `CredentialProviderName`: every consumer of
+ * that union (login terminals, probes, spawn injection, disconnect's session
+ * kill) is about agents, and a provider that is not one would have to be
+ * special-cased out of each of them. Here it cannot be special-cased IN.
+ */
+export type ServiceKeyProviderName = 'typesafe';
+
+/** One service key as the Settings screen may show it. Never the key itself. */
+export interface ServiceKeyView {
+  provider: ServiceKeyProviderName;
+  /** A key is stored for this member. */
+  connected: boolean;
+  /** The stored key's last four characters, so a member can recognise it. Null when none is stored. */
+  keyHint: string | null;
+  updatedAt: string | null;
+  /**
+   * With no key of their own, whether this member's Ask Jev would still work
+   * because the NODE has one (`TYPESAFE_API_KEY` in the server's environment).
+   * A boolean only — the node's key is never described.
+   */
+  nodeFallback: boolean;
+}
+
+/**
+ * `credentials.serviceKeys.status`. `store: 'absent'` means migration 203 is
+ * not applied on this node, so `connected: false` is UNKNOWN, not measured.
+ */
+export interface CredentialsServiceKeysStatusView {
+  keys: ServiceKeyView[];
+  store: 'present' | 'absent';
+}
+
+/**
+ * `credentials.serviceKeys.put` — paste or replace. The provider rides the
+ * path; the key is the body's one field and is never echoed back.
+ */
+export interface CredentialsServiceKeyPutInput {
+  apiKey: string;
+  clientMutationId?: string;
+}
+
+/** `credentials.serviceKeys.delete` — idempotent; the provider rides the path. */
+export interface CredentialsServiceKeyDeleteInput {
+  clientMutationId?: string;
+}
+
+export interface CredentialsServiceKeyDeleteResult {
+  provider: ServiceKeyProviderName;
+  /** True when a stored key was removed or none was stored. */
+  revoked: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Space credentials (206, design 01a0cfa8) — `credentials.space.*`, `node.credentials.*`
+// ---------------------------------------------------------------------------
+
+/** The providers a space may own a credential for (D2, D10). */
+export type SpaceCredentialProviderName = 'anthropic' | 'openai' | 'github';
+
+/** `login` is a vendor CLI login in a space home; the other two are pasted strings. */
+export type SpaceCredentialShape = 'login' | 'api_key' | 'token';
+
+/** `pending` is a login that has not finished; `stale` failed its last probe. */
+export type SpaceCredentialStatus = 'pending' | 'active' | 'stale' | 'revoked';
+
+/** A launch source as a policy names it (D4/D5). */
+export type CredentialPolicySource = 'member' | 'space' | 'node';
+
+/**
+ * One space credential as a member may see it: metadata only (I5). The secret
+ * is never on this type — `keyHint` is its last four characters at most, and
+ * `status` is the probed DB row's, never a file on disk (I6).
+ */
+export interface SpaceCredentialView {
+  id: string;
+  spaceId: string;
+  provider: SpaceCredentialProviderName;
+  shape: SpaceCredentialShape;
+  label: string;
+  isDefault: boolean;
+  status: SpaceCredentialStatus;
+  /** Null once the creator's account is gone: the space owns it (D12). */
+  createdByAccountId: string | null;
+  /** The vendor account the key belongs to, when the probe named one (a GitHub login, D10). */
+  displayLogin: string | null;
+  keyHint: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
+  lastProbeAt: string | null;
+}
+
+/** `credentials.space.list`. Revoked tombstones are not listed. */
+export interface CredentialsSpaceListView {
+  spaceId: string;
+  credentials: SpaceCredentialView[];
+}
+
+/**
+ * `credentials.space.create` — paste an API key (anthropic/openai) or a token
+ * (github). The vendor is asked before anything is stored, and a key it
+ * refuses is never written. A login-shaped credential starts elsewhere.
+ */
+export interface CredentialsSpaceCreateInput {
+  provider: SpaceCredentialProviderName;
+  shape: 'api_key' | 'token';
+  label: string;
+  secret: string;
+  clientMutationId?: string;
+}
+
+/** `credentials.space.rekey` — creator or space admin; the next spawn uses it (D7). */
+export interface CredentialsSpaceRekeyInput {
+  secret: string;
+  clientMutationId?: string;
+}
+
+export interface CredentialsSpaceRenameInput {
+  label: string;
+  clientMutationId?: string;
+}
+
+/** `credentials.space.setDefault` and `credentials.space.delete` carry no fields. */
+export interface CredentialsSpaceCommandInput {
+  clientMutationId?: string;
+}
+
+/**
+ * `credentials.space.delete` (design §5): the row is revoked first, then every
+ * live session recorded on it is killed WHOEVER launched it, then the file
+ * home is removed. Best effort after the revoke, which is never rolled back:
+ * `failures` names each step that did not complete.
+ */
+export interface CredentialsSpaceDeleteResult {
+  credentialId: string;
+  /** False when the credential was already revoked. */
+  revoked: boolean;
+  terminatedLoginSessionIds: string[];
+  terminatedAgentSessionIds: string[];
+  failures: Array<{
+    step: 'loginSession' | 'agentSession' | 'files';
+    sessionId?: string;
+    reason: string;
+  }>;
+}
+
+/** A provider's space policy. `allowedSources: null` means no policy: every source is allowed. */
+export interface SpaceCredentialPolicyEntry {
+  provider: SpaceCredentialProviderName;
+  allowedSources: CredentialPolicySource[] | null;
+}
+
+/** A provider's node policy. `allowNode: null` means no policy: node fallback is allowed. */
+export interface NodeCredentialPolicyEntry {
+  provider: SpaceCredentialProviderName;
+  allowNode: boolean | null;
+}
+
+/** `credentials.space.policy.get` — the space's policy, and the node's that bounds it. */
+export interface CredentialsSpacePolicyView {
+  spaceId: string;
+  providers: SpaceCredentialPolicyEntry[];
+  node: NodeCredentialPolicyEntry[];
+}
+
+/** `credentials.space.policy.set` — space admin. The provider rides the path. */
+export interface CredentialsSpacePolicySetInput {
+  allowedSources: CredentialPolicySource[] | null;
+  clientMutationId?: string;
+}
+
+export interface CredentialsSpacePolicySetResult {
+  spaceId: string;
+  provider: SpaceCredentialProviderName;
+  allowedSources: CredentialPolicySource[] | null;
+}
+
+/** One provider's node fallback as a node admin sees it (D9). */
+export interface NodeCredentialStatusEntry extends NodeCredentialPolicyEntry {
+  /**
+   * The server's environment carries this provider's key (for example
+   * `ANTHROPIC_API_KEY`). A boolean only — the key is never described.
+   */
+  envKeyPresent: boolean;
+}
+
+/** `node.credentials.status` — node admin. */
+export interface NodeCredentialsStatusView {
+  providers: NodeCredentialStatusEntry[];
+}
+
+/** `node.credentials.policy.set` — node admin. `null` removes the policy. */
+export interface NodeCredentialsPolicySetInput {
+  allowNode: boolean | null;
+  clientMutationId?: string;
 }
 
 export interface CreateTaskInput extends CommandContext {
@@ -2391,6 +2745,18 @@ export interface ContentionReport {
 /** POST /v2/entities/:id/commands/gate — 083's opt-in completion gate. 'pr_merged' makes complete refuse while a tracked PR is unmerged or CI-red. */
 export interface GateTaskInput extends CommandContext { expectedVersion: number; gate: 'none' | 'pr_merged' }
 
+/**
+ * POST /v2/entities/:id/commands/tick — set `done` on the named acceptance
+ * criteria, merged by `id` into the stored list. Criteria not named are left
+ * exactly as stored; an id the task does not carry is refused, never ignored.
+ * `done` defaults to true (tick); `false` unticks.
+ */
+export interface TickCriteriaInput extends CommandContext {
+  expectedVersion: number;
+  criterionIds: string[];
+  done?: boolean;
+}
+
 export interface TaskAxisInput extends CommandContext {
   name: string;
   axisValues: string[];
@@ -2473,6 +2839,18 @@ export interface UpdateSpaceInput extends CommandContext {
   name?: string;
   description?: string;
   githubRepo?: string | null;
+  /**
+   * 187 — the posture NEW sessions spawned into this space are given. Neither
+   * key touches a session that already exists: each carries its own pair, and
+   * a space default that reached backwards would retroactively open terminals
+   * their owners never offered.
+   *
+   * Optional in the PATCH sense, like every key here: absent means "leave it",
+   * so a caller changing the name cannot reset a sharing posture it never
+   * mentioned.
+   */
+  sessionShareDefault?: 'none' | 'space';
+  sessionDriveDefault?: WorkSessionDriveMode;
 }
 
 /**
@@ -2545,10 +2923,19 @@ export interface InviteRedemption {
  * interface with six optional fields cannot express "these are absent BY RULE".
  * `unknown` carries nothing at all: no space, no inviter, not even a hint that
  * some other code would have worked.
+ *
+ * `member` added 2026-09-19 (195, additive union widening). It is the answer
+ * for a caller who is ALREADY in the Space the code names, and it precedes
+ * every dead status because a membership outlives the link that granted it —
+ * the reported bug was a member being told "this invite is used up" about a
+ * Space they had joined ninety seconds earlier with that very code. It carries
+ * the id and name of a Space the reader is a member of, so it discloses
+ * nothing a dozen other reads would not; a stranger never sees it.
  */
 export type InvitePreview =
   | { status: 'unknown' }
   | { status: 'revoked' | 'expired' | 'exhausted'; spaceName: string }
+  | { status: 'member'; spaceId: SpaceId; spaceName: string }
   | {
       status: 'valid';
       spaceId: SpaceId;
@@ -2593,7 +2980,7 @@ export type InvitePreview =
  * so its default door is a control on the tab bar (the `inbox` precedent). The
  * registry row exists all the same, because an operator who places Help in
  * their own menu must not be refused by the server validator. */
-export type MenuViewRef = 'dashboard' | 'feed' | 'inbox' | 'workspace' | 'graph' | 'channels' | 'files' | 'settings' | 'git' | 'messages' | 'board' | 'craft' | 'help' | 'codebrain';
+export type MenuViewRef = 'dashboard' | 'feed' | 'inbox' | 'workspace' | 'graph' | 'channels' | 'files' | 'settings' | 'git' | 'messages' | 'board' | 'craft' | 'help';
 /**
  * tm8: `worktree` became menu-VISIBLE 2026-07-31 (additive union widening,
  * same R4 posture as `graph`). Menu presence is list navigation only — a
@@ -2865,11 +3252,15 @@ export const DEFAULT_MENU_GROUP_SPINE = [
   // edit here if the pending position ruling says otherwise.
   { serverId: 'craft', clientId: 'craft' },
   { serverId: 'graph', clientId: 'graph' },
-  // 2026-09-01 (CodeBrain, migration 173): the delivery pipeline's own tab,
-  // seated after Graph and before the utility tabs. This constant is the ONE
-  // place both parity tests read, so the group cannot land on one side alone
-  // — the 059 lesson this spine exists to encode.
-  { serverId: 'codebrain', clientId: 'codebrain' },
+  // 2026-09-15 (CodeBrain removed, migration 186): the tab 173 seated here is
+  // gone, and `codebrain` has left the MenuViewRef union above with it. #610
+  // deleted the 2.0 UI package that held the only CodeBrain SCREEN, which left
+  // the ref addressable but unrenderable — `view-ref-screens.ts` marked it
+  // `unbuilt`, and the shipped row carried a tab that could only report its own
+  // absence. Files and Board (commented out around this line) kept their refs
+  // when they left the spine because their screens still exist; this one has
+  // none to keep. The registry row and the check-constraint entry go in 186.
+  // { serverId: 'codebrain', clientId: 'codebrain' },
   // Files is no longer a shipped tab, but remains a legal customized-menu ref.
   // { serverId: 'files', clientId: 'files' },
   { serverId: 'settings', clientId: 'settings' },
@@ -2931,6 +3322,16 @@ export interface SpaceSummary {
   unreadTotal: number | null;
   githubRepo?: string | null;
   createdAt: string;
+  /**
+   * The posture NEW sessions spawned into this space are born with (187).
+   *
+   * Both are OPTIONAL so an older node's response still validates, and both are
+   * DEFAULTS rather than current state: changing one never moves a session that
+   * already exists, so nobody's open terminal changes posture because an admin
+   * edited a setting. Writable through `spaces.update` by a space admin.
+   */
+  sessionShareDefault?: 'none' | 'space';
+  sessionDriveDefault?: WorkSessionDriveMode;
 }
 
 /** GET /v2/spaces/:spaceId/navigation */
@@ -3113,7 +3514,12 @@ export interface SavedView {
   createdAt: string;
 }
 
-/** GET /v2/actions?contextEntityId= — palette action descriptors. */
+/**
+ * GET /v2/actions?contextEntityId=&scope=contextual|all — palette action
+ * descriptors. With a context entity the default (`contextual`) lists only the
+ * operations on that entity, most relevant first; `all` appends the Space-level
+ * and global ones. Without a context entity every row is global.
+ */
 export interface PaletteAction {
   id: string;
   label: string;
@@ -3135,6 +3541,49 @@ export interface ActionDiscoveryResult {
   actions: PaletteAction[];
 }
 
+/**
+ * `tm8.actions.v2` — the same answer as `ActionDiscoveryResult`, factored.
+ *
+ * Every `PaletteAction` repeats the target, its version and the epoch, and
+ * carries `id`, `label` and `helpRef`, which are pure functions of `operation`
+ * and the target. Here each is stated once and a row carries only what varies:
+ * `[operation, kind, authzTarget, exposure]`, in `columns` order. The shape is
+ * reversible — `expandActionRows` (./actions.ts) rebuilds every original
+ * `PaletteAction` exactly — so nothing is lost, only no longer repeated.
+ *
+ * Requested with `schema=v2` on `actions.list` (`actionsSchema=v2` on
+ * `entities.context`). Only v2 pages: `limit` (default 20, max 100) and a
+ * keyset `cursor` bound to the `capabilityEpoch` it was issued under.
+ */
+export const ACTION_ROW_COLUMNS = ['operation', 'kind', 'authzTarget', 'exposure'] as const;
+
+export type ActionRow = [
+  operation: OperationName,
+  kind: PaletteAction['kind'],
+  authzTarget: PaletteAction['authzTarget'],
+  exposure: PaletteAction['exposure'],
+];
+
+export interface ActionRows {
+  schema: 'tm8.actions.v2';
+  actorId: EntityId;
+  /** Absent in global discovery (no context entity), exactly as in v1. */
+  target?: { id: EntityId; kind: string; version: number };
+  capabilityEpoch: string;
+  columns: typeof ACTION_ROW_COLUMNS;
+  rows: ActionRow[];
+  /** Rows in the requested scope before paging or byte caps. */
+  total: number;
+}
+
+export interface ActionDiscoveryPage extends ActionRows {
+  /** Continues in `actions.list?cursor=`; null when the scope is exhausted. */
+  nextCursor: Cursor | null;
+}
+
+/** What `actions.list` returns: the v1 inventory, or the v2 page when `schema=v2` asked for it. */
+export type ActionListResult = ActionDiscoveryResult | ActionDiscoveryPage;
+
 export type Unsubscribe = () => void;
 
 // ===========================================================================
@@ -3155,8 +3604,29 @@ export type WorkSessionStatus = 'spawning' | 'running' | 'idle' | 'exited' | 'fa
  */
 export type WorktreeStatus = 'active' | 'merged' | 'abandoned' | 'deleted';
 
-/** Graph-side announce/authorize state for live terminal sharing (T-L10). */
+/**
+ * Graph-side announce/authorize state for live terminal sharing (T-L10). Gates
+ * WATCHING a session's PTY bytes.
+ *
+ * `explicit` IS INERT AND HAS ALWAYS BEEN. `grant_stream_attach` tests only
+ * `= 'none'`, so a session set to `explicit` behaves exactly like `space` — the
+ * whole space may watch — and no per-person list is consulted anywhere, because
+ * none exists. The value is kept so stored rows stay legal; a real per-person
+ * share has to BUILD the list check, and setting this value is not that.
+ */
 export type WorkSessionShareMode = 'none' | 'space' | 'explicit';
+
+/**
+ * Who may TYPE into a session's PTY (187). Deliberately a second dial rather
+ * than another `WorkSessionShareMode` value: watching a terminal and driving it
+ * are different grants, and the common posture — the space may watch, only the
+ * owner may type — cannot be said with one flag.
+ *
+ * `owner` is the creator plus anyone who may act as the creator, which under
+ * 075 means any member of the space may drive a TEAMMATE-launched session. That
+ * is a persona right, not a sharing setting, and `owner` does not revoke it.
+ */
+export type WorkSessionDriveMode = 'owner' | 'space';
 
 /**
  * What a work_session IS, mirroring 083's `work_sessions.session_kind` as
@@ -4068,7 +4538,13 @@ export type LaunchReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' 
  * a client that wants the posture on the record rather than inherited says so).
  */
 export type LaunchAccessMode = 'safe' | 'acceptEdits' | 'auto' | 'plan' | 'fullAccess';
-export type LaunchCredentialSource = 'member' | 'node';
+/**
+ * `space` (design 01a0cfa8 §4) launches on a credential the SPACE holds, which
+ * any member may use (D3). It is resolved server-side against the caller's own
+ * membership at spawn and again at resume. A client names at most a space
+ * credential's id (`spaceCredentialIds`), never an account (I1).
+ */
+export type LaunchCredentialSource = 'member' | 'space' | 'node';
 /**
  * Which credentials a launch may pick a SOURCE for (member's vs the node's).
  *
@@ -4080,6 +4556,14 @@ export type LaunchCredentialSource = 'member' | 'node';
  */
 export type LaunchCredentialProvider = CredentialProviderName;
 export type LaunchCredentialSources = Partial<Record<LaunchCredentialProvider, LaunchCredentialSource>>;
+/** Providers a SPACE can hold a credential for (206 `space_credentials.provider`). */
+export type SpaceCredentialProvider = 'anthropic' | 'openai' | 'github';
+/**
+ * A pinned space credential per provider (D6a). Meaningful only where the SAME
+ * request sets that provider's source to `space`; an id with any other source
+ * is refused rather than ignored. Absent means the space's current default.
+ */
+export type LaunchSpaceCredentialIds = Partial<Record<SpaceCredentialProvider, EntityId>>;
 
 // --- execution.* operation family (R16) ------------------------------------
 
@@ -4100,6 +4584,14 @@ export type LaunchCredentialSources = Partial<Record<LaunchCredentialProvider, L
  * - Every `execution.*` command is recorded in the command_ledger like any
  *   other mutation — the ledger is the execution audit trail.
  */
+/** `execution.spawn.selection` — the exact memory and skill entity ids a session carries. */
+export interface SpawnSelection {
+  /** Memory entities, same space. At most 32. */
+  memoryIds: EntityId[];
+  /** Skill entities, same space. At most 128. */
+  skillIds: EntityId[];
+}
+
 export interface ExecutionSpawnInput extends CommandContext {
   clientMutationId: string;
   spaceId: SpaceId;
@@ -4145,6 +4637,8 @@ export interface ExecutionSpawnInput extends CommandContext {
    * @deprecated
    */
   credentialSource?: LaunchCredentialSource;
+  /** Pin a specific space credential per provider; see `LaunchSpaceCredentialIds`. */
+  spaceCredentialIds?: LaunchSpaceCredentialIds;
   title?: string;
   /** Extra prompt context appended to the composed manifest. */
   promptExtra?: string | null;
@@ -4155,6 +4649,25 @@ export interface ExecutionSpawnInput extends CommandContext {
    * `remembers` set; nothing is written to the graph.
    */
   memoryIds?: EntityId[];
+  /**
+   * The EXACT memory and skill sets for this session, as ticked in the launch
+   * UI (design 01a0cb80 §5.2). When present it replaces the teammate's working
+   * set, the task's `remembers` set and the equipped skills; when absent the
+   * launch behaves exactly as it always has. A selected skill that is not
+   * equipped is loaded for this session only — no edges are written — and an
+   * equipped skill left unticked is audited as `not-selected`.
+   *
+   * Refused together with `memoryIds` (`invalid_input`), so a spawn field has
+   * only one meaning: `memoryIds` ADDS to the working set, `selection` IS it.
+   */
+  selection?: SpawnSelection;
+  /**
+   * The Ask Jev run (`launch.suggest` `runId`) that informed this launch.
+   * After a successful spawn the server links `jev_runs.session_id` and writes
+   * `launch.jevRunId` on the manifest. Execution passes it through and never
+   * interprets it; spawn never calls Jev.
+   */
+  jevRunId?: EntityId;
   /**
    * The terminal geometry the client has measured for the pane this session
    * will be shown in, so the PTY BOOTS at the real width instead of the 80x24
@@ -4300,6 +4813,27 @@ export interface ExecutionStreamsAttachInput extends CommandContext {
   mode: 'view' | 'drive';
 }
 
+/**
+ * execution.sessions.share (187): turn one session's two dials.
+ *
+ * Both fields are optional and a `null`/absent field MERGES — naming only
+ * `driveMode` leaves `shareMode` alone — but at least one must be present, so a
+ * request that would be a no-op is a 400 rather than a silent success.
+ *
+ * `shareMode` is NARROWER than {@link WorkSessionShareMode} on purpose: reading
+ * a session may return `'explicit'`, writing one may not. Nothing in this schema
+ * consults a per-person list, so the gate treats `'explicit'` as `'space'` while
+ * the badge renders "shared: explicit" — a stored row that says one thing and
+ * behaves as another. It stays readable so existing rows round-trip, and stays
+ * unwritable until the list it names actually exists.
+ */
+export interface ExecutionSessionsShareInput extends CommandContext {
+  shareMode?: Exclude<WorkSessionShareMode, 'explicit'>;
+  driveMode?: WorkSessionDriveMode;
+  /** Optimistic concurrency against the session entity's version, when given. */
+  expectedVersion?: number;
+}
+
 export interface StreamAttachGrant {
   workSessionId: EntityId;
   /** WebSocket URL to attach to (server-relative or absolute). */
@@ -4347,6 +4881,102 @@ export interface ExecutionGitCommitInput extends CommandContext {
   paths?: string[];
   /** Stage everything (git add -A) before committing. */
   all?: boolean;
+}
+
+/**
+ * execution.gitStage — stage or UNSTAGE paths in the session's worktree.
+ *
+ * WHY A VERB OF ITS OWN when `execution.gitCommit` already stages what it is
+ * about to commit. Because review is not commit. A reviewer moves files in and
+ * out of the index while deciding what belongs in one change, and the only way
+ * to do that through `gitCommit` is to commit — which is the decision they have
+ * not made yet. Staging that can only be expressed by committing is not
+ * staging.
+ *
+ * UNSTAGE IS A MIXED RESET AND NOTHING ELSE: `git reset -q HEAD -- <paths>`.
+ * It moves the index back to HEAD for those paths and never touches a byte in
+ * the working tree. `--hard` is absent from this verb at every layer and must
+ * stay absent: rollback is the verb that discards work, it gates on `force`,
+ * and it says so. An unstage that could delete an agent's edits would be the
+ * same verb wearing a safer word.
+ *
+ * THE ANSWER IS THE POST-OPERATION STATUS, not an acknowledgement. A client
+ * that repainted from its own optimistic guess would drift from the worktree
+ * the moment a concurrent agent turn wrote a file, so the result carries the
+ * same `files` / `dirty` shape `execution.gitStatus` returns, read AFTER the
+ * index moved.
+ */
+export type ExecutionGitStageInput = CommandContext & {
+  action: 'stage' | 'unstage';
+  /** Pathspecs, each guarded (no absolute, no `..`, no leading dash). */
+  paths?: string[];
+  /** The whole worktree: `git add -A` / `git reset HEAD`. */
+  all?: boolean;
+  /**
+   * PART of one file instead of all of it — `git add -p` without the prompt.
+   * Mutually exclusive with `paths` and `all`; naming two scopes is a refusal,
+   * not a merge, because there is no honest way to rank them.
+   *
+   * INDICES, NEVER PATCH TEXT. The server re-derives the diff and slices it
+   * itself. A patch accepted from a client and fed to `git apply --cached` is
+   * a write primitive for any path in the repository — `--cached` writes the
+   * index, so such a patch would not even have to touch the working tree to
+   * put content into the next commit. An index into a diff the server just
+   * computed cannot express that.
+   *
+   * The indices are 1-based and come from `execution.gitDiff`'s `hunks`, read
+   * in the scope that matches the action: `unstaged` to stage, `staged` to
+   * unstage. Out of range is a refusal — never a clamp, never a partial apply.
+   */
+  hunks?: {
+    path: string;
+    /** 1-based, from the matching `gitDiff` read. Order and repeats do not matter. */
+    indices: number[];
+    /**
+     * `hunkDigest` from that read, echoed back.
+     *
+     * An agent lane can write the file between render and click, and the
+     * indices would still be IN RANGE while pointing at different code. The
+     * digest is what turns that into a refusal instead of a wrong stage.
+     * Optional so a scripted caller can opt out; a UI should always send it.
+     */
+    digest?: string;
+  };
+};
+
+export interface SessionGitStageResult {
+  sessionId: EntityId;
+  worktreeId: EntityId;
+  action: 'stage' | 'unstage';
+  branch: string;
+  /**
+   * The paths git was ACTUALLY given, so a client can assert what moved.
+   *
+   * For `stage` that is the request. For `unstage` it can be LONGER: a staged
+   * rename is one porcelain row (`path` new, `origPath` old) over two index
+   * entries, and resetting only the requested half leaves a staged deletion
+   * the reviewer never asked for. The server expands the rename and says so
+   * here rather than echoing a request that understates what it did.
+   *
+   * EMPTY when `all` is true: `git add -A` and `git reset HEAD` are given no
+   * pathspecs, and this field reports argv, not intent. Read `all` for that.
+   */
+  paths: string[];
+  all: boolean;
+  /** The staged half AFTER the operation — what a commit would write now. */
+  staged: SessionGitFile[];
+  /** Full porcelain status AFTER the operation, capped like gitStatus. */
+  files: SessionGitFile[];
+  filesTruncated: boolean;
+  dirty: { staged: number; unstaged: number; untracked: number; total: number };
+  /**
+   * Present only for a hunk request. `applied` is the selection after
+   * de-duplication and `total` is how many hunks the file had, so a client can
+   * say "2 of 5" without a second read — and can tell a full-file result from
+   * a partial one, which the porcelain alone does not distinguish.
+   */
+  hunkSelection?: { path: string; applied: number; total: number };
+  checkedAt: string;
 }
 
 /**
@@ -4407,6 +5037,28 @@ export interface SessionGitStatus {
   checkedAt: string;
 }
 
+/**
+ * One selectable hunk of a single-file diff — the unit `execution.gitStage`
+ * takes an index into.
+ *
+ * ONLY EVER PRESENT FOR `staged` AND `unstaged` SCOPE, and only when `path`
+ * narrowed the read to one file. The `session` scope is measured from the
+ * MERGE-BASE, so its hunks have a pre-image that is not the index and cannot
+ * be handed to `git apply --cached` — offering them would be offering a
+ * selection the stage verb must then refuse. Absent is the honest answer.
+ */
+export interface SessionGitDiffHunk {
+  /** 1-based, and stable only within the read that produced it. */
+  index: number;
+  /** The text after the closing `@@` — git's guess at the enclosing function. */
+  heading: string;
+  /** Pre-image start line, which is the side a reviewer is looking at. */
+  oldStart: number;
+  newStart: number;
+  /** The hunk verbatim, header included, so a client need not re-split `diff`. */
+  text: string;
+}
+
 /** Per-file numstat digest — always complete even when the diff text is cut. */
 export interface SessionGitDiffFile {
   path: string;
@@ -4422,7 +5074,40 @@ export interface SessionGitDiffFile {
  * The digest (`stat`, `files`) is always complete; the unified `diff` text is
  * capped by `maxBytes` with `diffTruncated` saying so — digest+partial, the
  * transcript precedent.
+ *
+ * NARROWING IT: `scope` and `path`. Both are optional and both default to
+ * exactly the whole-session read described above, so every existing caller is
+ * unchanged. They exist because a REVIEWER asks two questions this read could
+ * not answer:
+ *
+ *   · "show me this ONE file" — and slicing the session diff client-side
+ *     cannot do it, because the text is byte-capped: a file past the cap is
+ *     not truncated in the payload, it is absent from it. So the narrowing
+ *     has to happen before the cap, which means server-side;
+ *   · "show me what is STAGED" vs "what is not" — the index/worktree split
+ *     the session diff deliberately flattens. `git diff --cached` and
+ *     `git diff` are different questions and only git can answer them.
+ *
+ * An UNTRACKED path is not compared the same way in all three scopes. It sits
+ * in the working tree and in neither the index nor HEAD, so:
+ *
+ *   · `session` asks what this lane changed, and the answer is the whole file.
+ *     The server produces it with `git diff --no-index` against /dev/null — a
+ *     real unified diff of a whole new file rather than a blank panel over a
+ *     file that plainly changed;
+ *   · `staged` (index vs HEAD) and `unstaged` (working tree vs index) have
+ *     nothing to compare: a commit would write none of it. Both answer EMPTY
+ *     — `diff: ''`, `files: []`, a zeroed `stat` — and that is the truthful
+ *     answer to those two questions, not a gap in the read.
  */
+export type SessionGitDiffScope =
+  /** Working tree vs the merge-base of the session's base ref. The default. */
+  | 'session'
+  /** Index vs HEAD — exactly what a commit would write. */
+  | 'staged'
+  /** Working tree vs index — what is NOT staged. */
+  | 'unstaged';
+
 export interface SessionGitDiff {
   sessionId: EntityId;
   available: boolean;
@@ -4439,6 +5124,49 @@ export interface SessionGitDiff {
   /** Unified diff text, capped at `maxBytes`. */
   diff: string;
   diffTruncated: boolean;
+  /**
+   * The scope this answer was measured in — ECHOED, never inferred. A client
+   * that asked for `staged` and rendered whatever came back would show the
+   * session diff under a "Staged" heading the day the param is dropped.
+   */
+  scope: SessionGitDiffScope;
+  /** The single path this answer was narrowed to, or null for the whole tree. */
+  path: string | null;
+  /**
+   * The selectable hunks of this file, or null when there are none to offer.
+   *
+   * Null rather than `[]`, and the distinction carries weight: `[]` would say
+   * "this file has zero hunks", which is never true of a file that appears in
+   * a diff. Null says the read cannot offer a selection at all — wrong scope,
+   * no `path`, an untracked or binary file, or a diff the byte cap cut, where
+   * the hunks parsed from a half-file would be a selection over text the
+   * reviewer never saw the end of.
+   */
+  hunks: SessionGitDiffHunk[] | null;
+  /**
+   * Pins `hunks` to the bytes they were read from. Echo it back in
+   * `execution.gitStage`; the server refuses the selection if the file moved
+   * underneath it. Null exactly when `hunks` is null.
+   *
+   * It covers hunk BODY text only — an edit elsewhere in the file renumbers
+   * every later `@@` header without changing the hunk the reviewer approved,
+   * and refusing that would make hunk staging unusable in a live agent lane,
+   * which is the only place it is used.
+   */
+  hunkDigest: string | null;
+  /**
+   * True when `path` names a file git is not tracking — recorded neither in
+   * the index nor in HEAD.
+   *
+   * A CLASSIFICATION of the path, never a claim about how the diff was
+   * produced. It is true in all three scopes, including the two that answer
+   * empty, and only `session` reaches `--no-index`. That is precisely what
+   * makes it useful: it is how a client tells a `staged` answer that is empty
+   * BECAUSE the file is untracked from one that is empty because the file is
+   * unchanged. The UI says so: "new file, not yet tracked" is a different fact
+   * from "a file with 400 added lines".
+   */
+  untracked: boolean;
   checkedAt: string;
 }
 
@@ -4663,6 +5391,15 @@ export interface SessionJournalRecord {
   };
   /** One entry per HTTP call this invocation made. Often 1, sometimes 0 or N. */
   calls: SessionJournalCall[];
+  /**
+   * Present only on an `entity context` read: the `schemaVersion` the Server
+   * returned (e.g. `tm8.entity-context.v1`), or `null` when the response
+   * carried none. Joined with the manifest's `promptVersion`, it lets
+   * first-read metrics tell a v2 context read from the c761 snapshot (spec
+   * ca8d §6.3, c761 Q27). OPTIONAL: every other command, and every record
+   * written before the field, omits it.
+   */
+  contextRead?: { schemaVersion: string | null };
   result: { exitCode: number; error: string | null };
   tokens: {
     /** Names how the estimate was derived. Never omit it. */
@@ -4945,6 +5682,67 @@ export interface SessionTranscriptPage {
    * `source: 'transcript'` is the label that keeps the claim honest.
    */
   fileChanges?: SessionFileChanges | null;
+  /**
+   * The LATEST REQUEST'S context reading — what the session panel's toolbar
+   * number shows. Absent from an older server; null on a page that cannot
+   * speak about now (a page-back, or an unavailable transcript). See
+   * `SessionTranscriptContext`, and keep it apart from `stats`, which are
+   * window aggregates and can never be an occupancy.
+   */
+  context?: SessionTranscriptContext | null;
+}
+
+/**
+ * ONE REQUEST'S context usage, read from the newest usage-bearing record in the
+ * tail window. A SNAPSHOT, not a live view: the agent's context has grown by
+ * whatever it said and was told since, and the next request's report is what
+ * will show it.
+ *
+ * Every count is null when unknown and 0 only when the provider said 0. The
+ * numerator and denominator of the cache ratio (`cacheReadTokens` /
+ * `requestInputTokens`) and `observedAt` all come from the SAME record, so a
+ * reader can divide them; nothing here is a cumulative total.
+ *
+ * - claude: used = input + cache_read + cache_creation of the latest
+ *   main-thread assistant message (sub-agent sidechains are other contexts).
+ * - codex: used = `last_token_usage.input_tokens`, which already INCLUDES
+ *   `cached_input_tokens` — adding them would count the cache twice.
+ */
+export interface SessionTranscriptContext {
+  /** Input tokens of the latest request — the context it was sent with. */
+  usedTokens: number | null;
+  /** The context window, only where something authoritative reported it. */
+  capacityTokens: number | null;
+  /** Input served from cache on that same request. Cache WRITES are not reuse. */
+  cacheReadTokens: number | null;
+  /** The cache ratio's denominator: that same request's total input. */
+  requestInputTokens: number | null;
+  /** Model named on the sampled request. */
+  model: string | null;
+  /** The provider record's own timestamp — never the time of this read. */
+  observedAt: string | null;
+  source: 'claude_request_usage' | 'codex_request_usage' | null;
+  /**
+   * `provider` — the transcript reported the window beside the usage (codex).
+   * `runtime` — the session was launched on a model whose id names its window
+   *   (`…[1m]`) and the sample came from that same model.
+   */
+  capacitySource: 'provider' | 'runtime' | null;
+  /**
+   * Why there is no reading, when there is none.
+   * - `not_reported` — the window holds no usage-bearing request.
+   * - `incomplete_usage` — the latest request's usage is missing a part.
+   * - `sample_outside_window` — the tail is partial and holds no request; the
+   *   next request repairs it.
+   * - `awaiting_new_sample` — the context was compacted, or the model changed,
+   *   after the latest sample, so that sample no longer describes it.
+   */
+  unavailableReason:
+    | 'not_reported'
+    | 'incomplete_usage'
+    | 'sample_outside_window'
+    | 'awaiting_new_sample'
+    | null;
 }
 
 /** One observed Edit/Write, with its text capped but its counts exact. */
@@ -4964,6 +5762,21 @@ export interface SessionFileChange {
   linesRemoved: number;
   hunks: SessionFileHunk[];
   hunksTruncated: boolean;
+  /**
+   * True when the agent's MOST RECENT turn wrote this file.
+   *
+   * The counts beside it stay session-wide on purpose: "the agent has edited
+   * this file four times, most recently in the turn you just read" is the
+   * useful sentence, and two competing sets of numbers on one row is not.
+   *
+   * It inherits every honesty boundary of `source: 'transcript'` — it is what
+   * the harness OBSERVED through tool calls. A file the agent rewrote with a
+   * shell command in that same turn is not flagged, because nothing recorded
+   * it. This flag can therefore be a FALSE NEGATIVE and must never be
+   * rendered as "the agent did not touch this"; it is only ever evidence that
+   * it DID.
+   */
+  lastTurn: boolean;
 }
 
 export interface SessionFileChanges {
@@ -4973,6 +5786,22 @@ export interface SessionFileChanges {
   filesTruncated: boolean;
   /** The provenance label the UI must carry: observed tool calls, not git. */
   source: 'transcript';
+  /**
+   * How many agent turns the transcript contains, where a TURN is the work
+   * following one real user prompt.
+   *
+   * 1 for a session nobody has replied to yet, including an autonomous run
+   * that was never prompted a second time — there, the whole session is the
+   * one turn, and every file it touched is correctly `lastTurn`.
+   *
+   * A prompt is a MAIN-THREAD `user` record that is not a tool result, not a
+   * compaction summary, and not meta — the same definition `session-usage`
+   * counts prompts by. The exclusions are not tidying: the harness re-injects
+   * a compaction summary AS a user turn, so counting it would start a fresh
+   * "last turn" that the agent never worked in, and a panel reading from it
+   * would report that the agent had changed nothing.
+   */
+  turns: number;
 }
 
 // --- files.* blob lifecycle (AM-2 §2, 03 §6) --------------------------------
@@ -5217,10 +6046,41 @@ export interface EntityFeedPage {
 
 export type EntityContextSection = 'summary' | 'hierarchy' | 'connections' | 'messages' | 'activity' | 'actions';
 
+/**
+ * The v2 section names (c904 §2.10). `summary` is accepted as an alias of
+ * `assignment`; `activity` is not a v2 section. v1 keeps `EntityContextSection`.
+ */
+export type EntityContextV2Section =
+  | 'assignment' | 'summary' | 'hierarchy' | 'blockers' | 'connections' | 'messages' | 'actions';
+
 export interface EntityContextQuery {
-  sections?: EntityContextSection[];
+  /**
+   * Which DTO to return. Absent means v1 until the rollout step (M2/S5) flips
+   * the default; `v1` stays reachable after it.
+   */
+  schema?: 'v1' | 'v2';
+  /** v1 accepts `EntityContextSection`; v2 accepts `EntityContextV2Section`. */
+  sections?: Array<EntityContextSection | EntityContextV2Section>;
   totalBytes?: number;
+  /** v1 only. v2 budgets are total-only (c904 Q17). */
   sectionBytes?: number;
+  /**
+   * v2 only, with `sections: ['assignment']`: the UTF-8 byte offset of a body
+   * page (c904 §2.4). Taken from the server's `assignment.expand`, never
+   * computed by the caller.
+   */
+  offset?: number;
+  /** `v2` returns the actions section as `ActionRows`; `v1` (default) as `PaletteAction[]`. */
+  actionsSchema?: 'v1' | 'v2';
+  /**
+   * v2 only: continues the ONE paged section in `sections` (hierarchy,
+   * blockers, connections or messages). Context-owned: the token binds entity,
+   * section, edge-type filter and order, and is never an `entities.children`
+   * or `entities.connections` cursor.
+   */
+  cursor?: string;
+  /** v2 only, with `sections=connections` alone: one edge type, `anchored_to` included. */
+  edgeType?: string;
 }
 
 export interface EntityContextView {
@@ -5231,12 +6091,193 @@ export interface EntityContextView {
   children: EntitySummary[];
   edges: EdgeView[];
   messages: MessageView[];
-  actions: PaletteAction[];
+  /**
+   * `PaletteAction[]` under `actionsSchema=v1` (default), `ActionRows` under
+   * `v2` — or `[]` under either when the section was not requested or the
+   * byte budget left no action row (then `truncated` is true).
+   */
+  actions: PaletteAction[] | ActionRows;
   provenance: { operation: OperationName; fetchedAt: string; eventSeq: number };
   cursors: Record<string, Cursor | null>;
   byteSize: number;
   truncated: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// entities.context v2 — `tm8.entity-context.v2` (specs c761 §3, c904 §2)
+// ---------------------------------------------------------------------------
+
+/** The MCP twin of an `expand` string: the same read as an operation call. */
+export interface EntityContextExpandOp {
+  operation: OperationName;
+  params: Record<string, unknown>;
+}
+
+/**
+ * A reference row (parent, child, session task, connection endpoint). `title`
+ * is capped at 80 code points, the ellipsis included. A ref the root names but
+ * the caller cannot read is `{id, unreadable:true}` and nothing else.
+ */
+export type EntityContextRef =
+  | {
+      id: EntityId;
+      kind: string;
+      title: string;
+      status: string;
+      titleTruncated?: true;
+      deleted?: true;
+    }
+  | { id: EntityId; unreadable: true };
+
+/** An unresolved `depends_on` target (c761 §3.3). */
+export interface EntityContextBlocker {
+  id: EntityId;
+  title: string;
+  status: string;
+  resolved: false;
+  titleTruncated?: true;
+  deleted?: true;
+}
+
+export interface EntityContextAssignee {
+  id: EntityId;
+  name: string;
+  /** Only on the caller's own row. */
+  you?: true;
+  /** Who assigned it, and when; absent when the edge never recorded them. */
+  by?: string;
+  at?: string;
+}
+
+/** Latest-N, emitted oldest→newest. `text` and `from` carry their caps. */
+export type EntityContextMessage =
+  | {
+      id: EntityId;
+      from: string;
+      fromTruncated?: true;
+      at: string;
+      text: string;
+      truncated?: true;
+      replyTo?: EntityId;
+      toMe?: true;
+    }
+  | { id: EntityId; from: string; fromTruncated?: true; at: string; redacted: true };
+
+export interface EntityContextConnection {
+  type: string;
+  dir: 'out' | 'in';
+  other: EntityContextRef;
+  resolved?: boolean;
+}
+
+export type EntityContextGate =
+  | 'none'
+  | {
+      kind: 'pr_merged';
+      /** A tracked PR the caller cannot read is `{id, unreadable:true}` (c761 §6). */
+      prs: Array<{ url: string; state: string; ci: string | null } | { id: string; unreadable: true }>;
+      more?: true;
+    };
+
+export interface EntityContextAssignment {
+  text: string;
+  /** UTF-8 bytes of the WHOLE body, not of `text`. */
+  bytes: number;
+  complete: boolean;
+  offset?: number;
+  expand?: string;
+  expandOp?: EntityContextExpandOp;
+}
+
+export interface EntityContextOmitted {
+  section: string;
+  kept: number;
+  more: boolean;
+  totalAtLeast?: number;
+  reason: 'budget' | 'rowLimit' | 'fetchLimit';
+  /**
+   * The page that continues this list. Absent only while that page's consumer
+   * has not shipped (section cursors: M2/S3b) — never a dead pointer (c904 Q12).
+   */
+  expand?: string;
+  expandOp?: EntityContextExpandOp;
+}
+
+export interface EntityContextNotLoaded {
+  section: string;
+  /** Absent only while the expand's bounded consumer has not shipped (actions: #669). */
+  expand?: string;
+  expandOp?: EntityContextExpandOp;
+}
+
+export interface EntityContextError {
+  section: string;
+  code: string;
+  retry: boolean;
+}
+
+export interface EntityContextV2View {
+  schemaVersion: 'tm8.entity-context.v2';
+  id: EntityId;
+  kind: string;
+  title: string;
+  version: number;
+  status: string;
+  asOfSeq: number;
+  /** Nearest parent only; `null` for a root entity. */
+  parent?: EntityContextRef | null;
+  // task
+  priority?: string | null;
+  gate?: EntityContextGate;
+  assignees?: EntityContextAssignee[];
+  assignment?: EntityContextAssignment;
+  acceptance?: Array<{ id: string; done: boolean; text: string }>;
+  /**
+   * The write for `acceptance`: `acceptance` is the READ name, and the stored
+   * member is `acceptanceCriteria`, so the list alone does not say how to
+   * change it. Present while any criterion is unticked; `write` is the exact
+   * command (unticked ids and current version filled in), `writeOp` its
+   * operation call.
+   */
+  acceptanceWrite?: { write: string; writeOp: EntityContextExpandOp };
+  blockers?: EntityContextBlocker[];
+  children?: EntityContextRef[];
+  // doc
+  outline?: Array<{ level: number; text: string; offset: number }>;
+  outlineTruncated?: true;
+  // work_session
+  teammate?: string | null;
+  agentTool?: string | null;
+  model?: string | null;
+  checkoutBranch?: string | null;
+  startedAt?: string | null;
+  exitedAt?: string | null;
+  endedKind?: string | null;
+  endedReason?: string | null;
+  tasks?: EntityContextRef[];
+  // chat
+  runtimeState?: string | null;
+  turnState?: string | null;
+  turnCount?: number | null;
+  lastTurnAt?: string | null;
+  mode?: string | null;
+  // project
+  projectId?: string | null;
+  // message
+  anchor?: EntityContextRef;
+  parentMessage?: EntityContextRef | null;
+  attachments?: Array<{ id: EntityId; name: string; bytes: number | null }>;
+  // sections loaded only on request
+  connections?: EntityContextConnection[];
+  messages?: EntityContextMessage[];
+  omitted: EntityContextOmitted[];
+  notLoaded: EntityContextNotLoaded[];
+  errors: EntityContextError[];
+  budget: { requested: number; used: number };
+}
+
+/** `entities.context` answers v1 or v2, as `schema` selected. */
+export type EntityContextResult = EntityContextView | EntityContextV2View;
 
 export interface ClosedPromptPolicy {
   kernelTemplate: string;
@@ -5455,4 +6496,136 @@ export interface EntityKindUpdateInput extends CommandContext {
   fieldSchema?: CustomFieldDef[];
   capabilities?: Record<string, boolean>;
   allowTightening?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// events.changes — the scoped change feed (spec doc 01a0cf35 §3)
+// ---------------------------------------------------------------------------
+//
+// "Did anything I care about change since seq N?" answered as ONE line per
+// changed entity rather than a replay of every event with its hydrated body.
+// The digest names WHAT moved (`changes[]`) and WHO moved it (`actors[]`); the
+// current state is one `tm8 entity context <id>` away, and exactly what happened
+// is `--events` (thin rows) or `tm8 event list --entity <id>`.
+
+/** The fewest bytes a caller may budget. 2 × the worst single entity + envelope headroom (§3.3). */
+export const EVENT_CHANGES_MIN_TOTAL_BYTES = 8_192;
+/** The most bytes a caller may budget — the same ceiling as `entities.context`. */
+export const EVENT_CHANGES_MAX_TOTAL_BYTES = 32_768;
+/** The default budget, measured as minified DTO bytes. */
+export const EVENT_CHANGES_DEFAULT_TOTAL_BYTES = 16_384;
+/** Rows one request examines before it stops with `more: true`. */
+export const EVENT_CHANGES_MAX_EXAMINED = 2_000;
+/** Entities one digest page carries before it stops with `more: true`. */
+export const EVENT_CHANGES_MAX_ENTITIES = 50;
+/** A scope that resolves to more ids than this is refused (`scope_too_large`), never truncated. */
+export const EVENT_CHANGES_MAX_SCOPE_IDS = 1_000;
+/** Newest messages listed per task / doc / project (and any other) anchor. */
+export const EVENT_CHANGES_MESSAGE_CAP = 3;
+/** Newest messages listed per chat or session anchor. */
+export const EVENT_CHANGES_CHAT_MESSAGE_CAP = 10;
+/** Title and excerpt bounds. */
+export const EVENT_CHANGES_TITLE_CHARS = 80;
+export const EVENT_CHANGES_EXCERPT_CHARS = 120;
+
+/**
+ * `details.reason` values an `events.changes` refusal carries. `CommandErrorCode`
+ * is a closed union, so these ride an existing code (`invalid_cursor`,
+ * `invalid_input`, `payload_too_large`) and the CLI renders `<reason>: <hint>`.
+ */
+export type EventChangesRefusal = 'index_incomplete' | 'scope_too_large' | 'digest_group_too_large';
+
+/** The selectors, echoed back as the request resolved them. Absent keys were not given. */
+export interface EventChangesScope {
+  entity?: EntityId[];
+  anchor?: EntityId[];
+  subtree?: EntityId[];
+  kind?: string[];
+  change?: string[];
+}
+
+/** Set when `after` reached below the oldest retained event: that range is unknown, not unchanged. */
+export interface EventChangesGap {
+  after: number;
+  oldestRetained: number;
+}
+
+/** One new message, rolled up under its anchor. The excerpt is untrusted content. */
+export interface EventChangeMessage {
+  id: EntityId;
+  author: string | null;
+  /** The thread root this message replies under, or null for a root message. */
+  replyTo: EntityId | null;
+  /** The message mentions the caller. */
+  toMe: boolean;
+  excerpt: string;
+  truncated: boolean;
+}
+
+/**
+ * One changed entity. `v` is the current version, read in the same snapshot as
+ * the scan: valid as `--expect-version` for a mutation, and it may be newer than
+ * `through` when `more` is set.
+ */
+export interface EventChangeEntry {
+  id: EntityId;
+  kind: string;
+  /** Null only for a hard-deleted entity reported from its captured spine. */
+  title: string | null;
+  parentId: EntityId | null;
+  v: number | null;
+  /** Tasks and work sessions only. */
+  status?: string;
+  /** The last examined seq that changed this entity. */
+  lastSeq: number;
+  /** Closed vocabulary — see `tm8 help event changes`. */
+  changes: string[];
+  actors: string[];
+  /** Present when new messages rolled up under this entity. Newest first. */
+  messages?: EventChangeMessage[];
+  /** Exact count of new messages examined; absent (see `messagesTotalAtLeast`) when `more` is set. */
+  messagesTotal?: number;
+  /** A lower bound, when the page stopped early (`more: true`). */
+  messagesTotalAtLeast?: number;
+  /** Rows were trimmed to the per-anchor cap; `messagesNext` pages the rest. */
+  messagesMore?: boolean;
+  messagesNext?: string;
+}
+
+/** One `--events` row: exactly what happened, with ids instead of bodies. */
+export interface EventChangeThinRow {
+  seq: number;
+  type: string;
+  id: EntityId | string;
+  kind?: string;
+  v?: number;
+  edge?: string;
+  src?: EntityId;
+  dst?: EntityId;
+  anchor?: EntityId;
+  entity?: EntityId;
+  verb?: string;
+  status?: string;
+  actor?: string | null;
+}
+
+/**
+ * The digest. "Unchanged" means ONLY `changed.length === 0 && !more && !gap`:
+ * a short result is never "caught up". `through` is the cursor to resume from
+ * (`--after <through>`), and `next` is that command spelled out.
+ *
+ * `scope` and `next` are omitted on an unchanged poll so that the answer a
+ * poller sees most often stays under 100 bytes.
+ */
+export interface EventChangesView {
+  scope?: EventChangesScope;
+  since: number;
+  through: number;
+  more: boolean;
+  gap: EventChangesGap | null;
+  unresolved: EntityId[];
+  changed?: EventChangeEntry[];
+  /** `--events` only, in place of `changed`. */
+  events?: EventChangeThinRow[];
+  next?: string;
 }

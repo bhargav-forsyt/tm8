@@ -1,9 +1,16 @@
 import { createHash } from 'node:crypto';
 
 import {
+  ACTION_ROW_COLUMNS,
   CollabError,
+  decodeCursor,
+  encodeCursor,
+  expandActionRows,
   getOperation,
+  type ActionDiscoveryPage,
   type ActionDiscoveryResult,
+  type ActionRow,
+  type ActionRows,
   type OperationName,
   type PaletteAction,
   type SavedView,
@@ -236,6 +243,7 @@ function structurallyAvailable(operation: OperationName, row: ActionContextRow):
     case 'entities.points.add':
       return live && (row.kind === 'member' || row.kind === 'team_member');
     case 'entities.commands.complete':
+    case 'entities.commands.tick':
       return live && row.kind === 'task' && row.work_status !== 'done';
     case 'entities.commands.work':
       return live && row.kind === 'task';
@@ -285,6 +293,8 @@ function isAvailable(operation: OperationName, row: ActionContextRow | null): bo
 
   // Parameter-free operations are real palette composers in both global and
   // contextual discovery. They may open a form, but they never claim a target.
+  // AUTHORIZATION stops here; whether one is SHOWN beside a context entity is
+  // `actionScope`'s separate, presentation-only question.
   if (params.length === 0) return true;
   if (!row) return false;
 
@@ -296,6 +306,204 @@ function isAvailable(operation: OperationName, row: ActionContextRow | null): bo
   }
 
   return structurallyAvailable(operation, row);
+}
+
+/**
+ * Parameter-free operations whose BODY or QUERY names the context entity —
+ * the anchor of a message, the source of an edge, the parent of a child. They
+ * carry no path parameter, yet on this kind of entity they are about the
+ * entity, so they belong in its contextual list. Every other parameter-free
+ * operation (`auth.*`, `spaces.create`, `identity.get`, …) is global: it
+ * answers the same way on every entity and is withheld from the contextual
+ * list unless the caller asks for `scope=all`.
+ */
+function anchoredOn(operation: OperationName, row: ActionContextRow): boolean {
+  if (row.deleted_at !== null) return false;
+  switch (operation) {
+    case 'messages.post':
+    case 'edges.create':
+    case 'edges.list':
+    case 'placements.apply':
+    case 'attentionRequests.list':
+    case 'graph.query':
+    case 'files.uploadInit':
+      return true;
+    case 'entities.create':
+    case 'collections.query':
+      return MOVABLE_KINDS.has(row.kind);
+    case 'tracking.refresh':
+      return row.kind === 'task' || row.kind === 'pull_request' || row.kind === 'commit';
+    case 'execution.spawn':
+    case 'execution.dispatch':
+      return row.kind === 'task';
+    default:
+      return false;
+  }
+}
+
+/**
+ * Where an AUTHORIZED operation sits relative to a context entity.
+ *
+ *   entity  acts on or with this entity — the default contextual list
+ *   space   needs only the entity's Space (`spaces.get`, `savedViews.list`)
+ *   global  needs nothing at all (`auth.logout`, `spaces.create`)
+ *
+ * Presentation only: the complete authorized inventory is still one
+ * `scope=all` away, and the capabilityEpoch is computed over that inventory.
+ */
+type ActionScope = 'entity' | 'space' | 'global';
+
+function actionScope(operation: OperationName, row: ActionContextRow): ActionScope {
+  const params = operationParams(operation);
+  if (params.length === 0) return anchoredOn(operation, row) ? 'entity' : 'global';
+  if (params.every((param) => param === 'spaceId')) return 'space';
+  return 'entity';
+}
+
+/**
+ * What an agent most plausibly wants to do next on an entity, most relevant
+ * first. A kind's head list is followed by this generic order; anything named
+ * in neither keeps registry order after both. Deterministic by construction:
+ * the inputs are the operation name, the kind and the stored work status.
+ */
+const GENERIC_RELEVANCE: readonly OperationName[] = [
+  'messages.post',
+  'entities.context',
+  'entities.patch',
+  'messages.list',
+  'edges.create',
+  'entities.get',
+  'entities.children',
+  'entities.hierarchy',
+  'entities.connections',
+  'edges.list',
+  'entities.activity',
+  'entities.feed',
+  'entities.versions',
+  'entities.react',
+  'placements.apply',
+  'entities.create',
+  'entities.move',
+  'files.uploadInit',
+  'attentionRequests.list',
+  'graph.query',
+  'collections.query',
+  'presence.get',
+  'entities.delete',
+];
+
+const ACTIVE_WORK = new Set(['working', 'in_review']);
+
+function kindRelevance(row: ActionContextRow): readonly OperationName[] {
+  switch (row.kind) {
+    case 'task':
+      if (row.work_status !== null && ACTIVE_WORK.has(row.work_status)) {
+        return [
+          'entities.commands.complete',
+          'messages.post',
+          'entities.commands.tick',
+          'entities.commands.linkPr',
+          'entities.commands.linkCommit',
+          'entities.patch',
+          'edges.create',
+          'tracking.refresh',
+          'entities.context',
+        ];
+      }
+      if (row.work_status === 'done' || row.work_status === 'cancelled') {
+        return ['messages.post', 'entities.context', 'entities.patch'];
+      }
+      return [
+        'entities.commands.work',
+        'entities.commands.pull',
+        'messages.post',
+        'entities.patch',
+        'execution.spawn',
+        'execution.dispatch',
+        'entities.context',
+        'entities.commands.complete',
+        'entities.commands.tick',
+      ];
+    case 'message':
+      return [
+        'messages.post',
+        'messages.edit',
+        'entities.react',
+        'messages.attachments.add',
+        'messages.attachments.remove',
+        'messages.delivery.get',
+        'messages.delete',
+      ];
+    case 'channel':
+      return ['messages.post', 'messages.list', 'entities.context'];
+    case 'work_session':
+      return [
+        'messages.post',
+        'handoffs.send',
+        'handoffs.list',
+        'execution.streams.attach',
+        'execution.terminate',
+      ];
+    case 'pull_request':
+    case 'commit':
+      return ['tracking.refresh', 'messages.post', 'projects.associations.correct'];
+    case 'file':
+      return ['files.download', 'messages.post'];
+    case 'team_member':
+      return [
+        'messages.post',
+        'entities.points.add',
+        'entities.patch',
+        'teamMembers.interactionProfile.setDefault',
+      ];
+    case 'member':
+      return ['messages.post', 'entities.points.add'];
+    case 'interaction_profile':
+      return [
+        'interactionProfiles.updateDraft',
+        'interactionProfiles.validate',
+        'interactionProfiles.preview',
+        'interactionProfiles.activate',
+        'interactionProfiles.retire',
+      ];
+    default:
+      return [];
+  }
+}
+
+const SCOPE_ORDER: Record<ActionScope, number> = { entity: 0, space: 1, global: 2 };
+
+/**
+ * Order authorized operations for a context entity: scope first (entity, then
+ * space, then global), then relevance within the scope, then registry order.
+ * The byte-capped `entities.context` actions section trims from the END, so
+ * this order is what decides which rows survive the cap.
+ */
+function rankForContext(
+  operations: readonly OperationName[],
+  row: ActionContextRow,
+): OperationName[] {
+  const rank = new Map<OperationName, number>();
+  for (const operation of [...kindRelevance(row), ...GENERIC_RELEVANCE]) {
+    if (!rank.has(operation)) rank.set(operation, rank.size);
+  }
+  return operations
+    .map((operation, index) => ({
+      operation,
+      scope: SCOPE_ORDER[actionScope(operation, row)],
+      relevance: rank.get(operation) ?? rank.size,
+      index,
+    }))
+    .sort((a, b) => a.scope - b.scope || a.relevance - b.relevance || a.index - b.index)
+    .map((entry) => entry.operation);
+}
+
+type DiscoveryScope = 'contextual' | 'all';
+
+function discoveryScope(raw: string | null): DiscoveryScope {
+  if (raw === null || raw === 'contextual') return 'contextual';
+  if (raw === 'all') return 'all';
+  throw new CollabError('invalid_input', 'scope must be contextual or all');
 }
 
 function authzTarget(operation: OperationName): PaletteAction['authzTarget'] {
@@ -363,39 +571,155 @@ async function actionContext(q: Querier, entityId: string): Promise<ActionContex
   return row;
 }
 
+/** A v2 page's default and maximum row count. Every page is bounded by these. */
+const ACTIONS_PAGE_DEFAULT = 20;
+const ACTIONS_PAGE_MAX = 100;
+
+/**
+ * One discovery answer in the factored form, before paging, plus the means to
+ * continue it. Both `actions.list` and `entities.context`'s actions section
+ * are projections of this, so they cannot disagree about rows, order or epoch.
+ */
+export interface ActionDiscovery {
+  /** Every row in the requested scope, ranked; `total === rows.length`. */
+  readonly compact: ActionRows;
+  /** Names this listing: context entity, scope and capabilityEpoch. */
+  readonly fingerprint: string;
+}
+
+/** The keyset cursor that continues a listing after `operation`. */
+export function cursorAfter(discovery: ActionDiscovery, operation: OperationName): string {
+  return encodeCursor([discovery.fingerprint, operation]);
+}
+
+/**
+ * The cursor names the listing it continues: the context entity, the scope and
+ * the capabilityEpoch. A different epoch means the authorized inventory, the
+ * target's version or its state moved, so the ranked list the cursor points
+ * into no longer exists — `invalid_cursor` is honest, a silent restart is not.
+ */
+function listingFingerprint(contextEntityId: string | null, scope: DiscoveryScope, epoch: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ contextEntityId, scope, epoch }))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+async function discover(
+  deps: FacadeDeps,
+  registry: HandlerRegistry,
+  ctx: RequestContext,
+  contextEntityId: string | null,
+  scope: DiscoveryScope,
+): Promise<ActionDiscovery> {
+  const owner = await deps.owner();
+  return deps.db.tx(claimsFor(owner, ctx), async (q) => {
+    const row = contextEntityId ? await actionContext(q, contextEntityId) : null;
+    const actorId = row?.actor_id ?? owner.identityId;
+    // The epoch digests the COMPLETE authorized inventory in registry order,
+    // never the filtered or ranked view: two views of the same capability
+    // state must carry the same epoch, and a client comparing epochs must not
+    // see a change that is only a change of presentation.
+    const authorized = registry.implemented().filter((operation) => isAvailable(operation, row));
+    const epoch = capabilityEpoch(actorId, row, authorized);
+    // Without a context entity every authorized operation is already global,
+    // and the order stays the registry's. With one, the entity's own
+    // operations lead, most relevant first; space and global ones follow only
+    // under `scope=all`.
+    const operations = row
+      ? rankForContext(authorized, row).filter((operation) =>
+        scope === 'all' || actionScope(operation, row) === 'entity')
+      : authorized;
+    return {
+      compact: {
+        schema: 'tm8.actions.v2',
+        actorId,
+        ...(row ? { target: { id: row.id, kind: row.kind, version: row.version } } : {}),
+        capabilityEpoch: epoch,
+        columns: ACTION_ROW_COLUMNS,
+        rows: operations.map((operation): ActionRow => [
+          operation, actionKind(operation), authzTarget(operation), exposure(operation),
+        ]),
+        total: operations.length,
+      },
+      fingerprint: listingFingerprint(row?.id ?? null, scope, epoch),
+    };
+  });
+}
+
+type ActionsSchema = 'v1' | 'v2';
+
+function actionsSchema(raw: string | null): ActionsSchema {
+  if (raw === null || raw === 'v1') return 'v1';
+  if (raw === 'v2') return 'v2';
+  throw new CollabError('invalid_input', 'schema must be v1 or v2');
+}
+
+function pageLimit(raw: string | null): number {
+  if (raw === null) return ACTIONS_PAGE_DEFAULT;
+  const value = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isInteger(value) || value < 1 || value > ACTIONS_PAGE_MAX) {
+    throw new CollabError('invalid_input', `limit must be an integer from 1 to ${ACTIONS_PAGE_MAX}`);
+  }
+  return value;
+}
+
+/** Where a page starts: 0, or one past the operation the cursor names. */
+function pageStart(discovery: ActionDiscovery, cursor: string | null): number {
+  if (cursor === null) return 0;
+  const { k } = decodeCursor(cursor);
+  const last = k[1];
+  const index = typeof last === 'string'
+    ? discovery.compact.rows.findIndex(([operation]) => operation === last)
+    : -1;
+  if (k.length !== 2 || k[0] !== discovery.fingerprint || index < 0) {
+    throw new CollabError(
+      'invalid_cursor',
+      'cursor does not continue this listing: its target, scope or capabilityEpoch changed; list again without a cursor',
+    );
+  }
+  return index + 1;
+}
+
+/** A v2 page of a discovery answer. */
+function actionPage(
+  discovery: ActionDiscovery,
+  options: { limit: number; cursor: string | null },
+): ActionDiscoveryPage {
+  const start = pageStart(discovery, options.cursor);
+  const rows = discovery.compact.rows.slice(start, start + options.limit);
+  const last = rows.at(-1);
+  const more = start + rows.length < discovery.compact.rows.length;
+  return {
+    ...discovery.compact,
+    rows,
+    nextCursor: more && last ? cursorAfter(discovery, last[0]) : null,
+  };
+}
+
 async function listActions(
   deps: FacadeDeps,
   registry: HandlerRegistry,
   ctx: RequestContext,
-): Promise<ActionDiscoveryResult> {
-  const owner = await deps.owner();
+): Promise<ActionDiscoveryResult | ActionDiscoveryPage> {
   const rawContextId = ctx.query.get('contextEntityId');
   const contextEntityId = optionalUuid(rawContextId, 'contextEntityId');
+  const scope = discoveryScope(ctx.query.get('scope'));
+  const schema = actionsSchema(ctx.query.get('schema'));
+  const rawLimit = ctx.query.get('limit');
+  const cursor = ctx.query.get('cursor');
+  // v1 is the unpaged legacy shape, kept for one release; paging is a v2
+  // capability, and a v1 caller asking to page is told so rather than
+  // silently handed the whole inventory.
+  if (schema === 'v1' && (rawLimit !== null || cursor !== null)) {
+    throw new CollabError('invalid_input', 'limit and cursor require schema=v2');
+  }
+  const limit = pageLimit(rawLimit);
 
-  return deps.db.tx(claimsFor(owner, ctx), async (q) => {
-    const row = contextEntityId ? await actionContext(q, contextEntityId) : null;
-    const actorId = row?.actor_id ?? owner.identityId;
-    const operations = registry.implemented().filter((operation) => isAvailable(operation, row));
-    const epoch = capabilityEpoch(actorId, row, operations);
-    const actions: PaletteAction[] = operations.map((operation) => ({
-      id: `action:${operation}:${row?.id ?? 'global'}`,
-      label: operation.replaceAll('.', ' '),
-      kind: actionKind(operation),
-      operation,
-      ...(row ? { targetEntityId: row.id, targetVersion: row.version } : {}),
-      capabilityEpoch: epoch,
-      authzTarget: authzTarget(operation),
-      exposure: exposure(operation),
-      helpRef: `tm8://help/operation/${operation}`,
-    }));
-
-    return {
-      actorId,
-      ...(row ? { targetEntityId: row.id, targetVersion: row.version } : {}),
-      capabilityEpoch: epoch,
-      actions,
-    };
-  });
+  const discovery = await discover(deps, registry, ctx, contextEntityId, scope);
+  return schema === 'v2'
+    ? actionPage(discovery, { limit, cursor })
+    : expandActionRows(discovery.compact);
 }
 
 export function createSavedViewsActionsService(deps: FacadeDeps, registry: HandlerRegistry) {
@@ -405,5 +729,7 @@ export function createSavedViewsActionsService(deps: FacadeDeps, registry: Handl
     updateSavedView: (ctx: RequestContext) => updateSavedView(deps, ctx),
     deleteSavedView: (ctx: RequestContext) => deleteSavedView(deps, ctx),
     listActions: (ctx: RequestContext) => listActions(deps, registry, ctx),
+    discoverActions: (ctx: RequestContext, contextEntityId: string) =>
+      discover(deps, registry, ctx, contextEntityId, 'contextual'),
   };
 }

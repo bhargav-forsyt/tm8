@@ -30,6 +30,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { CommandResult, EntityId } from '@tm8/contract';
 import type { ActionRef } from '../domain';
+import type { SessionSharingPatch } from '../panels/controls/EntityControls';
 import type { Seam } from '../data/seam';
 
 /**
@@ -109,6 +110,17 @@ export interface PanelPrimaries {
    * honest UI is not to send it.
    */
   resumingId: string | null;
+  /**
+   * THE TWO SHARING DIALS (187), unwrapped for the row cluster's sharing slot.
+   * `patch` names only the dial the user clicked — see `SessionSharingPatch`.
+   *
+   * NOT in `PANEL_PRIMARY_ACTIONS` and not reachable through `forEntity`,
+   * deliberately: that constant's whole contract is "exactly what the switch
+   * below performs", and this verb is declared on `list.rowActions`, not on
+   * `panel.primaries`. Listing it there would claim a dispatch path that does
+   * not exist — the enabled-inert shape the constant exists to prevent.
+   */
+  shareSession: (entityId: string, patch: SessionSharingPatch) => void;
 }
 
 export function usePanelPrimaries(host: PanelPrimariesHost): PanelPrimaries {
@@ -175,6 +187,50 @@ export function usePanelPrimaries(host: PanelPrimariesHost): PanelPrimaries {
         .then((result) => reconcileCommand?.(result))
         .catch((error: unknown) => onError?.('resume', entityId, error))
         .finally(() => setResumingId(null));
+    },
+    [commands, reconcileCommand, onError],
+  );
+
+  /**
+   * TURN THE WATCH DIAL — `execution.sessions.share` with `shareMode` alone.
+   *
+   * IT NAMES ONE DIAL AND ONLY ONE. The RPC merges on omission, so sending a
+   * `driveMode` here would author a decision the user did not make: closing
+   * watching would silently also close driving, and re-opening it would not
+   * put driving back. The drive dial has no UI control (see the `ActionRef`
+   * members), and this is the reason that absence is safe rather than
+   * lossy — what the UI cannot set, it also cannot clobber.
+   *
+   * NO `expectedVersion`. The row cluster holds an `EntitySummary`-shaped
+   * subject with no version on it, and the guard's whole value is that it
+   * carries THE VERSION THE HUMAN SAW — a version re-read here would be a
+   * different number wearing the guard's name. The RPC accepts null and this
+   * dial is idempotent in both directions, so an unguarded double press
+   * settles on the state the last click asked for rather than flipping back.
+   *
+   * COMMITS ON CLICK, like terminate. Both directions are reversible by the
+   * same control, so neither is the irreversible direction.
+   */
+  const shareSession = useCallback(
+    (entityId: string, patch: SessionSharingPatch) => {
+      /* Same posture as terminate and resume above. */
+      if (!commands) {
+        throw new Error(
+          'usePanelPrimaries.shareSession was called with no seam: the host rendered a control it cannot perform. '
+            + 'Gate the affordance on `forEntity(...) != null`, which returns undefined precisely so this cannot happen.',
+        );
+      }
+      void commands
+        .shareSession(entityId as EntityId, {
+          /* Spread, never defaulted: an absent dial must stay absent on the
+             wire, or the RPC's coalesce is bypassed and it gets reset. */
+          ...patch,
+          clientMutationId: `share:${entityId}:${String(Date.now())}`,
+        })
+        .then((result) => reconcileCommand?.(result))
+        .catch((error: unknown) =>
+          onError?.(patch.shareMode === 'none' ? 'unshare-session' : 'share-session', entityId, error),
+        );
     },
     [commands, reconcileCommand, onError],
   );
@@ -276,8 +332,8 @@ export function usePanelPrimaries(host: PanelPrimariesHost): PanelPrimaries {
   );
 
   return useMemo(
-    () => ({ forEntity, wiredActions: PANEL_PRIMARY_ACTIONS, terminate, resume, resumingId }),
-    [forEntity, terminate, resume, resumingId],
+    () => ({ forEntity, wiredActions: PANEL_PRIMARY_ACTIONS, terminate, resume, resumingId, shareSession }),
+    [forEntity, terminate, resume, resumingId, shareSession],
   );
 }
 

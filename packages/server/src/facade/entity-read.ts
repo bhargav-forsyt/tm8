@@ -1,3 +1,4 @@
+import type { EffectiveSkills } from '@tm8/contract';
 /**
  * Derived truth, assembled ONCE, server-side (L3).
  *
@@ -25,6 +26,7 @@
  *
  * All of it is plain SELECT through RLS. Nothing in this file writes.
  */
+import { SKILL_REFERENCE_SQL, skillReferenceOf, readSkillDetail } from '../skills/reference.js';
 import type {
   WorkSessionEndedKind,
   WorkSessionKind,
@@ -100,6 +102,10 @@ export const ENTITY_COLUMNS = `
   t.work_status, t.priority, t.acceptance_criteria, t.points_estimate, t.due_date,
   t.start_date,
   t.completion_gate,
+  sk.name as skill_name, sk.description as skill_description, sk.content as skill_content,
+  ${SKILL_REFERENCE_SQL} as skill_reference,
+  sp.name as spell_name, sp.description as spell_description, sp.rule as spell_rule,
+  exists (select 1 from public.edges eq where eq.dst_id = e.id and eq.type = 'equips') as equipped,
   d.title as doc_title, d.body as doc_body, d.format as doc_format,
   ch.name as channel_name, ch.topic as channel_topic,
   vc.name as voice_channel_name,
@@ -114,11 +120,12 @@ export const ENTITY_COLUMNS = `
   col.name as collection_name, col.description as collection_description,
   col.collection_type,
   ws.title as ws_title, ws.status as ws_status, ws.agent_tool as ws_agent_tool,
-  ws.model as ws_model, ws.share_mode as ws_share_mode, ws.started_at as ws_started_at,
+  ws.model as ws_model, ws.share_mode as ws_share_mode,
+  ws.drive_mode as ws_drive_mode, ws.sharing_set_at as ws_sharing_set_at, ws.started_at as ws_started_at,
   ws.exited_at as ws_exited_at, ws.node_id as ws_node_id, ws.project_id as ws_project_id,
   ws.transcript_doc_id as ws_transcript_doc_id, ws.session_kind as ws_session_kind,
   ws.checkout_branch as ws_checkout_branch, ws.workdir_mode as ws_workdir_mode,
-  ws.ended_kind as ws_ended_kind, ws.ended_reason as ws_ended_reason,
+  ws.ended_kind as ws_ended_kind, ws.ended_reason as ws_ended_reason, ws.skills as ws_skills,
   wsp.pin_revision as ws_pin_revision, wsp.template_key as ws_pin_template_key,
   wsp.template_version as ws_pin_template_version,
   wsp.resolved_snapshot as ws_pin_resolved_snapshot,
@@ -152,6 +159,9 @@ export const ENTITY_COLUMNS = `
   gr.title as graph_title, gr.graph_type as graph_type,
   gr.nodes as graph_nodes, gr.edges as graph_edges,
   gr.layout as graph_layout, gr.source as graph_source,
+  drw.title as drawing_title, drw.format as drawing_format,
+  drw.elements as drawing_elements, drw.app_state as drawing_app_state,
+  drw.files as drawing_files,
   wt.project_id as wt_project_id, wt.path as wt_path, wt.branch as wt_branch,
   wt.base_ref as wt_base_ref, wt.base_commit_oid as wt_base_commit_oid,
   wt.status as wt_status, wt.status_changed_at as wt_status_changed_at,
@@ -165,6 +175,9 @@ export const ENTITY_COLUMNS = `
   pr.state as pr_state, pr.ci_status as pr_ci_status,
   pr.mergeable_state as pr_mergeable_state, pr.head_ref as pr_head_ref,
   pr.url as pr_url, pr.fetched_at as pr_fetched_at,
+  cm.repo as commit_repo, cm.sha as commit_sha,
+  cm.message as commit_message, cm.committed_at as commit_committed_at,
+  cm.url as commit_url, cm.author as commit_author,
   art.name as artifact_name, art.description as artifact_description,
   arev.revision_number as artifact_revision_number,
   arev.entrypoint_path as artifact_entrypoint,
@@ -292,6 +305,8 @@ function ctrSurfaceDetailOf(
 
 export const ENTITY_FROM = `
   from public.entities e
+  left join public.skills sk on sk.entity_id = e.id
+  left join public.spells sp on sp.entity_id = e.id
   left join public.entity_counters ec on ec.entity_id = e.id
   left join public.tasks t            on t.entity_id  = e.id
   left join public.documents d        on d.entity_id  = e.id
@@ -336,7 +351,9 @@ export const ENTITY_FROM = `
      where t.chat_id = cht.entity_id
   ) chq on cht.entity_id is not null
   left join public.graphs gr             on gr.entity_id = e.id
+  left join public.drawings drw           on drw.entity_id = e.id
   left join public.pull_requests pr      on pr.entity_id = e.id
+  left join public.commits cm            on cm.entity_id = e.id
   left join public.artifacts art         on art.entity_id = e.id
   left join public.artifact_bundle_revisions arev on arev.id = art.current_revision_id
   left join public.containers ctr        on ctr.entity_id = e.id
@@ -366,6 +383,14 @@ export const ENTITY_FROM = `
 // are node-side reads with their own authorization.
 
 export interface EntityRow {
+  skill_name?: string | null;
+  skill_description?: string | null;
+  skill_content?: string | null;
+  skill_reference?: Record<string, unknown> | null;
+  spell_name?: string | null;
+  spell_description?: string | null;
+  spell_rule?: Record<string, unknown> | null;
+  equipped?: boolean;
   id: string;
   space_id: string;
   kind: string;
@@ -429,6 +454,9 @@ export interface EntityRow {
   ws_agent_tool: string | null;
   ws_model: string | null;
   ws_share_mode: string | null;
+  /** 187. Optional so pre-187 row fixtures stay source-compatible. */
+  ws_drive_mode?: string | null;
+  ws_sharing_set_at?: Date | string | null;
   ws_started_at: Date | string | null;
   ws_exited_at: Date | string | null;
   ws_node_id: string | null;
@@ -440,6 +468,7 @@ export interface EntityRow {
   ws_workdir_mode?: string | null;
   /** Ending facts (171); optional for the same fixture-compatibility reason. */
   ws_ended_kind?: string | null;
+  ws_skills?: EffectiveSkills | null;
   ws_ended_reason?: string | null;
   ws_pin_revision: number | null;
   ws_pin_template_key: string | null;
@@ -496,6 +525,11 @@ export interface EntityRow {
   graph_edges: unknown[] | null;
   graph_layout: Record<string, { x: number; y: number }> | null;
   graph_source: string | null;
+  drawing_title: string | null;
+  drawing_format: string | null;
+  drawing_elements: unknown[] | null;
+  drawing_app_state: Record<string, unknown> | null;
+  drawing_files: Record<string, unknown> | null;
   memory_statement: string | null;
   memory_mechanism: string | null;
   memory_subject_scope: string | null;
@@ -536,6 +570,13 @@ export interface EntityRow {
   pr_head_ref?: string | null;
   pr_url?: string | null;
   pr_fetched_at?: Date | string | null;
+  /** commits mirror columns; optional for the same reason the pr_* ones are. */
+  commit_repo?: string | null;
+  commit_sha?: string | null;
+  commit_message?: string | null;
+  commit_committed_at?: Date | string | null;
+  commit_url?: string | null;
+  commit_author?: string | null;
   artifact_name: string | null;
   artifact_description: string | null;
   artifact_revision_number: number | null;
@@ -1333,6 +1374,9 @@ export async function loadUnreadCounts(
 export function titleOf(row: EntityRow): string {
   if (row.deleted_at) return TOMBSTONE_TITLE;
   switch (row.kind) {
+    case 'skill': return row.skill_name ?? '';
+    case 'spell': return row.spell_name ?? '';
+
     case 'task':
       return row.task_title ?? 'Untitled task';
     case 'doc':
@@ -1383,6 +1427,9 @@ export function titleOf(row: EntityRow): string {
     case 'graph':
       // Its own detail-row title — MIRRORS the projector twin (same reason).
       return row.graph_title ?? 'Graph';
+    case 'drawing':
+      // Its own detail-row title — MIRRORS the projector twin (same reason).
+      return row.drawing_title ?? 'Drawing';
     case 'chat':
       // The chat's own title, which `start_chat` seeds from the opening message.
       // An empty one is legal (the column defaults to '') and must still render
@@ -1408,6 +1455,21 @@ export function titleOf(row: EntityRow): string {
       const repo = row.pr_repo ?? null;
       return row.pr_title ?? (repo !== null ? `${repo}#${String(row.pr_number ?? 0)}` : '');
     }
+    case 'commit': {
+      // MIRRORS the projector twin (projector.ts): the first line of the commit
+      // message is the conventional title. Without this arm every commit fell
+      // through to `default` and was titled with the literal word "commit", so a
+      // canvas showing eleven of them showed eleven identical cards.
+      //
+      // THE SUBJECT IS NOT ALWAYS A SUBJECT. On this node `commits.message` is
+      // populated with the sha for rows the observer never enriched, so a
+      // message that merely repeats the sha is no better than the kind string —
+      // fall through to the short sha, which at least IDENTIFIES the row.
+      const sha = row.commit_sha ?? '';
+      const subject = (row.commit_message ?? '').split('\n')[0]?.trim() ?? '';
+      if (subject !== '' && subject !== sha) return subject;
+      return sha === '' ? 'Commit' : sha.slice(0, 8);
+    }
     default:
       return row.kind;
   }
@@ -1416,6 +1478,9 @@ export function titleOf(row: EntityRow): string {
 function excerptOf(row: EntityRow): string | undefined {
   if (row.deleted_at) return undefined;
   switch (row.kind) {
+    case 'skill': return excerpt(row.skill_description ?? null);
+    case 'spell': return excerpt(row.spell_description ?? null);
+
     case 'task':
       return excerpt(row.task_description);
     case 'doc':
@@ -1442,6 +1507,10 @@ function excerptOf(row: EntityRow): string | undefined {
       // The type is what makes a graph legible in a list — an orchestratable
       // blueprint and a mermaid sketch answer to different intents.
       return excerpt(row.graph_type);
+    case 'drawing':
+      // The format is the one row-level fact about a canvas; the picture
+      // itself cannot be a text excerpt. MIRRORS the projector twin.
+      return excerpt(row.drawing_format);
     default:
       return undefined;
   }
@@ -1503,6 +1572,9 @@ function surfaceOf(raw: string | null): { initialContentSurface?: 'terminal' | '
  */
 export function stateOf(row: EntityRow, ctx: AssemblyContext): EntityState {
   switch (row.kind) {
+    case 'skill': return { kind: 'skill', description: row.skill_description ?? undefined, equipped: row.equipped === true, ...skillReferenceOf(row.skill_reference), changedOnDisk: false };
+    case 'spell': return { kind: 'spell', description: row.spell_description ?? undefined, equipped: row.equipped === true };
+
     case 'task':
       return {
         kind: 'task',
@@ -1597,10 +1669,24 @@ export function stateOf(row: EntityRow, ctx: AssemblyContext): EntityState {
     case 'work_session':
       return {
         kind: 'work_session',
+        ...(row.ws_skills ? { skills: row.ws_skills } : {}),
         status: (row.ws_status ?? 'spawning') as 'spawning' | 'running' | 'idle' | 'exited' | 'failed',
         agentTool: row.ws_agent_tool,
         model: row.ws_model,
         shareMode: (row.ws_share_mode ?? 'none') as 'none' | 'space' | 'explicit',
+        // 187, the second dial. Spread, never defaulted, for the same
+        // reason `sessionKind` is below: the DTO makes absence mean
+        // `owner`, so a server reading a pre-187 row says nothing rather
+        // than asserting a drive policy it never looked at.
+        ...(row.ws_drive_mode === 'owner' || row.ws_drive_mode === 'space'
+          ? { driveMode: row.ws_drive_mode }
+          : {}),
+        // 202. Carried when the column was read — null is a fact here
+        // ("nobody has set the dials", so on an agent-launched session 075
+        // still opens both gates) — and omitted only when it was not.
+        ...(row.ws_sharing_set_at === undefined
+          ? {}
+          : { sharingSetAt: isoOrNull(row.ws_sharing_set_at) }),
         startedAt: isoOrNull(row.ws_started_at),
         exitedAt: isoOrNull(row.ws_exited_at),
         // OMITTED, never defaulted, when the column has no value: the DTO
@@ -1703,6 +1789,15 @@ export function stateOf(row: EntityRow, ctx: AssemblyContext): EntityState {
         nodeCount: Array.isArray(row.graph_nodes) ? row.graph_nodes.length : 0,
         edgeCount: Array.isArray(row.graph_edges) ? row.graph_edges.length : 0,
       };
+    case 'drawing':
+      // Which format and how big — the elements are content, not state. A
+      // scene is the largest payload any kind carries, so a list row must
+      // never pull it. MIRRORS the projector twin.
+      return {
+        kind: 'drawing',
+        format: row.drawing_format ?? 'excalidraw',
+        elementCount: Array.isArray(row.drawing_elements) ? row.drawing_elements.length : 0,
+      };
     case 'chat':
       // Who it is with, what it is running, and whether it is busy. The two
       // state axes are independent and both are projected: `runtimeState` is the
@@ -1777,6 +1872,20 @@ export function stateOf(row: EntityRow, ctx: AssemblyContext): EntityState {
         ...projectForgeFacts(row.pr_ci_status, row.pr_mergeable_state, row.pr_head_ref),
       };
     }
+    case 'commit':
+      // MIRRORS the projector twin. This arm did not exist, so `commit` — a
+      // first-class kind — fell through to the `c:*` default below and every
+      // commit arrived as `fields: {}`, hiding a sha the database had all along
+      // (396 of 396 rows carry one).
+      return {
+        kind: 'commit',
+        repository: row.commit_repo ?? '',
+        sha: row.commit_sha ?? '',
+        message: row.commit_message ?? '',
+        committedAt: isoOrNull(row.commit_committed_at ?? null),
+        ...(row.commit_url ? { url: row.commit_url } : {}),
+        ...(row.commit_author ? { author: row.commit_author } : {}),
+      } as EntityState;
     default:
       // A custom `c:*` kind. Its scalar fields live in `custom_entities` and
       // are out of the G1A slice, so the shape is honest and empty rather than
@@ -1974,7 +2083,7 @@ export function capabilitiesOf(row: EntityRow): EntityCapabilities {
   // Work-session "edit" is likewise exactly one thing: the display title, via
   // rename_work_session (085). Everything else on that row belongs to the
   // execution block, which is why it is still not deletable or hierarchical.
-  const editable = new Set(['task', 'doc', 'channel', 'collection', 'team_member', 'spell', 'skill', 'memory', 'worktree', 'work_session', 'graph']);
+  const editable = new Set(['task', 'doc', 'channel', 'collection', 'team_member', 'spell', 'skill', 'memory', 'worktree', 'work_session', 'graph', 'drawing']);
   const hierarchical = new Set(['task', 'doc', 'channel', 'collection']);
   const pullable = new Set(['channel', 'task', 'doc', 'file', 'spell', 'skill', 'collection']);
 
@@ -2231,6 +2340,10 @@ export function contentOf(row: EntityRow): EntityContent {
     }
   }
   switch (row.kind) {
+    case 'skill':
+      return { kind: 'skill', name: row.skill_name ?? '', description: row.skill_description ?? '', content: row.deleted_at || row.skill_reference?.source_path ? '' : row.skill_content ?? '' };
+    case 'spell':
+      return { kind: 'spell', name: row.spell_name ?? '', description: row.spell_description ?? '', rule: row.deleted_at ? {} : row.spell_rule ?? {} };
     case 'task':
       return {
         kind: 'task',
@@ -2337,6 +2450,17 @@ export function contentOf(row: EntityRow): EntityContent {
         edges: (Array.isArray(row.graph_edges) ? row.graph_edges : []) as GraphEdgeSpec[],
         layout: row.graph_layout ?? {},
         source: row.graph_source,
+      };
+    case 'drawing':
+      // The whole row IS the scene: one read hands the editor everything it
+      // needs to mount, in Excalidraw's own member names, so nothing between
+      // the database and the canvas has to translate.
+      return {
+        kind: 'drawing',
+        format: row.drawing_format ?? 'excalidraw',
+        elements: (Array.isArray(row.drawing_elements) ? row.drawing_elements : []) as Record<string, unknown>[],
+        appState: row.drawing_app_state ?? {},
+        files: row.drawing_files ?? {},
       };
     case 'container': {
       const status = ctrStatusOf(row.ctr_status);
@@ -2510,4 +2634,87 @@ export async function loadEntitySummariesByIds(
   const summaries = await assembleSummaries(q, rows, viewerIdentityId);
   const byId = new Map(summaries.map((s) => [s.id, s]));
   return unique.map((id) => byId.get(id)).filter((s): s is EntitySummary => s !== undefined);
+}
+
+/**
+ * The ancestor chain — read as ids first, then one point read per ancestor.
+ *
+ * WHY THIS IS TWO STEPS AND WHY THE SECOND ONE IS A LOOP. The obvious form is
+ * one query: join the recursive CTE straight onto `ENTITY_FROM`. Three call
+ * sites did exactly that and each cost ~700ms on prod to return two rows,
+ * measured on an idle box — this is intrinsic, not contention.
+ *
+ * `ENTITY_FROM` is a 25-way left join. The planner picks the cheap nested-loop
+ * plan (8 scan nodes) only when it can prove the predicate yields exactly one
+ * row. Joined to a CTE it cannot, so it hash-joins and builds hash tables over
+ * ALL the side tables: 26 sequential scans for two ancestors. The resulting
+ * plan costs 173,089, which crosses `jit_above_cost` (100,000), so every
+ * execution additionally LLVM-compiles 260 functions — measured Emission
+ * 269ms, JIT total 330ms, planning 43ms, execution 801ms.
+ *
+ * `= any($1::uuid[])` does not escape it either: same estimate problem.
+ * `where e.id = $1` is the only shape that reliably gets the 8-scan plan.
+ *
+ * So the N+1 is deliberate, and correct HERE and only here: the walk is capped
+ * at 32 and real chains are 1-5 deep, so this is a handful of ~13ms point
+ * reads against one 700ms scan of the whole database. Measured end to end on
+ * an idle box: ~700ms -> ~26ms for a two-ancestor chain.
+ *
+ * SEQUENTIAL, not `Promise.all`: `q` is a single connection, and fanning out
+ * would take pool slots on a node whose read concurrency IS its pool size.
+ *
+ * Returns DEPTH ASCENDING — immediate parent first, root last.
+ */
+export async function readAncestorRows(
+  q: Querier,
+  id: string,
+  opts: { readonly includeDeleted: boolean },
+): Promise<Array<EntityRow & { hierarchy_depth: number }>> {
+  // The `seen` guard, not just the depth cap: 001 only guarantees acyclicity
+  // for edges, and a cyclic parent chain would otherwise return the same
+  // entity 32 times for a breadcrumb to render.
+  const ids = await q.query<{ id: string; hierarchy_depth: number }>(
+    `/* entities.ancestors:ids */
+     with recursive up(id, parent_id, depth, seen) as (
+       select e.id, e.parent_id, 0, array[e.id] from public.entities e where e.id = $1
+       union all
+       select parent.id, parent.parent_id, up.depth + 1, up.seen || parent.id
+         from up join public.entities parent on parent.id = up.parent_id
+        where up.depth < 32 and not parent.id = any(up.seen)
+     )
+     select id, depth as hierarchy_depth from up where depth > 0 order by depth asc`,
+    [id],
+  );
+
+  // The walk CROSSES soft-deleted parents whether or not it returns them: a
+  // deleted mid-chain entity still connects its children to their grandparent.
+  // `includeDeleted` decides only what comes back, which is what the single
+  // query did by filtering in its outer select and not in the CTE.
+  const deletedFilter = opts.includeDeleted ? '' : ' and e.deleted_at is null';
+  const rows: Array<EntityRow & { hierarchy_depth: number }> = [];
+  for (const ancestor of ids) {
+    const found = await q.query<EntityRow>(
+      `/* entities.ancestors:row */
+       select ${ENTITY_COLUMNS} ${ENTITY_FROM} where e.id = $1${deletedFilter}`,
+      [ancestor.id],
+    );
+    const hit = found[0];
+    if (hit) rows.push({ ...hit, hierarchy_depth: ancestor.hierarchy_depth });
+  }
+  return rows;
+}
+
+/** Detail-only IO, shared by the original and universal entity doors. */
+export async function hydrateDetail(
+  q: Querier, row: EntityRow, state: EntityState, content: EntityContent, viewerIdentityId: string,
+): Promise<{ state: EntityState; content: EntityContent }> {
+  if (row.deleted_at) return { state, content };
+  if (content.kind === 'team_member') {
+    const edges = await q.query<{ dst_id: string }>(
+      "select dst_id from public.edges where src_id = $1 and type = 'equips' order by created_at, id", [row.id],
+    );
+    const equipped = await loadEntitySummariesByIds(q, edges.map((edge) => edge.dst_id), viewerIdentityId);
+    return { state, content: { ...content, equipped } };
+  }
+  return readSkillDetail(state, content);
 }

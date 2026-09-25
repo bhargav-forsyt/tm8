@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { pwaShell } from './vite-plugin-pwa-shell';
@@ -15,22 +17,30 @@ import { pwaShell } from './vite-plugin-pwa-shell';
 const target = process.env.TM8_SERVER_ORIGIN ?? 'http://127.0.0.1:4610';
 
 /**
- * THIS PACKAGE IS THE PRODUCT UI, served at `/`. It was the frozen 1.0 snapshot
- * between 2026-08-29 and 2026-09-03; on 2026-09-03 the owner reversed that and
- * the pair swapped roles. `packages/tm8_ui_2.0` is now the ALTERNATE UI behind
- * the version switch, at `/ui-2.0/`; see `scripts/lib/ui.mjs`, the pointer every
- * launcher, doctor and deploy path reads.
+ * THIS PACKAGE IS THE PRODUCT UI, served at `/`, and since 2026-09-15 it is the
+ * ONLY UI in this repo. The Astryx redesign (`packages/tm8_ui_2.0`, the
+ * alternate at `/ui-2.0/`) and the legacy collab-v2 oracle (`packages/ui`) were
+ * both deleted; see `scripts/lib/ui.mjs`, the pointer every launcher, doctor
+ * and deploy path reads.
+ *
+ * THE `/ui-2.0` MOUNT IS GONE IN BOTH ITS CHAINS. It is recorded here because
+ * the shape of it is the thing to recognise if a second bundle is ever wanted
+ * again: the path STRING lived in five places (the server's mount constant, the
+ * alternate bundle's `base`, this package's service worker, and two vite
+ * proxies), while the directory POINTER `TM8_UI_2_0_DIR` was a SEPARATE chain
+ * through `deploy/prod/env.sh`, `deploy/utho/deploy.sh`, the server's `ui20Dir`
+ * and `main.ts`. The two chains met only in `main.ts` — which is why `/ui-2.0/`
+ * spent its last weeks 404ing on prod with every path string perfectly correct:
+ * the env value named a directory that did not exist. A second mount that ever
+ * returns needs both chains, and needs a test that fails when only one is done
+ * (`packages/server/test/static-ui.test.ts` holds that line today).
  *
  * Three things follow from being the ROOT bundle, and each was the opposite
  * while this package was the mounted one:
  *
  *  1. NO `base`. Vite's default `/` is correct and must stay implicit-correct:
- *     the mount path is baked into every asset URL at build time, so a `base`
- *     here would make every asset 404 at the root. The mounted bundle's base
- *     lives in `tm8_ui_2.0/vite.config.ts` and is duplicated in
- *     `packages/server/src/http/static.ts` (`UI_2_0_MOUNT_PATH`) and
- *     `tm8-ui/src/ui-version/mount.ts`; changing it means changing all three
- *     and rebuilding that bundle.
+ *     a mount path is baked into every asset URL at build time, so a `base`
+ *     here would make every asset 404 at the root.
  *
  *  2. `build.outDir` is the default `dist`, and `TM8_UI_DIR` names it. The old
  *     `dist-1.0` override was a production interlock against a stale
@@ -41,9 +51,7 @@ const target = process.env.TM8_SERVER_ORIGIN ?? 'http://127.0.0.1:4610';
  *  3. `pwaShell` IS INSTALLED. A service worker belongs to whichever bundle
  *     holds the root scope, and that is this one; `src/pwa/register.ts` guards
  *     on `BASE_URL === '/'` so a mounted build of this package would still
- *     register nothing. `tm8_ui_2.0` drops the plugin for the matching reason
- *     on its side — two workers racing over one origin is not something the
- *     alternate UI needs to be worth having.
+ *     register nothing.
  */
 export default defineConfig({
   plugins: [
@@ -82,12 +90,6 @@ export default defineConfig({
     proxy: {
       '/v2': { target, changeOrigin: false, ws: true },
       '/health': { target, changeOrigin: false },
-      /* The alternate 2.0 UI is served by tm8-server (TM8_UI_2_0_DIR), not by
-         vite — so the version switch's destination has to be proxied like the
-         API is. Without this line `/ui-2.0/` falls to vite's own SPA fallback
-         and answers with THIS app's index.html: the switch would appear to
-         work and change nothing. */
-      '/ui-2.0': { target, changeOrigin: false },
     },
   },
   test: {
@@ -121,6 +123,20 @@ export default defineConfig({
     // failed by which neighbour ran first in their worker.
     environmentOptions: { jsdom: { url: 'http://localhost' } },
     setupFiles: ['./test-setup.ts'],
+    /*
+     * EXCALIDRAW IS STUBBED FOR EVERY SUITE. See `test/excalidraw-stub.tsx`
+     * for the why — the short version is that it cannot render in jsdom AND
+     * its `open-color` JSON import throws under node resolution, which took
+     * the whole drawing body into the panel's CatchBoundary and silently
+     * removed the attachment strip below it.
+     *
+     * The CSS entry is separate and must be aliased too: a bare `.css` import
+     * from inside a node-resolved dependency has nothing to handle it here.
+     */
+    alias: [
+      { find: /^@excalidraw\/excalidraw$/, replacement: resolve(__dirname, 'test/excalidraw-stub.tsx') },
+      { find: /^@excalidraw\/excalidraw\/index\.css$/, replacement: resolve(__dirname, 'test/excalidraw-stub.css') },
+    ],
     /**
      * THE DEADLINE IS A CLAIM ABOUT THE MACHINE, AND THE DEFAULT ONE IS FALSE
      * HERE.

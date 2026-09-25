@@ -36,11 +36,16 @@ export const PANEL_TABS: readonly PanelTab[] = ['content', 'connections', 'discu
  * clamp — and the panel that reads it is one component either way.
  */
 export type ContentSurface =
-  | 'terminal' | 'transcript' | 'git' | 'debug' | 'graph'
+  | 'terminal' | 'transcript' | 'changes' | 'git' | 'debug' | 'graph'
   | 'screen' | 'logs';
 export const CONTENT_SURFACES: readonly ContentSurface[] = [
   'terminal',
   'transcript',
+  // `changes` is the REVIEW surface — which files changed, what is in them,
+  // what goes into the next commit. `git` next to it is the LANE surface —
+  // which branch this is, how far it has moved, and the verbs that move it.
+  // Two questions, two surfaces; folding them made one panel with two jobs.
+  'changes',
   'git',
   'debug',
   'graph',
@@ -179,7 +184,7 @@ export type NavView =
   | { view: 'entity'; entityId: EntityId; origin: Origin | null; originView?: MenuViewRef | null }
   | { view: 'channels' }
   | { view: 'channel'; channelId: EntityId; msg: EntityId | null }
-  | { view: 'settings'; section: 'projects' | 'menu' | null }
+  | { view: 'settings'; section: 'projects' | 'menu' | 'credentials' | null }
   /*
    * The four screens that rendered from the rail with NO route line, added by
    * the 2026-08-14 amendment to WLT §2.1/§2.2.
@@ -222,18 +227,6 @@ export type NavView =
    * the contents instead of a broken screen.
    */
   | { view: 'help'; plate: string | null }
-  /*
-   * CODEBRAIN (2026-09-01): the delivery pipeline module. A FLAT segment with
-   * no state of its own — the run it shows is the one the roster reports, so
-   * there is nothing selection-like to carry. When a phase becomes linkable it
-   * takes a trailing segment the way `help` carries `plate`.
-   *
-   * This snapshot has no CodeBrain SCREEN (`view-ref-screens.ts` says so). The
-   * ROUTE still exists, because the route table is shared: a `MenuViewRef`
-   * that cannot round-trip through the codec breaks deep links and the back
-   * button for every view that shares it, not only its own.
-   */
-  | { view: 'codebrain' }
   /*
    * BOARD V2 (2026-08-18, Kind/Status/Category/Workflow program): the
    * universal board — any entity kind, columns = the four status categories
@@ -283,17 +276,29 @@ export type NavView =
 
 /** The panel-engine state the URL mirrors (LLD §11: the URL owns all of it). */
 export interface PanelState {
-  /** `p` — bottom→top. On Home the stack IS the centre TRAIL: the top
-   *  renders, the rest are its breadcrumb (task 01a00932 R7/D2). */
+  /** `p` — bottom→top. On Home the stack IS the Trail: the whole walk, of
+   *  which `cursor` names the entry that renders (task 01a0c864 U2/U8). */
   stack: EntityId[];
   /** `pin` — pin order. */
   pinned: EntityId[];
   /**
-   * `r` — Home's RIGHT-PANEL trail, bottom→top, same encoding as `p`
-   * (task 01a00932 R6/R7). The top renders in the right panel; the rest are
-   * its breadcrumb. Empty ⇒ no right panel. Other views carry it verbatim.
+   * `pc` — WHERE IN THE TRAIL the viewer stands, as the ENTITY'S OWN ID.
+   *
+   * `null` ⇒ THE TOP, and that default is the compatibility guarantee: every
+   * link that exists today carries no `pc`, so it parses and renders exactly
+   * as it does today (U8/D2).
+   *
+   * An id rather than an index because `normalize` can REMOVE an entry from
+   * `stack` — it cross-filters against pins — and an index would then aim one
+   * place to the left, at a real entity, with nothing to detect. An id
+   * re-resolves to the same entity across that shift, and when the entity
+   * itself was removed it is simply ABSENT: the cursor clamps to the top under
+   * the standard drop notice rather than landing somewhere wrong.
+   *
+   * Well-defined only because the Trail cannot repeat an entity (a revisit
+   * moves the cursor, ruled 2026-09-22). The two rules hold each other up.
    */
-  right: EntityId[];
+  cursor: EntityId | null;
   /** `t` — omitted pairs default to `content`. */
   tabs: Record<EntityId, PanelTab>;
   /** `contentSurface` — preserved verbatim, including Phase-2 `chat` (D12). */
@@ -314,7 +319,7 @@ export interface Route {
  */
 export type DropClass =
   | 'tabs'
-  | 'right'
+  | 'cursor'
   | 'pins'
   | 'stack'
   | 'query'
@@ -325,7 +330,11 @@ export type DropClass =
 
 export const DROP_CLASS_COPY: Readonly<Record<DropClass, string>> = {
   tabs: 'tab and surface state',
-  right: 'the side panel',
+  /* NOT folded into `stack`: when `pc` is unreadable the Trail itself arrives
+     whole and only the POSITION in it is lost. A notice saying open panels
+     were dropped would name a loss that did not happen, which is worse than
+     naming none — R4-7 asks the class to be actionable, not merely present. */
+  cursor: 'your place in the trail',
   pins: 'pinned panels',
   stack: 'open panels',
   query: 'filter state',
@@ -409,5 +418,5 @@ export const MAX_HASH_LENGTH = 2048;
 export const UNADDRESSED_HASH = '#/';
 
 export function emptyPanels(): PanelState {
-  return { stack: [], pinned: [], right: [], tabs: {}, contentSurface: {}, session: null };
+  return { stack: [], pinned: [], cursor: null, tabs: {}, contentSurface: {}, session: null };
 }

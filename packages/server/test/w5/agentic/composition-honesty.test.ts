@@ -68,6 +68,22 @@ const CREDENTIAL_SEAM = new Set<OperationName>([
   'credentials.delete',
   'credentials.loginSessions.start',
   'credentials.loginSessions.finish',
+  // Jev lane K: the service-key ops mount inside the same registration, so
+  // they share the seam's condition rather than joining the denominator.
+  'credentials.serviceKeys.status',
+  'credentials.serviceKeys.put',
+  'credentials.serviceKeys.delete',
+  // SC-3: the space and node credential ops mount in the same registration.
+  'credentials.space.list',
+  'credentials.space.create',
+  'credentials.space.rekey',
+  'credentials.space.setDefault',
+  'credentials.space.rename',
+  'credentials.space.delete',
+  'credentials.space.policy.get',
+  'credentials.space.policy.set',
+  'node.credentials.status',
+  'node.credentials.policy.set',
 ]);
 
 class StubDb implements Db {
@@ -173,15 +189,29 @@ describe('W5.F composition honesty — the presence source is the whole delta', 
     // inside when the runtime is off. That is what puts them in the
     // DENOMINATOR: this suite measures rows a composition could mount, not
     // rows that do real work. MEASURED.
-    expect(REGISTERABLE).toHaveLength(189);
-    expect(new Set(REGISTERABLE).size, 'no duplicate names in the denominator').toBe(189);
+    // 189 -> 190 (187): execution.sessions.share is unconditional — it is
+    // mounted by every composition and the sharing decision is made in the
+    // database, not by withholding the route. MEASURED.
+    // 189 -> 190 (2026-09-19, Changes screen Phase 1: execution.gitStage, one public v1 POST, mounted with a real facade handler. MEASURED from this file's own failing run, not derived.) It is unconditional — nothing gates it — so it
+    // lands in the denominator alongside the container rows.
+    // 190 -> 191 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    // 191 -> 200 (2026-09-23): the nine skills.* rows are unconditional v1 HTTP. MEASURED.
+    // 200 -> 201 (Jev lane F): launch.suggest is unconditional v1 HTTP. MEASURED.
+    expect(REGISTERABLE).toHaveLength(203); /* +1 events.changes (change feed step 3). MEASURED. */ /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
+    expect(new Set(REGISTERABLE).size, 'no duplicate names in the denominator').toBe(203); /* +1 events.changes (change feed step 3). MEASURED. */ /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(REGISTERABLE).toContain(PRESENCE_GATED);
   }, 15_000);
 
   it('KNOWN-GOOD world — WITH a presence source, residual is the EMPTY SET', () => {
     const residual = REGISTERABLE.filter((name) => !withPresence.has(name));
     expect(residual, `residual with presence: ${residual.join(',')}`).toEqual([]);
-    expect(withPresence.size).toBe(189);
+    // 189 -> 190 (2026-09-19, Changes screen Phase 1: execution.gitStage, one public v1 POST, mounted with a real facade handler. MEASURED from this file's own failing run, not derived.)
+    // 190 -> 191 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    expect(withPresence.size).toBe(203); /* +1 events.changes (change feed step 3). MEASURED. */ // +1 launch.suggest (Jev lane F, 2026-09-23). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(withPresence.has(PRESENCE_GATED)).toBe(true);
   }, 15_000);
 
@@ -191,7 +221,11 @@ describe('W5.F composition honesty — the presence source is the whole delta', 
     // a substitution — a different operation going missing while presence.get
     // mounts would keep the count at 1 and this assertion would still catch it.
     expect(residual, `residual without presence: ${residual.join(',')}`).toEqual([PRESENCE_GATED]);
-    expect(withoutPresence.size).toBe(188);
+    // 188 -> 189 (2026-09-19, Changes screen Phase 1: execution.gitStage, one public v1 POST, mounted with a real facade handler. MEASURED from this file's own failing run, not derived.)
+    // 189 -> 190 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    expect(withoutPresence.size).toBe(202); /* +1 events.changes (change feed step 3). MEASURED. */ // +1 launch.suggest (Jev lane F, 2026-09-23). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(withoutPresence.has(PRESENCE_GATED)).toBe(false);
   }, 15_000);
 
@@ -206,14 +240,21 @@ describe('W5.F composition honesty — the presence source is the whole delta', 
     expect(onlyWithout, `mounted only WITHOUT presence: ${onlyWithout.join(',')}`).toEqual([]);
   }, 15_000);
 
-  it('BOTH READINGS ARE CORRECT — 162/0 and 161/1 name the two compositions, not a defect', () => {
+  it('BOTH READINGS ARE CORRECT — 191/0 and 190/1 name the two compositions, not a defect', () => {
     // The sentence the frozen file could not say, wired to something that
     // fails. `test/w2/reserved-honesty.test.ts` composes WITHOUT presence
     // (its `:66`); `src/main.ts:148` composes WITH it. This test asserts that
     // BOTH of those numbers are reachable from the SAME production code, which
     // is what makes "the frozen file drifted" the wrong diagnosis.
-    expect([withPresence.size, 189 - withPresence.size]).toEqual([189, 0]);
-    expect([withoutPresence.size, 189 - withoutPresence.size]).toEqual([188, 1]);
+    // The denominator moved 189 -> 190 with it, so BOTH readings shift by one
+    // and the 0/1 residual split — the actual claim — is unchanged.
+    // (2026-09-19, Changes screen Phase 1: execution.gitStage, one public v1 POST, mounted with a real facade handler. MEASURED from this file's own failing run, not derived.)
+    // The DENOMINATOR literal moves 190 -> 191 too. It is not an expected
+    // value, it is the subtrahend: leaving it at 190 turned the residual into
+    // -1 rather than failing on the count. Both readings shift by one and the
+    // 0/1 residual split — the actual claim — is unchanged. MEASURED on the merged tree from this assertion's own failing run.
+    expect([withPresence.size, 203 - withPresence.size]).toEqual([203, 0]); /* +1 events.changes (change feed step 3). MEASURED. */ /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
+    expect([withoutPresence.size, 203 - withoutPresence.size]).toEqual([202, 1]); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */
   }, 15_000);
 
   it('NO MOUNT ESCAPES THE DENOMINATOR — neither world mounts a WS or reserved row', () => {

@@ -1,5 +1,6 @@
 import {
   ActionDiscoveryResultSchema,
+  ActionListResultSchema,
   AttentionRequestListQuerySchema,
   AttentionRequestMutationResultSchema,
   AttentionRequestSchema,
@@ -14,6 +15,7 @@ import {
   EntityConnectionsPageSchema,
   EntityConnectionsQuerySchema,
   EntityContextQuerySchema,
+  EntityContextResultSchema,
   EntityContextViewSchema,
   EntityFeedPageSchema,
   EntityFeedQuerySchema,
@@ -71,6 +73,7 @@ const PageOfAttentionRequestSchema = pageOf(AttentionRequestSchema);
 
 export const SCHEMA_REGISTRY = {
   ActionDiscoveryResultSchema,
+  ActionListResultSchema,
   AttentionRequestListQuerySchema,
   AttentionRequestMutationResultSchema,
   AttentionRequestSchema,
@@ -85,6 +88,7 @@ export const SCHEMA_REGISTRY = {
   EntityConnectionsPageSchema,
   EntityConnectionsQuerySchema,
   EntityContextQuerySchema,
+  EntityContextResultSchema,
   EntityContextViewSchema,
   EntityFeedPageSchema,
   EntityFeedQuerySchema,
@@ -155,7 +159,7 @@ export const ADDITIVE_SCHEMA_DISPOSITIONS = {
   'messages.attachments.remove': { requestSchema: 'RemoveMessageAttachmentsInputSchema', resultSchema: 'MessageViewSchema' },
   'messages.delivery.get': { requestSchema: 'MessageDeliveryQuerySchema', resultSchema: 'MessageDeliveryViewSchema' },
   'entities.feed': { requestSchema: 'EntityFeedQuerySchema', resultSchema: 'EntityFeedPageSchema' },
-  'entities.context': { requestSchema: 'EntityContextQuerySchema', resultSchema: 'EntityContextViewSchema' },
+  'entities.context': { requestSchema: 'EntityContextQuerySchema', resultSchema: 'EntityContextResultSchema' },
   'interactionProfiles.propose': { requestSchema: 'ProposeInteractionProfileInputSchema', resultSchema: 'InteractionProfileViewSchema' },
   'interactionProfiles.updateDraft': { requestSchema: 'UpdateInteractionProfileDraftInputSchema', resultSchema: 'InteractionProfileViewSchema' },
   'interactionProfiles.validate': { requestSchema: 'ValidateInteractionProfileInputSchema', resultSchema: 'ProfileValidationViewSchema' },
@@ -198,7 +202,7 @@ export const FROZEN_SCHEMA_DISPOSITIONS = {
   'entities.commands.linkCommit': { requestSchema: 'LinkCommitInputSchema', resultSchema: 'CommandResultSchema' },
   'inbox.list': { requestSchema: 'InboxListQuerySchema', resultSchema: 'PageOfNotificationItemSchema' },
   'inbox.markRead': { requestSchema: 'InboxMarkReadInputSchema', resultSchema: 'NotificationItemSchema' },
-  'actions.list': { requestSchema: null, resultSchema: 'ActionDiscoveryResultSchema' },
+  'actions.list': { requestSchema: null, resultSchema: 'ActionListResultSchema' },
   'events.subscribe': { requestSchema: null, resultSchema: 'WorkspaceEventSchema' },
 } as const satisfies Readonly<Partial<Record<OperationName, OperationSchemaDisposition>>>;
 

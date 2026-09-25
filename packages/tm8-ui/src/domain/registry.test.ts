@@ -53,10 +53,11 @@ describe('totality over the frozen core-kind set (WLT §2.1)', () => {
     // then `graph` joined with migration 135 (Craft P1) → 21;
     // then `chat` joined with migration 176 (Chat as an Entity) → 22.
     // then `container` joined with migration 177 (Containers P0) → 23.
+    // then `drawing` joined with migration 194 (the Excalidraw canvas) → 24.
     // The literal stays a LITERAL on purpose: writing `CoreEntityKindSchema
     // .options.length` here would make the assertion tautological and the row
     // below could silently drift from the contract again.
-    expect(CORE_KINDS.length).toBe(23);
+    expect(CORE_KINDS.length).toBe(24);
     expect(allKinds()).toHaveLength(CORE_KINDS.length + 1);
     expect(allKinds().filter((r) => r.kind === CUSTOM_KIND_FALLBACK)).toHaveLength(1);
   });
@@ -238,7 +239,15 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
     // cluster's `RULED_ORDER` ranks `complete` and `run`, an unranked verb
     // keeps its declared position, and `terminate` is pulled to the tail by
     // `TAIL_ORDER` regardless of where it sits here.
-    expect(session.rowActions).toEqual(['complete', 'terminate', 'chat-about']);
+    //
+    // `share-session` (187) is declared in its PRIVATE half, exactly as
+    // `terminate` is declared rather than `resume`. `rowActions` is STATIC
+    // per-kind data; the shared half (`unshare-session`) is substituted per ROW
+    // by `sharingControlFor` inside `RowActionCluster`, which is the only place
+    // that sees the row's `shareMode`. So the ref in this array is not always
+    // the ref the list draws — see `row-action-cluster.test.tsx`.
+    // `run` leads — `applyLaunch` prepends it (▶ continues a session, 200).
+    expect(session.rowActions).toEqual(['run', 'complete', 'share-session', 'terminate', 'chat-about']);
   });
 
   it('keeps Terminate as the session verb, on the row and in the compact toolbar', () => {
@@ -253,13 +262,17 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
     // running session off In Progress without killing it, which is exactly the
     // thing you want to do from a list rather than from inside the session.
     const session = getKind('work_session');
-    expect(session.list.rowActions).toEqual(['complete', 'terminate', 'chat-about']);
+    // ▶ leads (migration 200 — a session can be continued), derived by
+    // `applyLaunch` like every other kind's.
+    expect(session.list.rowActions).toEqual([
+      'run', 'complete', 'share-session', 'terminate', 'chat-about',
+    ]);
     // The PANEL's budget is untouched by the row's third verb: `chat-about` is
     // derived onto `list.rowActions` only. `applyLaunch` writes to both arrays
     // because Run is a verb about the entity; this one opens a conversation
-    // ELSEWHERE, and the panel's one-primary budget is for acting on what you
-    // are looking at.
-    expect(session.panel.primaries).toEqual(['terminate']);
+    // ELSEWHERE, and the panel's budget is for acting on what you are looking
+    // at — continuing this session (▶) and ending it (⏻).
+    expect(session.panel.primaries).toEqual(['run', 'terminate']);
   });
 
   /**
@@ -288,7 +301,7 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
    *
    * This used to enumerate the eight launchable kinds, and the enumeration was
    * the bug it should have caught: launching is open to every kind the server
-   * will derive a task for (all but `work_session`), so the eight were not a
+   * will derive a task for (every kind, since 200), so the eight were not a
    * ruling but the subset somebody had remembered to flag — eleven kinds were
    * silently missing a Run button and this test agreed with them.
    *
@@ -296,18 +309,15 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
    * join a list; it is launchable by default, and taking that away is an edit
    * to `NOT_LAUNCHABLE` that lands right here.
    */
-  it('4b. work_session is the ONLY unlaunchable kind; everything else launches', () => {
+  it('4b. every kind launches — work_session included since 200', () => {
     const notLaunchable = allKinds().filter((r) => !r.launchable).map((r) => r.kind).sort();
-    // One refusal, and it is the server's: `derive_task_for_entity` raises for
-    // `work_session` and derives a task for every other live kind. So this list
-    // is not a product preference to be re-argued per kind — it mirrors what
-    // the backend will actually do, and it should only ever change when that
+    // The list mirrors the server: `derive_task_for_entity` derives a task for
+    // every live kind. Its one refusal, `work_session`, was lifted by migration
+    // 200 (▶ on a session continues it). It is not a product preference to be
+    // re-argued per kind, and it should only ever change when the backend
     // does. (`graph` and `loop` were briefly here on inherited rationale;
     // owner ruling 2026-08-17 launches both.)
-    expect(notLaunchable).toEqual(['work_session']);
-    // The complement is everything else — stated as a relationship rather than
-    // a second list, so the two cannot disagree.
-    expect(allKinds().filter((r) => r.launchable).length).toBe(allKinds().length - 1);
+    expect(notLaunchable).toEqual([]);
   });
 
   it('4c. task keeps Run FIRST and its own row ordering', () => {
@@ -380,9 +390,9 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
     const rowActions = getKind('work_session').list.rowActions ?? [];
     expect(rowActions).toContain('complete');
     expect(rowActions).toContain('terminate');
-    // `run` stays out for its own reason: `derive_task_for_entity` raises for a
-    // work_session, which is what `NOT_LAUNCHABLE` records.
-    expect(getKind('work_session').launchable).toBe(false);
+    // `run` is here too since 200: ▶ continues the session in a new one.
+    expect(rowActions).toContain('run');
+    expect(getKind('work_session').launchable).toBe(true);
   });
 
   it('D56 — no tab anywhere carries a client-side partition any more', () => {
@@ -393,6 +403,33 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
       for (const tab of row.list.categories ?? []) {
         expect(tab).not.toHaveProperty('statuses');
       }
+    }
+  });
+
+  /*
+   * KINDS THAT TAB BY THEIR OWN FACTS, not the ruled four. A skill is a file on
+   * disk, seeded `done` like the fact kinds, so the four-stage row was three
+   * empty tabs and a Done holding everything (user ruling, task 01a0ccd9). It
+   * tabs by whether anyone equips it and whether its files are still there.
+   * Listed literally, like FACT_KINDS, so adding a kind is a deliberate edit.
+   */
+  const OWN_TAB_KINDS = ['skill'];
+
+  it('skill tabs by its own facts: All · Equipped · Not equipped · Missing files', () => {
+    const list = getKind('skill').list;
+    expect(list.categories?.map((t) => [t.id, t.label, t.filter])).toEqual([
+      ['all', 'All', { deleted: 'exclude' }],
+      ['equipped', 'Equipped', { skillEquipped: true, deleted: 'exclude' }],
+      ['not_equipped', 'Not equipped', { skillEquipped: false, deleted: 'exclude' }],
+      ['missing', 'Missing files', { skillMissing: true, deleted: 'exclude' }],
+    ]);
+    // The bands overlap, so the total is All's own count, never their sum.
+    expect(list.tabTotal).toBe('all');
+    // Missing files moved from a filter chip to a tab; it is not offered twice.
+    expect(list.filters.some((f) => f.id === 'missing')).toBe(false);
+    // Only kinds whose tabs overlap name a total tab.
+    for (const row of allKinds()) {
+      if (!OWN_TAB_KINDS.includes(row.kind)) expect(row.list.tabTotal, row.kind).toBeUndefined();
     }
   });
 
@@ -422,6 +459,7 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
         expect(row.list.categories, `${row.kind} is a fact kind: no lifecycle row`).toBeUndefined();
         continue;
       }
+      if (OWN_TAB_KINDS.includes(row.kind)) continue;
       expect(row.list.categories?.map((t) => t.id), `${row.kind}`).toEqual(FOUR);
       expect(row.list.categories?.map((t) => t.label)).toEqual([
         'To Do',
@@ -444,6 +482,7 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
     // everywhere else — one tab id, three incompatible predicates. There is
     // one predicate now and it follows from the id.
     for (const row of allKinds()) {
+      if (OWN_TAB_KINDS.includes(row.kind)) continue;
       for (const tab of row.list.categories ?? []) {
         expect(tab.filter, `${row.kind}/${tab.id}`).toEqual({
           category: [tab.id],
@@ -482,7 +521,9 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
     // Only kinds that HAVE a lifecycle row: the five fact kinds carry none,
     // and that exemption is asserted by the four-tabs test above rather than
     // being re-derived (or silently tolerated by `?.`) here.
-    const tabbed = allKinds().filter((row) => row.list.categories !== undefined);
+    const tabbed = allKinds().filter(
+      (row) => row.list.categories !== undefined && !OWN_TAB_KINDS.includes(row.kind),
+    );
     expect(tabbed.length, 'no kind has tabs — this test would pass vacuously').toBeGreaterThan(0);
     for (const row of tabbed) {
       const done = row.list.categories?.find((t) => t.id === 'done');
@@ -558,6 +599,9 @@ describe('the WLT §3 survival list ↔ ListConfig field matrix (LLD §15.1)', (
          version-guarded content patch, and deliberately so; only the input
          differs. See `DateControl`. */
       'dateControls',
+      /* Opened 2026-09-23 with skills' own tabs. Tabs that overlap cannot be
+         summed into a kind total, so the kind names the tab that IS the total. */
+      'tabTotal',
       /* Opened 2026-08-16 with W1: axis pickers are DATA-driven — the field
          only marks the kind whose state carries `axes`; the vocabulary is the
          space's own `task_axes` rows, handed over by the host. Not
@@ -676,6 +720,47 @@ describe('D44 — the launch flow is declared as DATA on the verb', () => {
       config: { ...config, memoryIds: [] },
     });
     expect(none).not.toHaveProperty('memoryIds');
+  });
+
+  it('carries ✦ Jev’s exact selection and run, and never pairs selection with memoryIds', () => {
+    /*
+     * Design 01a0cb80 §5.2: `selection` IS the working set, `memoryIds` ADDS to
+     * it, and the node refuses both at once. So the builder drops `memoryIds`
+     * whenever a selection is present — and copies the selection verbatim,
+     * because a truncated exact set is a different set.
+     */
+    const config = defaultConfigFor({ id: 'tm-1', agentTool: 'claude-code', model: 'claude-opus-5' });
+    const withJev = buildSpawnInput({
+      clientMutationId: 'cmid-5',
+      spaceId: 'space-1',
+      config: {
+        ...config,
+        memoryIds: ['mem-picked'],
+        selection: { memoryIds: ['mem-a'], skillIds: ['sk-a', 'sk-b'] },
+        jevRunId: 'run-1',
+      },
+    });
+    expect(withJev.selection).toEqual({ memoryIds: ['mem-a'], skillIds: ['sk-a', 'sk-b'] });
+    expect(withJev.jevRunId).toBe('run-1');
+    expect(withJev).not.toHaveProperty('memoryIds');
+
+    // The run alone (Reset, or a launch while Jev was still answering).
+    const runOnly = buildSpawnInput({ clientMutationId: 'cmid-6', spaceId: 'space-1', config: { ...config, jevRunId: 'run-1' } });
+    expect(runOnly.jevRunId).toBe('run-1');
+    expect(runOnly).not.toHaveProperty('selection');
+
+    // An empty exact set is still a statement ("no skills"), so it is sent.
+    const empty = buildSpawnInput({
+      clientMutationId: 'cmid-7',
+      spaceId: 'space-1',
+      config: { ...config, selection: { memoryIds: [], skillIds: [] } },
+    });
+    expect(empty.selection).toEqual({ memoryIds: [], skillIds: [] });
+
+    // Without Jev, neither key exists.
+    const plain = buildSpawnInput({ clientMutationId: 'cmid-8', spaceId: 'space-1', config });
+    expect(plain).not.toHaveProperty('selection');
+    expect(plain).not.toHaveProperty('jevRunId');
   });
 
   it('refuses an untrusted project WITH the mechanism, until consent is explicit', () => {
@@ -966,7 +1051,7 @@ describe('panel archetypes are total over the kind set (LLD §2.3)', () => {
     message: 'generic',
     file: 'generic',
     spell: 'generic',
-    skill: 'generic',
+    skill: 'equipment',
     pull_request: 'generic',
     commit: 'generic',
     collection: 'generic',

@@ -30,6 +30,7 @@
  */
 import type {
   EntityId,
+  EntitySummary,
   MessageView,
   ProjectFileListing,
   ProjectId,
@@ -59,6 +60,28 @@ import { createFileUploadTask, type FileUploadTask } from './upload';
  * `settings-space/port.ts`'s `memberKindRef`, which solves the same problem
  * for members.)
  */
+export function drawingKindRef(): string {
+  /*
+   * The same trick as `fileKindRef` below, for the same law: `kind: 'drawing'`
+   * is a kind literal and this lane may not hold one.
+   *
+   * "The kind whose panel mounts the canvas block" IS the drawing kind, and it
+   * stays right if the kind is ever renamed. Throwing on anything but exactly
+   * one row is deliberate: silently picking the first would create an entity
+   * of the WRONG KIND attached to the user's task, which is far worse than a
+   * loud failure at the click.
+   */
+  const rows = allKinds().filter((row) =>
+    (row.panel.blocks ?? []).some((block) => block.block === 'canvas'),
+  );
+  if (rows.length !== 1) {
+    throw new Error(
+      `files: expected exactly one registry row whose panel carries a canvas block, found ${rows.length}`,
+    );
+  }
+  return rows[0]!.kind;
+}
+
 export function fileKindRef(): string {
   const rows = allKinds().filter((row) =>
     (row.panel.blocks ?? []).some((block) => block.block === 'file-preview'),
@@ -174,7 +197,42 @@ export interface AttachmentsPort {
    * no folder affordance at all rather than one that answers 501.
    */
   projectFolder?: ProjectFolderPort;
+  /**
+   * Creates a DRAWING already attached to the anchor, and resolves its id so
+   * the caller can open it (194).
+   *
+   * It lives on this port rather than beside the other create flows because
+   * "attach a drawing to this task" is an ATTACHMENT, and the strip is where
+   * an anchor's attachments are made. The edge is `attached_to`, the same one
+   * a file gets — a task cannot be a drawing's PARENT, because
+   * `validate_entity_parent` requires matching kinds.
+   *
+   * Absent ⇒ the menu item is not drawn, on the same reasoning as
+   * `startUpload`: an inert control that appears to create something is worse
+   * than no control.
+   */
+  createDrawing?(anchorId: EntityId, title: string): Promise<EntityId>;
+  /**
+   * THE ATTACH PALETTE'S THREE VERBS (task 01a0cfb0). Each is optional, for the
+   * reason every verb above is: absent means the control is not drawn.
+   *
+   * `search` is the SERVER's title search (`filters.titleContains` on
+   * `collections.query`), narrowed to one kind. It is not one recent page
+   * filtered in the browser, so an old entity is still findable. Empty text
+   * means the most recent items of that kind.
+   */
+  search?(kind: string, text: string): Promise<EntitySummary[]>;
+  /** Writes ONE edge between two existing entities. The server's `validate_edge` is the final check. */
+  link?(input: { srcId: EntityId; dstId: EntityId; type: string }): Promise<void>;
+  /**
+   * `createDrawing` generalized to any kind whose link to the anchor is an
+   * `attachTo` edge (`attached_to` today): created and linked in ONE command.
+   */
+  createAttached?(kind: string, anchorId: EntityId, title: string, edgeType: string): Promise<EntityId>;
 }
+
+/** How many candidates one palette search asks for. */
+export const PALETTE_SEARCH_LIMIT = 20;
 
 /**
  * Browsing an already-connected project folder and attaching out of it.
@@ -211,6 +269,46 @@ export function attachmentsPortFromSeam(seam: Seam, spaceId: SpaceId | string): 
      */
     detach: async (edgeId) => {
       await seam.commands.deleteEdge(edgeId, { clientMutationId: `detach:${edgeId}:${Date.now()}` });
+    },
+    createDrawing: async (anchorId, title) => {
+      const result = await seam.commands.createEntity({
+        clientMutationId: newMutationId(),
+        spaceId: spaceId as SpaceId,
+        kind: drawingKindRef() as never,
+        title,
+        // NOT `parentId`: hierarchy is homogeneous (a drawing's parent would
+        // have to be a drawing). `attachTo` is the door, and the server's
+        // `attachInitialConnections` writes the edge in the same command.
+        attachTo: { entityId: anchorId, edgeType: 'attached_to' },
+      });
+      const id = result.entity?.id;
+      if (!id) throw new Error('the drawing was created but the server returned no id');
+      return id;
+    },
+    search: async (kind, text) => {
+      const needle = text.trim();
+      const result = await seam.query({
+        spaceId: spaceId as SpaceId,
+        kinds: [kind as never],
+        ...(needle ? { filters: { titleContains: needle } } : {}),
+        limit: PALETTE_SEARCH_LIMIT,
+      });
+      return result.page.items;
+    },
+    link: async ({ srcId, dstId, type }) => {
+      await seam.commands.createEdge({ clientMutationId: newMutationId(), srcId, dstId, type });
+    },
+    createAttached: async (kind, anchorId, title, edgeType) => {
+      const result = await seam.commands.createEntity({
+        clientMutationId: newMutationId(),
+        spaceId: spaceId as SpaceId,
+        kind: kind as never,
+        title,
+        attachTo: { entityId: anchorId, edgeType: edgeType as never },
+      });
+      const id = result.entity?.id;
+      if (!id) throw new Error('the entity was created but the server returned no id');
+      return id;
     },
     ...(projectFiles
       ? {

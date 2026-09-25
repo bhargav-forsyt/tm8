@@ -41,6 +41,15 @@ import { readCache, type CacheEntry, type ReadCache } from './read-cache.js';
 export type ResponseMode = 'envelope' | 'bytes' | 'stream';
 
 /**
+ * Read-cache revalidation paging. The page asks for the server's cap
+ * (poll.ts MAX_POLL_LIMIT) so one call covers as much as it can, and at most
+ * REVALIDATE_MAX_PAGES full pages are inspected before the revalidator gives
+ * up and refetches: a busy space must not turn a ~free check into a crawl.
+ */
+const REVALIDATE_PAGE_LIMIT = 500;
+const REVALIDATE_MAX_PAGES = 3;
+
+/**
  * Operations whose success body is raw bytes rather than the JSON envelope.
  * Closed and explicit: a new blob route must be added here deliberately, and
  * the exhaustiveness test proves every catalog row lands in exactly one mode.
@@ -267,45 +276,79 @@ export class Tm8Client {
   }
 
   /**
-   * The ~free revalidation: one `events.poll ?since=<seq>` against the entry's
+   * The ~free revalidation: `events.poll ?since=<seq>` against the entry's
    * Space. UNCHANGED means no replayed event names any entity the payload is
    * about. Every uncertain outcome — poll refused, envelope unparseable,
    * transport down — answers CHANGED, so uncertainty always costs a refetch
    * and never serves a stale byte. A quiet replay also advances the session's
    * per-space watermark: evidence this cheap is worth keeping.
+   *
+   * The feed's end is `hasMore:false` (poll.ts DurableEventPage), NEVER a
+   * short page: `items` omits rows skipped for RLS, deletion or failed
+   * hydration, so a page padded with rows this caller cannot read is short
+   * and still not the head. While `hasMore` is true the loop pages on from
+   * `nextCursor` (it covers skipped rows too), at most REVALIDATE_MAX_PAGES
+   * times; still more after that answers CHANGED — a refetch is cheaper than
+   * a crawl. A server too old to send `hasMore` falls back to the page-length
+   * heuristic. The watermark advances only over pages actually inspected.
    */
   private async unchangedSince(entry: CacheEntry): Promise<boolean> {
+    let since = entry.seq;
+    let seen: number | null = null;
     try {
-      const { res, text } = await this.send(
-        'events.poll',
-        { params: { spaceId: entry.spaceId }, query: { since: String(entry.seq) } },
-        'text',
-        true,
-      );
-      if (res.status >= 400) return false;
-      const data = (JSON.parse(text) as { data?: unknown }).data;
-      // The LIVE page shape is `{items, nextCursor}` (poll.ts DurableEventPage,
-      // pinned by the conformance suite). `data.events` and a bare array are
-      // kept as accepted legacy shapes; anything else is still unreadable and
-      // fails CLOSED to a refetch.
-      const page = data as { events?: unknown; items?: unknown } | null | undefined;
-      const events = Array.isArray(data)
-        ? data
-        : Array.isArray(page?.events)
-          ? (page.events as unknown[])
-          : Array.isArray(page?.items)
-            ? (page.items as unknown[])
-            : null;
-      if (events === null) return false; // a page shape this build cannot read
-      const replay = JSON.stringify(events).toLowerCase();
-      if (entry.entityIds.some((id) => replay.includes(id))) return false;
-      const seqs = events
-        .map((e) => (e as { seq?: unknown }).seq)
-        .filter((s): s is number => typeof s === 'number');
-      if (seqs.length > 0) this.cache.advanceWatermark(entry.spaceId, Math.max(...seqs));
-      return true;
+      for (let pageNo = 0; pageNo < REVALIDATE_MAX_PAGES; pageNo += 1) {
+        const { res, text } = await this.send(
+          'events.poll',
+          {
+            params: { spaceId: entry.spaceId },
+            query: { since: String(since), limit: String(REVALIDATE_PAGE_LIMIT) },
+          },
+          'text',
+          true,
+        );
+        if (res.status >= 400) return false;
+        const data = (JSON.parse(text) as { data?: unknown }).data;
+        // The LIVE page shape is `{items, nextCursor}` (poll.ts DurableEventPage,
+        // pinned by the conformance suite). `data.events` and a bare array are
+        // kept as accepted legacy shapes; anything else is still unreadable and
+        // fails CLOSED to a refetch.
+        const page = data as
+          | { events?: unknown; items?: unknown; nextCursor?: unknown; hasMore?: unknown; examinedThrough?: unknown }
+          | null
+          | undefined;
+        const events = Array.isArray(data)
+          ? data
+          : Array.isArray(page?.events)
+            ? (page.events as unknown[])
+            : Array.isArray(page?.items)
+              ? (page.items as unknown[])
+              : null;
+        if (events === null) return false; // a page shape this build cannot read
+        const replay = JSON.stringify(events).toLowerCase();
+        if (entry.entityIds.some((id) => replay.includes(id))) return false;
+        const seqs = events
+          .map((e) => (e as { seq?: unknown }).seq)
+          .filter((s): s is number => typeof s === 'number');
+        const pageMax = seqs.length > 0 ? Math.max(...seqs) : null;
+        const hasMore = Array.isArray(data) ? undefined : page?.hasMore;
+        const examined = Array.isArray(data) ? NaN : Number(page?.examinedThrough);
+        const through = Number.isSafeInteger(examined) ? examined : pageMax;
+        if (through !== null) seen = Math.max(seen ?? through, through);
+        if (hasMore === false) return true; // caught up: the examine cap was not hit
+        // Legacy page (no `hasMore`): a short page is the best evidence it has.
+        if (typeof hasMore !== 'boolean' && events.length < REVALIDATE_PAGE_LIMIT) return true;
+        // More to examine: resume from the cursor (it covers skipped rows too),
+        // else the highest seq it carried. No forward progress is unreadable.
+        const cursor = Array.isArray(data) ? NaN : Number(page?.nextCursor);
+        const next = Number.isSafeInteger(cursor) ? cursor : pageMax;
+        if (next === null || next <= since) return false;
+        since = next;
+      }
+      return false; // still full at the cap: refetch rather than crawl
     } catch {
       return false;
+    } finally {
+      if (seen !== null) this.cache.advanceWatermark(entry.spaceId, seen);
     }
   }
 
@@ -378,6 +421,7 @@ export class Tm8Client {
         responseChars: 0,
         durationMs: Date.now() - startedMs,
       });
+      clearTimeout(timer);
       if (controller.signal.aborted) {
         throw new TransportError(
           `${op.method} ${url.pathname} timed out after ${timeoutMs}ms (per-request deadline)`,
@@ -389,13 +433,40 @@ export class Tm8Client {
         `${op.method} ${url.pathname} failed: ${reason} (is tm8-server running at ${this.baseUrl}?)`,
         err,
       );
-    } finally {
-      clearTimeout(timer);
     }
 
     // A byte response is only drained as text when it FAILED; a success is
     // read as an ArrayBuffer by the caller so no blob is ever utf8-decoded.
-    const text = read === 'text' || res.status >= 400 ? await res.text() : '';
+    //
+    // The deadline stays armed THROUGH the body read. `fetch` resolves on the
+    // headers, so clearing the timer there left `res.text()` with no deadline at
+    // all: a node that sent its headers and then stalled mid-body held the
+    // process open forever — a 15s per-request deadline that never fired.
+    let text = '';
+    try {
+      if (read === 'text' || res.status >= 400) text = await res.text();
+    } catch (err) {
+      journal.noteCall({
+        operation: name,
+        method: op.method,
+        path: url.pathname,
+        baseUrl: this.baseUrl,
+        status: res.status,
+        requestChars,
+        responseChars: 0,
+        durationMs: Date.now() - startedMs,
+      });
+      if (controller.signal.aborted) {
+        throw new TransportError(
+          `${op.method} ${url.pathname} timed out after ${timeoutMs}ms reading the response body (per-request deadline)`,
+          err,
+        );
+      }
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new TransportError(`${op.method} ${url.pathname} failed reading the response body: ${reason}`, err);
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (res.status < 400) {
       if (cacheable && text !== '') {

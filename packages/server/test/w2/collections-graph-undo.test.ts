@@ -283,6 +283,54 @@ describe('W2.G05 collection, graph, and undo handlers', () => {
     expect(entityRead!.params).toContain(activeSince);
   });
 
+  it('turns filters.terms into a bound any-term predicate over the four memory text columns, in the total too', async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const q: Querier = {
+      query: async <R>(sql: string, params: readonly unknown[] = []): Promise<R[]> => {
+        captured.push({ sql, params });
+        return [];
+      },
+      rpc: async <T>(): Promise<T> => ({}) as T,
+    };
+    await queryCollection(q, { spaceId: SPACE_ID, filters: { terms: ['Scoped', 'tsc'] } }, 'g05-owner');
+    const pageRead = captured.find((call) => call.sql.includes(' as __sort'));
+    const totalRead = captured.find((call) => call.sql.includes('count(*)::int as total'));
+    for (const read of [pageRead, totalRead]) {
+      expect(read).toBeDefined();
+      expect(read!.sql).toContain('memo.entity_id is not null');
+      expect(read!.sql).toMatch(/unnest\(\$\d+::text\[\]\) term/);
+      expect(read!.sql).toContain("position(lower(term) in lower(concat_ws(' ',");
+      expect(read!.sql).toContain('memo.statement, memo.mechanism, memo.subject_scope, memo.does_not_establish');
+      expect(read!.params).toContainEqual(['Scoped', 'tsc']);
+    }
+  });
+
+  it('turns filters.titleContains into a bound case-insensitive title predicate, beside kinds, in the total too', async () => {
+    const captured: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const q: Querier = {
+      query: async <R>(sql: string, params: readonly unknown[] = []): Promise<R[]> => {
+        captured.push({ sql, params });
+        return [];
+      },
+      rpc: async <T>(): Promise<T> => ({}) as T,
+    };
+    await queryCollection(
+      q,
+      { spaceId: SPACE_ID, kinds: ['doc'], filters: { titleContains: '  50% Plan ' } },
+      'g05-owner',
+    );
+    const pageRead = captured.find((call) => call.sql.includes(' as __sort'));
+    const totalRead = captured.find((call) => call.sql.includes('count(*)::int as total'));
+    for (const read of [pageRead, totalRead]) {
+      expect(read).toBeDefined();
+      expect(read!.sql).toMatch(/position\(lower\(\$\d+::text\) in lower\(coalesce\(t\.title, d\.title,[^)]*\)\)\) > 0/);
+      expect(read!.sql).toMatch(/e\.kind = any\(\$\d+::text\[\]\)/);
+      // Trimmed, bound, never concatenated — and `%` stays a literal character.
+      expect(read!.params).toContain('50% Plan');
+      expect(read!.sql).not.toContain('50% Plan');
+    }
+  });
+
   it('enriches a pull_request node with the same forge-fact fields as the connections read', async () => {
     // Same stored facts the connections read projects in
     // `projects-associations.ts` `artifactSummary`: the graph lens must serve

@@ -7,7 +7,7 @@
 // point is that the PTY assertions can run with no Postgres at all.
 
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { PtyHostService } from '../pty/PtyHostService.js';
@@ -15,8 +15,8 @@ import type {
   PromptSettlementResult,
   PromptSettlementWaiter,
 } from '../pty/PromptSettlementWaiter.js';
-import type { Logger, PtyActivity, PtyExitInfo, PtySessionStatus } from '../pty/types.js';
-import { composePrompt } from '@tm8/prompt';
+import type { Logger, PtyActivity, PtyExitInfo, PtyKillOutcome, PtySessionStatus } from '../pty/types.js';
+import { composePrompt, primaryContextBudgetV2, PROMPT_VERSION_V2, type PromptRuntime } from '@tm8/prompt';
 
 import { oomKillObserved, readOomKillCount } from './oom-witness.js';
 import { trustClaudeWorkspace, trustCodexWorkspace } from './workspace-trust.js';
@@ -40,14 +40,30 @@ import {
   type ResolvedLaunchConfig,
 } from './manifest.js';
 import { detectCheckoutBranch } from './checkout-branch.js';
+import { equippedClaudePlugins, harnessSurfaceEnv, readInstalledClaudePlugins } from './harness-surface.js';
 import { resolveCodexNativeSessionId } from './native-session.js';
 import { knownAgentConfigDirs } from '../transcript/agent-config-dirs.js';
+import { readSessionUsage } from '../transcript/session-usage.js';
 import { probeCodexSandbox } from './sandbox-probe.js';
 import {
   agentCredentialProviderFor,
   type AgentCredentialHome,
   type AgentCredentialHomePort,
 } from './agent-credentials.js';
+import {
+  API_KEY_PROVIDER_DISPLAY_NAME,
+  apiKeyBackendForModel,
+  isApiKeyCredentialProvider,
+} from '../credentials/api-key-credentials.js';
+import {
+  resolveSessionCredentials,
+  type ResolvedSessionCredentials,
+} from './credential-resolution.js';
+import {
+  materializeSpaceApiKeyHome,
+  scrubSpaceSessionSecrets,
+  sweepSpaceSessionSecrets,
+} from './space-credential-session-home.js';
 import type { WorktreeManager } from '../worktree/WorktreeManager.js';
 import { provisionWorktree, type ProvisionedWorktree } from './worktree-provisioning.js';
 import { reconcileNodeWorktrees, type WorktreeReconcileReport } from './worktree-reconcile.js';
@@ -57,6 +73,7 @@ import {
   resolveLoginShell,
 } from '../shell/ShellSessionLauncher.js';
 import type {
+  AutoResumeReport,
   CredentialSource,
   GraphAuth,
   GraphPort,
@@ -70,6 +87,7 @@ import type {
   SpawnContext,
   SpawnRequest,
   SpawnResult,
+  SpaceCredentialPort,
   Tm8Manifest,
   TransitionInput,
   WorkSessionEndedKind,
@@ -78,6 +96,59 @@ import type {
   GhostReconcileReport,
 } from './types.js';
 import { SpawnError } from './types.js';
+
+/**
+ * Why a credential containment killed a session (`containCredentialSession`).
+ *   - `space_credential_deleted`: SC-3 — a space credential was deleted.
+ *   - `member_credential_disconnected`: the member Disconnect of their own credential.
+ *   - `member_removed`: SC-6 — the launching member was removed or disabled.
+ */
+export type CredentialContainmentCause =
+  | 'space_credential_deleted'
+  | 'member_credential_disconnected'
+  | 'member_removed';
+
+/**
+ * What a containment kill did. `outcome` is the PTY host's own answer;
+ * `recorded` is whether the row's ending was written. `killed` with
+ * `recorded: false` is a dead process whose row still reads live — `reason`
+ * says why, for the caller's `failures`.
+ */
+export interface CredentialContainmentResult {
+  outcome: PtyKillOutcome;
+  recorded: boolean;
+  reason?: string;
+}
+
+/**
+ * The ending each containment records. `endedReason` is read by a person (one
+ * plain sentence, per 171); `error` stays technical. Fixed strings: nothing
+ * about the credential — its label, id or secret — is interpolated (I5).
+ */
+const CREDENTIAL_CONTAINMENT_ENDINGS: Record<
+  CredentialContainmentCause,
+  { endedReason: string; error: string }
+> = {
+  space_credential_deleted: {
+    endedReason: 'Stopped because the space credential it was running on was deleted.',
+    error:
+      'credential containment: the space credential this session launched on was deleted — ' +
+      'PTY killed, exit code not observed',
+  },
+  member_credential_disconnected: {
+    endedReason: 'Stopped because the credential it was running on was disconnected.',
+    error:
+      'credential containment: the member credential this session ran on was disconnected — ' +
+      'PTY killed, exit code not observed',
+  },
+  member_removed: {
+    endedReason:
+      'Stopped because the member who launched it no longer has access to the space credential it was running on.',
+    error:
+      'credential containment: the launching member was removed or disabled — ' +
+      'PTY killed, exit code not observed',
+  },
+};
 
 export interface SpawnServiceOptions {
   graph: GraphPort;
@@ -128,6 +199,12 @@ export interface SpawnServiceOptions {
   /** Caller-owned GitHub token store, resolved independently of agent vendor. */
   gitHubCredentials?: GitHubCredentialPort;
   /**
+   * SPACE credentials (206), the D4 rung between the member's own and the
+   * node's. OPTIONAL: without it an explicit `space` source is refused by name
+   * and auto runs member → node exactly as before.
+   */
+  spaceCredentials?: SpaceCredentialPort;
+  /**
    * The node's Git worktree manager. Its PRESENCE is what makes
    * `workdir.mode:'worktree'` serviceable — omit it and the mode is refused by
    * name, never silently downgraded to the project directory (§7.4).
@@ -159,6 +236,9 @@ interface SandboxDecision {
 
 /** The ordinary case: whatever the posture asked for, the node can give it. */
 const CONFINED: SandboxDecision = { unavailable: false, degradedReason: null };
+
+/** How long a v2 launch waits for its task's context render before degrading. */
+const TASK_CONTEXT_RENDER_TIMEOUT_MS = 5_000;
 
 /** PTY exit status → work_session status. The PTY speaks in outcomes, the
  *  graph in lifecycle states, and 'completed' is not one of the five the
@@ -231,6 +311,9 @@ async function isDirectory(path: string): Promise<boolean> {
     return false;
   }
 }
+
+/** Per-session bound on the usage read inside `recordShutdown`. See there. */
+const SHUTDOWN_USAGE_READ_MS = 2_000;
 
 /**
  * Turn a {@link PtyExitInfo} into the honest, human-readable statement that
@@ -328,10 +411,17 @@ export class SpawnService {
   private readonly codexNetworkPreflight: CodexNetworkPreflight;
   private readonly credentialHome: AgentCredentialHomePort | undefined;
   private readonly gitHubCredentials: GitHubCredentialPort | undefined;
+  private readonly spaceCredentials: SpaceCredentialPort | undefined;
   private readonly worktrees: WorktreeManager | null;
   private readonly worktreeCap: number;
   /** One fail-closed remediation pass per service lifetime. */
   private privateDataLayoutReady: Promise<void> | undefined;
+  /**
+   * Set by `recordShutdown`. Boot-time auto-resume checks it between sessions,
+   * so a node told to stop while it is still bringing sessions back does not
+   * spawn fresh PTYs into a process that is about to exit.
+   */
+  private stopping = false;
 
   /**
    * Claims captured at spawn time, replayed for that session's exit transition.
@@ -379,6 +469,7 @@ export class SpawnService {
     this.codexNetworkPreflight = options.codexNetworkPreflight ?? preflightCodexNetworkPolicy;
     this.credentialHome = options.credentialHome;
     this.gitHubCredentials = options.gitHubCredentials;
+    this.spaceCredentials = options.spaceCredentials;
     this.worktrees = options.worktrees ?? null;
     this.worktreeCap = options.worktreeCap ?? 0;
   }
@@ -395,15 +486,59 @@ export class SpawnService {
    * member asked to run as themselves, and quietly running them as the node
    * instead is the exact lie the credential store exists to stop. Auto (null)
    * keeps the pre-field behaviour byte for byte.
+   *
+   * MEMBER REFUSES ON TWO DIFFERENT FACTS, and they are worth keeping apart.
+   * `null` means the member connected nothing. A KEYLESS API-key home means
+   * they connected a pasted-key provider and its stored key could not be read
+   * (`agent-credential-injection.ts` answers that with a keyless home rather
+   * than `null`, because `null` would leave the node's own key live in the
+   * composed environment). AUTO IS DELIBERATELY NOT REFUSED on a keyless home:
+   * there it is what suppresses the node key, and it must reach `composeEnv`
+   * intact.
+   *
+   * A MODEL SERVED BY AN API-KEY BACKEND (a Kimi model on `claude-code`, a Groq
+   * model on `codex`) has exactly one route: the member's own key for that
+   * backend. There is no node credential for it and no native provider that
+   * serves it, so `source` does not apply, and a missing or unreadable key
+   * refuses the launch in every posture — naming the key — rather than
+   * starting a session whose first request goes to a vendor that does not
+   * serve its model.
    */
   private async resolveCredentialHome(
     auth: GraphAuth,
     agentTool: string,
+    model: string | null,
     source: CredentialSource | null = null,
   ): Promise<AgentCredentialHome | null> {
+    const backend = apiKeyBackendForModel(agentTool, model);
+    if (backend) {
+      const home = this.credentialHome
+        ? await this.credentialHome.resolve(auth, { agentTool, model })
+        : null;
+      const name = API_KEY_PROVIDER_DISPLAY_NAME[backend];
+      if (!home || home.provider !== backend) {
+        throw new SpawnError(
+          `${model} runs only on your own ${name} key, and no ${name} key is connected ` +
+            'for your account — connect it under Settings → Connections, or pick a model ' +
+            `that ${agentTool} runs natively`,
+          'conflict',
+          { agentTool, model, provider: backend },
+        );
+      }
+      if (home.apiKey === undefined) {
+        throw new SpawnError(
+          `${model} runs only on your own ${name} key, and your connected ${name} key ` +
+            'could not be read — reconnect it under Settings → Connections',
+          'conflict',
+          { agentTool, model, provider: backend },
+        );
+      }
+      return home;
+    }
+
     if (source === 'node') return null;
     const home = this.credentialHome
-      ? await this.credentialHome.resolve(auth, { agentTool })
+      ? await this.credentialHome.resolve(auth, { agentTool, model })
       : null;
     if (source === 'member' && !home && agentCredentialProviderFor(agentTool)) {
       throw new SpawnError(
@@ -412,6 +547,18 @@ export class SpawnService {
           "or launch with the node credential ('node')",
         'conflict',
         { agentTool, provider: agentCredentialProviderFor(agentTool) },
+      );
+    }
+    if (source === 'member' && home && isApiKeyCredentialProvider(home.provider)
+      && home.apiKey === undefined) {
+      throw new SpawnError(
+        `credentialSources.${home.provider} 'member' was requested and a ${home.provider} ` +
+          'credential is connected, but its stored key could not be read — reconnect it ' +
+          "under Settings → Connections, or launch with the node credential ('node')",
+        'conflict',
+        // The ACTUAL provider, not the tool's native one, so the member is
+        // pointed at the credential that is the problem.
+        { agentTool, provider: home.provider },
       );
     }
     return home;
@@ -428,6 +575,106 @@ export class SpawnService {
   ): Promise<GitHubCredential | null> {
     if (source === 'node' || !this.gitHubCredentials) return null;
     return this.gitHubCredentials.resolve(auth);
+  }
+
+  /**
+   * Every credential a session runs on, member → space → node under D5
+   * (`credential-resolution.ts`, the ONLY place the policy is enforced). A
+   * space API key is materialized into the session's own 0700 home from the
+   * key read NOW, so a resume picks up a rekey (D7).
+   */
+  private resolveSessionCredentials(
+    auth: GraphAuth,
+    spaceId: string,
+    sessionId: string,
+    launch: ResolvedLaunchConfig,
+    resume = false,
+  ): Promise<ResolvedSessionCredentials> {
+    return resolveSessionCredentials(
+      { auth, spaceId, launch, resume },
+      {
+        ...(this.spaceCredentials ? { spaceCredentials: this.spaceCredentials } : {}),
+        resolveMemberHome: (source) =>
+          this.resolveCredentialHome(auth, launch.agentTool, launch.model, source),
+        resolveMemberGitHub: () => this.resolveGitHubCredential(auth, null),
+        materializeApiKeyHome: (input) =>
+          materializeSpaceApiKeyHome({ dataDir: this.dataDir, sessionId, ...input }),
+      },
+    );
+  }
+
+  /**
+   * M7: the space credentials a session launched on are re-read AFTER its PTY
+   * exists. A delete that revoked one between our read and now found no PTY to
+   * kill (SC-3 kills by recorded session), so this is the check that closes
+   * that window; a delete from here on finds the PTY. Refuses on a read error
+   * too — an unanswerable question is not an active credential.
+   */
+  private async assertSpaceCredentialsStillActive(
+    auth: GraphAuth,
+    sessionId: string,
+    credentialIds: readonly string[],
+  ): Promise<void> {
+    if (credentialIds.length === 0 || !this.spaceCredentials) return;
+    let active: ReadonlySet<string>;
+    try {
+      active = await this.spaceCredentials.activeIds(auth, credentialIds);
+    } catch (error) {
+      throw new SpawnError(
+        'could not re-check the space credentials this session launched on, so it was stopped ' +
+          'rather than left running on one that may have been deleted — retry',
+        'internal',
+        { sessionId, cause: error instanceof Error ? error.message : String(error) },
+      );
+    }
+    const gone = credentialIds.filter((id) => !active.has(id));
+    if (gone.length > 0) {
+      throw new SpawnError(
+        `space credential ${gone.join(', ')} was deleted or disabled while this session was ` +
+          'starting, so it was stopped — launch again to use another credential',
+        'conflict',
+        { sessionId, spaceCredentialIds: gone },
+      );
+    }
+  }
+
+  /**
+   * Scrub a session's space API key from its per-session home, keeping its
+   * conversation state. Best effort and silent about contents (I5): a failure
+   * is logged by session id only, and the boot sweep retries it.
+   */
+  private async scrubSpaceSecrets(sessionId: string): Promise<void> {
+    try {
+      await scrubSpaceSessionSecrets(this.dataDir, sessionId);
+    } catch (error) {
+      this.logger?.warn?.('SpawnService: could not scrub a session space credential home', {
+        sessionId,
+        code: (error as NodeJS.ErrnoException).code ?? 'unknown',
+      });
+    }
+  }
+
+  /**
+   * The boot sweep for space API keys: scrub every per-session home whose
+   * session has no live PTY and no in-flight claims here. A crash skips the
+   * exit path; this is what catches it.
+   *
+   * Safe at boot ONLY because no agent survives the server: PTYs die with it
+   * (the unit's KillMode=control-group, PtyHostService.ts ~585). An
+   * agent that outlived a restart would find its key scrubbed mid-session.
+   */
+  async sweepSpaceSessionSecrets(): Promise<{ scrubbed: string[]; errors: string[] }> {
+    const result = await sweepSpaceSessionSecrets(
+      this.dataDir,
+      (sessionId) => this.pty.hasSession(sessionId) || this.sessionAuth.has(sessionId),
+    );
+    if (result.scrubbed.length > 0 || result.errors.length > 0) {
+      this.logger?.info('SpawnService: swept space credential session homes', {
+        scrubbed: result.scrubbed.length,
+        errors: result.errors,
+      });
+    }
+    return result;
   }
 
   /**
@@ -562,6 +809,24 @@ export class SpawnService {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * The plugins a `minimal` Claude lane must turn off, read from the config
+   * home the child will run under: the member's credential home when there is
+   * one, else the node's `CLAUDE_CONFIG_DIR`, else `~/.claude` — the same
+   * resolution `recordManifest` records. Empty (no read at all) for any other
+   * tool, for `inherit`, and under an operator `TM8_AGENT_CMD` wrapper.
+   */
+  private installedClaudePluginsFor(
+    launch: ResolvedLaunchConfig,
+    credentialConfigDir: string | undefined,
+  ): string[] {
+    if (launch.agentTool !== 'claude-code' || launch.harnessSurface === 'inherit') return [];
+    if (this.env.TM8_AGENT_CMD?.trim()) return [];
+    const configDir =
+      credentialConfigDir ?? this.env.CLAUDE_CONFIG_DIR ?? join(this.env.HOME ?? homedir(), '.claude');
+    return readInstalledClaudePlugins(configDir);
   }
 
   /**
@@ -726,15 +991,71 @@ export class SpawnService {
   private async recordedPosture(
     auth: GraphAuth,
     sessionId: string,
-  ): Promise<SessionLaunchPosture | null> {
+  ): Promise<{ posture: SessionLaunchPosture | null; unreadable: boolean }> {
     try {
-      return await this.graph.loadSessionLaunchPosture(auth, sessionId);
+      return { posture: await this.graph.loadSessionLaunchPosture(auth, sessionId), unreadable: false };
     } catch (error) {
       this.logger?.warn?.('SpawnService: could not read the recorded posture of a resuming session', {
         sessionId,
         error: error instanceof Error ? error.message : String(error),
       });
-      return null;
+      return { posture: null, unreadable: true };
+    }
+  }
+
+  /**
+   * Resume's space-credential gate, run BEFORE the PTY (C3). The DB's
+   * session_space_credentials rows are the authority on what this session ran
+   * on; the recorded posture only names it. So:
+   *   - a session resolved onto space credentials re-points them to the
+   *     resumer (206 refuses unless every one is still active), and what 206
+   *     recorded must be exactly what resolution chose;
+   *   - a session whose posture could not be read is asked the DB directly:
+   *     had it run on a space credential, re-resolving it from nothing would
+   *     silently move it onto member or node, so that refuses.
+   */
+  private async repointSpaceCredentials(
+    auth: GraphAuth,
+    sessionId: string,
+    resolved: ResolvedSessionCredentials,
+    postureUnreadable: boolean,
+  ): Promise<void> {
+    if (!this.spaceCredentials) return;
+    if (resolved.spaceCredentialIds.length === 0 && !postureUnreadable) return;
+    let repoint;
+    try {
+      repoint = await this.spaceCredentials.repointSession(auth, sessionId);
+    } catch (error) {
+      throw new SpawnError(
+        'could not re-point the space credentials this session runs on to you, so the resume ' +
+          'is refused rather than run with the wrong launcher on record — retry',
+        'internal',
+        { sessionId, cause: error instanceof Error ? error.message : String(error) },
+      );
+    }
+    if (!repoint.ok) {
+      throw new SpawnError(
+        'a space credential this session launched on has been deleted or is no longer usable, ' +
+          'so it cannot resume on it — start a new session with another credential',
+        'conflict',
+        { sessionId, reason: repoint.reason },
+      );
+    }
+    const chosen = resolved.launch.spaceCredentialIds ?? {};
+    const recorded = new Map(repoint.credentials.map((c) => [c.provider, c.spaceCredentialId]));
+    const agrees =
+      recorded.size === Object.keys(chosen).length &&
+      [...recorded].every(([provider, id]) => chosen[provider] === id);
+    if (!agrees) {
+      throw new SpawnError(
+        postureUnreadable
+          ? "this session's recorded launch could not be read and it ran on a space credential, " +
+              'so it is not resumed on a different one — retry, or start a new session'
+          : 'the space credentials recorded for this session do not match its manifest, so the ' +
+              'resume is refused — start a new session',
+        'conflict',
+        { sessionId },
+      );
     }
   }
 
@@ -747,10 +1068,12 @@ export class SpawnService {
    * persona default is what makes a delegated agent sit forever on an approval
    * prompt that no human will ever see, so the parent's posture carries down.
    *
-   * Three deliberate silences, all of them "no inheritance" rather than a
-   * failure:
-   *   - an explicit `accessMode` on the request means the caller has already
-   *     answered the question; nothing is read at all
+   * An explicit `accessMode` on the request still wins over the parent's —
+   * `resolveLaunchConfig` ranks the request first — but the parent is READ
+   * regardless: its credential sources and exact space credential ids carry
+   * down whatever posture the child names (A4, D6a).
+   *
+   * Two deliberate silences, both "no inheritance" rather than a failure:
    *   - a root spawn (no parent) has nothing to inherit from
    *   - an unreadable or missing parent manifest is a WARNING, never a refused
    *     spawn: posture inheritance is a default-selection convenience, and
@@ -762,7 +1085,7 @@ export class SpawnService {
     request: SpawnRequest,
   ): Promise<SessionLaunchPosture | null> {
     const parentSessionId = request.parentSessionId ?? null;
-    if (!parentSessionId || request.accessMode) return null;
+    if (!parentSessionId) return null;
     try {
       return await this.graph.loadSessionLaunchPosture(auth, parentSessionId);
     } catch (error) {
@@ -788,6 +1111,51 @@ export class SpawnService {
    * precedes 5 because the agent reads the manifest at boot — a PTY started
    * before the file exists races its own configuration.
    */
+  /**
+   * The per-launch facts only the v2 frame reads (spec ca8d §2): the primary
+   * task's context DTO, rendered now — after the session row exists, so as its
+   * actor and with the task already `working` — and whether the cwd holds a
+   * code graph. A v1 launch reads neither and pays for neither.
+   *
+   * A failed or slow render never fails the launch (§2.3): the header then
+   * says `snapshot="unavailable"` with the reason and names the one read to run.
+   */
+  private async promptV2Runtime(
+    auth: GraphAuth,
+    manifest: Tm8Manifest,
+    sessionId: string,
+    cwd: string,
+  ): Promise<Pick<PromptRuntime, 'taskContext' | 'codeGraph'>> {
+    if (manifest.promptVersion !== PROMPT_VERSION_V2) return {};
+    const codeGraph = await access(join(cwd, 'graphify-out', 'merged-graph.json')).then(
+      () => true,
+      () => false,
+    );
+    const primary = manifest.tasks[0];
+    if (!primary) return { codeGraph };
+    const load = this.graph.loadTaskContextSnapshot?.bind(this.graph);
+    if (!load) return { codeGraph, taskContext: { taskId: primary.id, unavailable: 'not_supported' } };
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const dto = await Promise.race([
+        load(auth, { sessionId, taskId: primary.id, totalBytes: primaryContextBudgetV2(manifest.tasks) }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error('context render timed out'), { code: 'timeout' })), TASK_CONTEXT_RENDER_TIMEOUT_MS);
+        }),
+      ]);
+      return { codeGraph, taskContext: { taskId: primary.id, dto } };
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      this.logger?.warn?.('spawn: v2 task context render failed', { sessionId, taskId: primary.id, error: String(error) });
+      return {
+        codeGraph,
+        taskContext: { taskId: primary.id, unavailable: typeof code === 'string' && code !== '' ? code : 'render_failed' },
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async spawn(auth: GraphAuth, request: SpawnRequest): Promise<SpawnResult> {
     const taskIds = request.taskIds ?? [];
     let bootExit: PtyExitInfo | undefined;
@@ -805,6 +1173,7 @@ export class SpawnService {
       // a later instant than the persona it is composed beside.
       parentSessionId: request.parentSessionId ?? null,
       ...(request.memoryIds?.length ? { memoryIds: request.memoryIds } : {}),
+      ...(request.selection ? { selection: request.selection } : {}),
     });
 
     const inherited = await this.inheritedPosture(auth, request);
@@ -932,6 +1301,7 @@ export class SpawnService {
     // The OOM baseline, captured with the claims because it is the same kind
     // of launch-time bookkeeping and must exist before the PTY can die (171).
     this.oomKillAtSpawn.set(sessionId, await readOomKillCount());
+    let spaceCredentialIds: string[] = [];
 
     try {
       // Step 7 (§4.8) — publish. The lease and the association need the session
@@ -984,16 +1354,33 @@ export class SpawnService {
       // precondition — instead of booting an agent that will look healthy and
       // be unable to run anything. Throws unless the operator has opted in.
       const sandbox = await this.resolveSandboxPosture(launch);
+      const manifestPath = this.manifestPathFor(sessionId);
+      const credentials = await this.resolveSessionCredentials(
+        auth,
+        request.spaceId,
+        sessionId,
+        launch,
+      );
+      spaceCredentialIds = credentials.spaceCredentialIds;
+      const { credentialHome, gitHubCredential } = credentials;
+      // Built after the credentials because a `minimal` launch reads the
+      // plugin registry of the config home the child will actually use.
       const baseCommand = buildAgentCommand(launch, this.env, {
         claudeSessionId: nativeSessionId,
         sandboxUnavailable: sandbox.unavailable,
+        installedClaudePlugins: this.installedClaudePluginsFor(launch, credentialHome?.configDir),
+        equippedClaudePlugins: equippedClaudePlugins(context.skillEquips ?? context.skills ?? []),
       });
-      const manifestPath = this.manifestPathFor(sessionId);
       const manifest = composeManifest({
+        agentConfigDir: credentialHome?.configDir ?? (launch.agentTool === 'codex' ? this.env.CODEX_HOME : this.env.CLAUDE_CONFIG_DIR),
+        homeDir: this.env.HOME ?? homedir(),
         sessionId,
         request,
         context,
-        launch,
+        // The RESOLVED sources: auto that landed on the space is recorded as
+        // `space` with its id, which is what 206's manifest writer turns into
+        // the session_space_credentials row containment reads (D8).
+        launch: credentials.launch,
         commandNetwork,
         interactionProfile,
         workdir: { mode: workdir.mode, path: cwd },
@@ -1013,6 +1400,7 @@ export class SpawnService {
       const envelope = composePrompt(manifest, {
         sessionId,
         baseUrl: this.baseUrl,
+        ...(await this.promptV2Runtime(auth, manifest, sessionId, cwd)),
       });
       // The two halves stay SEPARATE all the way to the argv. `envelope.system`
       // configures the agent; `envelope.task` is its first user turn, and is
@@ -1047,14 +1435,6 @@ export class SpawnService {
         this.env,
       );
 
-      const agentCredentialProvider = agentCredentialProviderFor(launch.agentTool);
-      const agentCredentialSource = agentCredentialProvider
-        ? launch.credentialSources[agentCredentialProvider]
-        : null;
-      const [credentialHome, gitHubCredential] = await Promise.all([
-        this.resolveCredentialHome(auth, launch.agentTool, agentCredentialSource),
-        this.resolveGitHubCredential(auth, launch.credentialSources.github),
-      ]);
       const env = composeEnv(
         manifest,
         manifestPath,
@@ -1064,8 +1444,9 @@ export class SpawnService {
         agentToken,
         credentialHome ?? undefined,
         gitHubCredential ?? undefined,
-        launch.credentialSources.github,
+        credentials.launch.credentialSources.github,
       );
+      Object.assign(env, harnessSurfaceEnv(launch));
       const envVarNames = Object.keys(env).sort();
 
       // Refuse BEFORE spawning if the agent CLI cannot be found, so the caller
@@ -1156,6 +1537,7 @@ export class SpawnService {
       // after that await creates a gap where the PTY entry and its exit evidence
       // have already been removed before we begin watching.
       const bootSettlement = this.pty.waitForBootSettlement(sessionId, this.bootSettlementMs);
+      await this.assertSpaceCredentialsStillActive(auth, sessionId, spaceCredentialIds);
       const [earlyExit, promptOutcome] = await Promise.all([
         bootSettlement,
         firstPromptDeliveryId && firstPromptOutcome
@@ -1205,6 +1587,8 @@ export class SpawnService {
           .releaseWorktreeLease(auth, worktree.worktreeId)
           .catch(() => undefined);
       }
+      // The session is dead; its space key must not outlive it on disk.
+      await this.scrubSpaceSecrets(sessionId);
       this.sessionAuth.delete(sessionId);
       throw error;
     }
@@ -1404,6 +1788,7 @@ export class SpawnService {
     // must not turn that unrelated failure into destruction of the healthy
     // process we merely found.
     let launchedPty = false;
+    let spaceCredentialIds: string[] = [];
 
     if (this.pty.hasSession(sessionId)) {
       throw new SpawnError(
@@ -1446,7 +1831,8 @@ export class SpawnService {
     // default — a session launched `fullAccess` came back on `auto` and stalled
     // on its first approval. The recorded manifest is where that fact is
     // durable, and resume does not rewrite it, so it still describes the launch.
-    const recordedPosture = await this.recordedPosture(auth, sessionId);
+    const recorded = await this.recordedPosture(auth, sessionId);
+    const recordedPosture = recorded.posture;
 
     // The stored row IS the request: same precedence chain as spawn, fed the
     // facts the session was actually launched with, so the two paths resolve
@@ -1463,6 +1849,10 @@ export class SpawnService {
       title: info.title || null,
       clientMutationId: request.clientMutationId ?? null,
     };
+    // NOT routed. A resume continues a conversation the agent already has, and
+    // switching models underneath it would hand a transcript written by one
+    // model to another — the native session id in `--resume` belongs to the
+    // model that created it. Resume replays the recorded posture, full stop.
     const launch = resolveLaunchConfig(syntheticRequest, context, this.env, recordedPosture);
     const commandNetwork = resolveCommandNetworkPolicy(launch, this.env);
 
@@ -1718,14 +2108,34 @@ export class SpawnService {
       // first ran is not sandboxed by having been sandboxed before, and resume
       // is exactly the path that moves a session onto a different node.
       const sandbox = await this.resolveSandboxPosture(launch);
+      // Re-resolved under the RESUMER's claims: membership, policy (A5) and
+      // credential status are today's, the space key is re-read and re-seeded
+      // from the current sealed value (D7), and a pinned or recorded id that
+      // is no longer usable refuses rather than falling back (M8d).
+      const credentials = await this.resolveSessionCredentials(
+        auth,
+        info.spaceId,
+        sessionId,
+        launch,
+        true,
+      );
+      spaceCredentialIds = credentials.spaceCredentialIds;
+      const { credentialHome, gitHubCredential } = credentials;
+      await this.repointSpaceCredentials(auth, sessionId, credentials, recorded.unreadable);
+      // Same harness surface as the fresh spawn: `withAgentResume` builds on
+      // this base command, so the minimal-surface flags survive `--resume`.
       const baseCommand = buildAgentCommand(launch, this.env, {
         sandboxUnavailable: sandbox.unavailable,
+        installedClaudePlugins: this.installedClaudePluginsFor(launch, credentialHome?.configDir),
+        equippedClaudePlugins: equippedClaudePlugins(context.skillEquips ?? context.skills ?? []),
       });
       const manifest = composeManifest({
+        agentConfigDir: credentialHome?.configDir ?? (launch.agentTool === 'codex' ? this.env.CODEX_HOME : this.env.CLAUDE_CONFIG_DIR),
+        homeDir: this.env.HOME ?? homedir(),
         sessionId,
         request: syntheticRequest,
         context,
-        launch,
+        launch: credentials.launch,
         commandNetwork,
         ...(interactionProfile ? { interactionProfile } : {}),
         workdir: { mode: info.workdirMode, path: cwd },
@@ -1747,14 +2157,6 @@ export class SpawnService {
       // credential on the way back up, and one that has been disconnected must
       // stop being injected. A resume that kept the launch-time answer would be
       // the one path where Ruling 3's "disconnect terminates" could be undone.
-      const agentCredentialProvider = agentCredentialProviderFor(launch.agentTool);
-      const agentCredentialSource = agentCredentialProvider
-        ? launch.credentialSources[agentCredentialProvider]
-        : null;
-      const [credentialHome, gitHubCredential] = await Promise.all([
-        this.resolveCredentialHome(auth, launch.agentTool, agentCredentialSource),
-        this.resolveGitHubCredential(auth, launch.credentialSources.github),
-      ]);
       const env = composeEnv(
         manifest,
         manifestPath,
@@ -1764,8 +2166,9 @@ export class SpawnService {
         agentToken,
         credentialHome ?? undefined,
         gitHubCredential ?? undefined,
-        launch.credentialSources.github,
+        credentials.launch.credentialSources.github,
       );
+      Object.assign(env, harnessSurfaceEnv(launch));
       const envVarNames = Object.keys(env).sort();
 
       await this.assertAgentRuntime(baseCommand, launch, env);
@@ -1792,6 +2195,7 @@ export class SpawnService {
       launchedPty = !reused;
 
       const bootSettlement = this.pty.waitForBootSettlement(sessionId, this.bootSettlementMs);
+      await this.assertSpaceCredentialsStillActive(auth, sessionId, spaceCredentialIds);
       await this.graph.transition(auth, { sessionId, status: 'running' });
 
       const earlyExit = await bootSettlement;
@@ -1809,6 +2213,8 @@ export class SpawnService {
     } catch (error) {
       await this.failSession(auth, sessionId, error, bootExit);
       if (launchedPty) this.pty.kill(sessionId);
+      // A PTY this resume merely FOUND is healthy and still reads its key.
+      if (!this.pty.hasSession(sessionId)) await this.scrubSpaceSecrets(sessionId);
       this.sessionAuth.delete(sessionId);
       throw error;
     }
@@ -2070,11 +2476,6 @@ export class SpawnService {
       clientMutationId: opts.clientMutationId ?? null,
     });
 
-    const outcome = this.pty.kill(sessionId, true);
-    this.sessionAuth.delete(sessionId);
-    // Even a failed kill must lose graph authority: a process whose lifecycle
-    // is no longer under control is the least safe process to leave credentialed.
-
     // Phase 1b — a genuine kill FAILURE must not be reported as a successful
     // exit. Ported from old maestro's own discrimination
     // (sessionRoutes.ts:576-580: `if (killOutcome === 'error') return
@@ -2093,6 +2494,27 @@ export class SpawnService {
     // non-terminal status here is more honest than a false 'exited': Phase 1's
     // `reconcileNodeGhosts` will retire it with an accurate reason at the next
     // restart if it is never resolved another way.
+    //
+    // 'not_found' is not an error: terminating an already-dead session is the
+    // user cancelling something that just finished. The graph still needs to
+    // reflect the terminal state, and the RPC tolerates same→same.
+    const status = opts.terminalStatus ?? 'exited';
+    const { outcome } = await this.killThenRecordEnding(auth, sessionId, {
+      onNotFound: 'record',
+      status,
+      error: (killed) =>
+        opts.reason ??
+        (killed === 'not_found'
+          ? 'terminate requested, but no live PTY was found (already exited)'
+          : opts.force
+            ? 'terminated by request (force) — exit code not observed, kill does not wait for the real exit event'
+            : 'terminated by request — exit code not observed, kill does not wait for the real exit event'),
+      // The default reads as a cancellation because that is what an
+      // unqualified terminate IS; a caller who knows better (ghost
+      // reconciliation, the shutdown sweep) passes its own.
+      endedKind: opts.endedKind ?? 'stopped_by_operator',
+      endedReason: opts.endedReason ?? 'Stopped by request.',
+    });
     if (outcome === 'error') {
       throw new SpawnError(
         `failed to terminate work session ${sessionId}: the kill signal itself failed`,
@@ -2101,39 +2523,227 @@ export class SpawnService {
       );
     }
 
+    this.logger?.info('SpawnService: session terminated', { sessionId, outcome, status });
+    return { outcome, commandResult };
+  }
+
+  /**
+   * CREDENTIAL CONTAINMENT — kill a session because the credential it runs on
+   * was taken away, and record that it ended.
+   *
+   * The three containment callers (a space-credential delete, the member
+   * Disconnect, SC-6's member removal) used to call `PtyHostService.kill`
+   * directly. `kill()` finalizes the PTY entry synchronously, so the late
+   * node-pty `onExit` for that process returns at its identity check and
+   * `handlePtyExit` never runs: nothing wrote the row, and it read `running`
+   * forever — counted against the concurrency cap, and refusing a resume as
+   * "is 'running'" rather than for the revoked credential.
+   *
+   * This goes through `killThenRecordEnding`, the same kill-then-transition
+   * `terminate` uses, so there is one ending writer for a stop, not two:
+   *
+   *   - KILL BEFORE STAMP. The row is written only after `kill()` reports
+   *     `killed`. A kill `error` leaves the row at its prior status and is
+   *     returned for the caller to surface; `not_found` (no PTY here) writes
+   *     nothing, because nothing was confirmed dead — on a single node the boot
+   *     reconciliation retires such a row, and on another node its own host
+   *     still owns it.
+   *   - EXACTLY ONE TRANSITION. `kill()` removes the entry before this writes,
+   *     so the late `onExit` returns at `sessions.get(id) !== entry`
+   *     (PtyHostService `onExit`) and `handlePtyExit` never runs for it. The
+   *     reverse order — the process exits on its own first — makes `kill()`
+   *     answer `not_found`, so this writes nothing and the exit's own ending
+   *     stands.
+   *   - THE LAUNCHER'S CLAIMS. The transition is written under the claims the
+   *     session was spawned with (`sessionAuth`), exactly as its exit would
+   *     have been. The containing caller may not be a member of the session's
+   *     space at all (a node admin disabling an account), and
+   *     `work_session_transition` has no bypass for that.
+   *
+   * The ending is `stopped_by_operator` — a person took the credential away —
+   * with an `ended_reason` naming the containment, so the row says why it
+   * stopped and a plain "Stopped by request." still means a terminate. The
+   * texts are fixed strings: no credential label, id or secret reaches them (I5).
+   *
+   * The space key's per-session copy is scrubbed by `killThenRecordEnding`
+   * after the kill, before the ending is written, so it is gone even when the
+   * transition then fails.
+   *
+   * Never throws. A transition that fails after a successful kill is returned
+   * as `recorded: false` with a reason, for the caller's `failures`.
+   */
+  async containCredentialSession(
+    sessionId: string,
+    cause: CredentialContainmentCause,
+  ): Promise<CredentialContainmentResult> {
+    const auth = this.sessionAuth.get(sessionId);
+    const ending = CREDENTIAL_CONTAINMENT_ENDINGS[cause];
+    let result: { outcome: PtyKillOutcome; recorded: boolean };
+    try {
+      result = await this.killThenRecordEnding(auth, sessionId, {
+        onNotFound: 'skip',
+        status: 'exited',
+        error: () => ending.error,
+        endedKind: 'stopped_by_operator',
+        endedReason: ending.endedReason,
+      });
+    } catch (error) {
+      // Killed, but the ending could not be written: the row is a ghost until
+      // the boot reconciliation retires it, so say so loudly.
+      const sqlState = (error as { code?: string } | null)?.code ?? '(no sqlstate)';
+      this.loud(
+        `credential containment killed session ${sessionId} but FAILED to record its ending — ` +
+          `sqlstate=${sqlState}. Expect a ghost session until the next boot reconciliation.`,
+      );
+      return { outcome: 'killed', recorded: false, reason: `transition_failed: ${sqlState}` };
+    }
+    if (result.outcome === 'killed' && !result.recorded) {
+      // A live PTY with no captured claims: not a session this service
+      // spawned. Nothing can authorise its row's write from here.
+      this.loud(
+        `credential containment killed session ${sessionId}, which had no captured claims — ` +
+          `its ending was not recorded. Expect a ghost session.`,
+      );
+      return { outcome: 'killed', recorded: false, reason: 'no_captured_claims' };
+    }
+    this.logger?.info('SpawnService: session contained', { sessionId, cause, outcome: result.outcome });
+    return { outcome: result.outcome, recorded: result.recorded };
+  }
+
+  /**
+   * THE STOP PATH's kill and ending, shared by `terminate` and
+   * `containCredentialSession` so a stop has one writer.
+   *
+   * `kill(notify=true)` finalizes the PTY entry synchronously, which means
+   * onExit will NOT fire for it and the exit sink will not run. So the
+   * transition is written here explicitly rather than left to the exit path.
+   *
+   * The same skipped exit path is the one that scrubs a space API key's
+   * per-session copy (`handlePtyExit`), so a `killed` scrubs it here, before
+   * anything that can fail: a stopped session must not keep a copy of a space
+   * secret on disk until the next boot sweep. The conversation state stays,
+   * and a resume re-seeds the key from the credential as it reads NOW.
+   * `not_found` scrubs nothing: a process that exited on its own was scrubbed
+   * by its own exit.
+   *
+   * Returns without writing when the kill failed (`error`), when there was
+   * nothing to kill and the caller asked to `skip` that, or when there are no
+   * claims to write under. A transition that throws propagates.
+   */
+  private async killThenRecordEnding(
+    auth: GraphAuth | undefined,
+    sessionId: string,
+    ending: {
+      onNotFound: 'record' | 'skip';
+      status: 'exited' | 'failed';
+      error: (outcome: 'killed' | 'not_found') => string;
+      endedKind: WorkSessionEndedKind;
+      endedReason: string;
+    },
+  ): Promise<{ outcome: PtyKillOutcome; recorded: boolean }> {
+    const outcome = this.pty.kill(sessionId, true);
+    this.sessionAuth.delete(sessionId);
+    // Even a failed kill must lose graph authority: a process whose lifecycle
+    // is no longer under control is the least safe process to leave credentialed.
+    if (outcome === 'error') return { outcome, recorded: false };
+    if (outcome === 'killed') await this.scrubSpaceSecrets(sessionId);
+    if (outcome === 'not_found' && ending.onNotFound === 'skip') return { outcome, recorded: false };
+    if (auth === undefined) return { outcome, recorded: false };
+
     // `kill()` sends a signal and finalizes the tracked entry synchronously —
     // it does not, and structurally cannot, wait for node-pty's own async exit
     // event, so there is no real exit code available here to report. That is
     // a fact about this path, not a gap: `error` says so explicitly instead of
     // leaving `exit_code`/`error` both NULL, which used to be indistinguishable
     // from every OTHER unrecorded death this whole fix exists to end.
-    // 'not_found' is not an error: terminating an already-dead session is the
-    // user cancelling something that just finished. The graph still needs to
-    // reflect the terminal state, and the RPC tolerates same→same.
-    const error =
-      opts.reason ??
-      (outcome === 'not_found'
-        ? 'terminate requested, but no live PTY was found (already exited)'
-        : opts.force
-          ? 'terminated by request (force) — exit code not observed, kill does not wait for the real exit event'
-          : 'terminated by request — exit code not observed, kill does not wait for the real exit event');
-    const status = opts.terminalStatus ?? 'exited';
+    //
     // The ending facts (171). `endedReason` is the sentence a person reads, so
     // it never mentions PTYs, kill outcomes or exit events — all of which are
-    // already in `error` above, which is unchanged and stays technical. The
-    // default reads as a cancellation because that is what an unqualified
-    // terminate IS; a caller who knows better (ghost reconciliation, the
-    // shutdown sweep) passes its own.
+    // already in `error`, which stays technical.
     await this.graph.transition(auth, {
       sessionId,
-      status,
-      error,
-      endedKind: opts.endedKind ?? 'stopped_by_operator',
-      endedReason: opts.endedReason ?? 'Stopped by request.',
+      status: ending.status,
+      error: ending.error(outcome),
+      endedKind: ending.endedKind,
+      endedReason: ending.endedReason,
     });
 
-    this.logger?.info('SpawnService: session terminated', { sessionId, outcome, status });
-    return { outcome, commandResult };
+    // The instrument, AFTER the ending is on record. A kill does not wait for
+    // the exit event (see `error` above), so the harness may still be writing
+    // its last records when this reads — a `cost-state` written after this
+    // point is missed, and the transcript half is what the process had
+    // flushed. Best-effort by contract; a later exit read overwrites with
+    // more. Ghost reconciliation reuses this path, so a session killed with a
+    // previous instance of the node is measured here too.
+    await this.recordUsageAfterExit(auth, sessionId);
+    return { outcome, recorded: true };
+  }
+
+  /**
+   * THE USAGE INSTRUMENT (185) — read the whole transcript once the process
+   * is gone, and persist what it says.
+   *
+   * WHY HERE AND WHY NOW. The agent's own transcript is the only place its
+   * provider usage exists — PTY-hosted agents emit no `result` event, unlike
+   * the headless chat runtime — and the file is transient: measured 2026-09-15,
+   * 46.8% of ended claude-code sessions' transcripts were already gone. The
+   * exit is the one moment the whole conversation is certainly on disk, so
+   * every exit path calls this AFTER it has written the ending.
+   *
+   * NEVER ON THE TRANSITION PATH, NEVER THROWS. `handlePtyExit`'s loud-failure
+   * contract is about the status write; a usage read that fails must not join
+   * it. A session with no transcript (predates native-id capture, ran on
+   * another node, file deleted) simply keeps `usage = NULL`, which renders as
+   * "never measured" — the honest answer, and the one 171's rule requires.
+   *
+   * The cwd is re-derived exactly as `execution.transcript` derives it — the
+   * scratch path from the data dir and the session id, the project or
+   * worktree path from the row — so the exit read and the live page can never
+   * name different files for one session.
+   */
+  private async recordUsageAfterExit(auth: GraphAuth, sessionId: string): Promise<void> {
+    try {
+      const info = await this.graph.loadWorkSessionForResume(auth, sessionId);
+      const cwd =
+        info.workdirMode === 'scratch' ? join(this.dataDir, 'scratch', sessionId) : info.workdirPath;
+      const home = this.env.HOME ?? homedir();
+      const fallbackAgentConfigDirs = await knownAgentConfigDirs({
+        agentTool: info.agentTool,
+        dataDir: this.dataDir,
+        home,
+      });
+      const read = await readSessionUsage({
+        sessionId,
+        agentTool: info.agentTool,
+        nativeSessionId: info.nativeSessionId,
+        cwd,
+        home,
+        agentConfigDir: info.agentConfigDir,
+        fallbackAgentConfigDirs,
+      });
+      if (!read.available) {
+        this.logger?.debug('SpawnService: no transcript to record usage from', {
+          sessionId,
+          reason: read.reason,
+          searchedPaths: read.searchedPaths,
+        });
+        return;
+      }
+      await this.graph.recordWorkSessionUsage(auth, sessionId, read.usage, read.source);
+      this.logger?.info('SpawnService: recorded session usage', {
+        sessionId,
+        source: read.source,
+        messages: read.usage.transcript.messages,
+        transcriptBytes: read.usage.transcriptBytes,
+      });
+    } catch (error) {
+      // Logged, never thrown: the ending is already recorded and nothing that
+      // follows this may fail because a measurement did.
+      this.logger?.warn?.('SpawnService: could not record session usage', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -2309,6 +2919,7 @@ export class SpawnService {
    * @returns how many sessions were annotated.
    */
   async recordShutdown(auth: GraphAuth, signal: string): Promise<number> {
+    this.stopping = true;
     const live = this.pty.liveSessionIds();
     if (live.length === 0) return 0;
 
@@ -2330,6 +2941,16 @@ export class SpawnService {
             'it can be resumed to pick up where it left off.',
         });
         annotated += 1;
+        // The usage read, BOUNDED. This handler's contract is "bounded and
+        // never throws", and a whole-file parse of a 30 MB transcript (456 ms
+        // measured) times eight live sessions is inside a shutdown window; a
+        // stalled read is not. Two seconds per session, then move on — the
+        // rows this misses are countable (`ended_kind = 'server_restart' and
+        // usage is null`), which is what would justify a boot-time sweep.
+        await Promise.race([
+          this.recordUsageAfterExit(sessionAuth, sessionId),
+          new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_USAGE_READ_MS).unref()),
+        ]);
       } catch (error) {
         this.logger?.warn?.('SpawnService: could not record shutdown for session', {
           sessionId,
@@ -2339,6 +2960,84 @@ export class SpawnService {
     }
     this.logger?.info('SpawnService: recorded shutdown', { signal, annotated, live: live.length });
     return annotated;
+  }
+
+  /**
+   * BOOT-TIME AUTO-RESUME — bring back what the last restart interrupted.
+   *
+   * `recordShutdown` and `reconcileNodeGhosts` both end a restart-killed
+   * session with `ended_kind = 'server_restart'` and the sentence "it can be
+   * resumed to pick up where it left off". Until this existed, nothing did:
+   * every reboot of a single-node install left each agent waiting for a human
+   * to press Resume on it, one at a time. Measured 2026-09-23: one macOS
+   * restart stopped 62 sessions, and the node came back up with all of them
+   * dead.
+   *
+   * WHAT IT RESUMES. Only this node's `agent` sessions whose ending was
+   * `server_restart` and whose exit is no older than `windowMs` — see
+   * `GraphPort.listNodeInterruptedSessions`. Every other ending is a decision
+   * or a fault this must not undo, and the window stops a boot from reviving
+   * something a person deliberately left stopped last week.
+   *
+   * HOW. Through `resume()` itself, one session at a time, `staggerMs` apart.
+   * Same path as the Resume button, so the same refusals apply: the session
+   * cap, a missing Codex rollout, a tool with no resume contract. Staggered
+   * because each resume boots a real agent CLI, and fifty of them in one tick
+   * is a thundering herd on the machine that just booted.
+   *
+   * Stops early if `recordShutdown` runs (the node is going away again).
+   *
+   * NEVER THROWS. Called fire-and-forget after the listener is up, so the
+   * report is the only place a refusal can surface.
+   */
+  async resumeInterruptedSessions(
+    auth: GraphAuth,
+    options: { windowMs: number; staggerMs: number },
+  ): Promise<AutoResumeReport> {
+    const resumed: string[] = [];
+    const errors: Array<{ sessionId: string; message: string }> = [];
+    if (!this.nodeId) return { resumed, errors };
+
+    let candidates: Array<{ sessionId: string; exitedAt: Date }>;
+    try {
+      candidates = await this.graph.listNodeInterruptedSessions(
+        auth,
+        this.nodeId,
+        new Date(Date.now() - options.windowMs),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger?.warn?.('SpawnService: auto-resume could not list interrupted sessions', {
+        nodeId: this.nodeId,
+        error: message,
+      });
+      return { resumed, errors: [{ sessionId: '*', message: `could not list interrupted sessions: ${message}` }] };
+    }
+
+    for (const [index, { sessionId, exitedAt }] of candidates.entries()) {
+      if (this.stopping) break;
+      if (index > 0 && options.staggerMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, options.staggerMs).unref());
+        if (this.stopping) break;
+      }
+      try {
+        await this.resume(auth, {
+          sessionId,
+          // Keyed on the INTERRUPTION, not the session: a boot that retries
+          // the same interruption replays the ledger instead of resurrecting
+          // it twice, while the next restart's interruption — a new
+          // `exited_at` — is a new command and is not swallowed as a replay.
+          clientMutationId: `auto-resume:${sessionId}:${exitedAt.toISOString()}`,
+        });
+        resumed.push(sessionId);
+        this.logger?.info('SpawnService: auto-resumed session', { sessionId });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push({ sessionId, message });
+        this.logger?.warn?.('SpawnService: auto-resume refused for session', { sessionId, error: message });
+      }
+    }
+    return { resumed, errors };
   }
 
   /**
@@ -2411,6 +3110,10 @@ export class SpawnService {
   ): Promise<void> => {
     const auth = this.sessionAuth.get(sessionId);
     this.sessionAuth.delete(sessionId);
+    // FIRST, before any graph write can fail, and on the ghost path too: the
+    // process that read the space key is gone, so the key leaves the disk. A
+    // kill (containment) arrives here like any other exit.
+    await this.scrubSpaceSecrets(sessionId);
     if (auth === undefined) {
       this.loud(
         `PTY for session ${sessionId} exited (${status}) with no captured claims — ` +
@@ -2440,6 +3143,10 @@ export class SpawnService {
         ...(status === 'failed' ? { error: describePtyExit(exitInfo) } : {}),
         ...endingFromPtyExit(status, exitInfo, killedForMemory),
       });
+      // The one path with a real exit event, and so the one moment the file
+      // is complete — the process that wrote it has exited. Runs after the
+      // transition and inside its own catch; see the method.
+      await this.recordUsageAfterExit(auth, sessionId);
     } catch (error) {
       // LOUD, always, even with no logger injected.
       //

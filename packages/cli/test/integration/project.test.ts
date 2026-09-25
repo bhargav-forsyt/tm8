@@ -34,7 +34,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bindPath, type OperationName } from '@tm8/contract';
-import { assertBuilt, cli, REPO_ROOT, startRealServer, type ObservedAvailability, type RealServer } from './harness.js';
+import { assertBuilt, cli, needs, REPO_ROOT, startRealServer, type ObservedAvailability, type RealServer } from './harness.js';
 
 const DIST = join(REPO_ROOT, 'packages/cli/dist');
 
@@ -160,7 +160,7 @@ describe('what this node is, measured rather than assumed', () => {
     // MEASURED off /health on main (routes, not catalog rows) — the same
     // number event/message pin, so the three files cannot silently diverge.
         // 156 -> 157 (2026-08-13, forge write): the tracking.pr.merge route.
-    expect(h.operations).toBe(195) /* 171→195 177: the 24 container HTTP routes — ROUTES, not catalog rows */ /* 168→171 148: spaces.workflows.* — ROUTES, not catalog rows */ /* 162→165 2026-08-16 W4/132: spaces.taskWorkflows.* */ /* 157→158 2026-08-13: #188 chat route */;
+    expect(h.operations).toBe(222) /* 221→222 bug 01a0d2f1: entities.commands.tick, one POST route. MEASURED off /health. */ /* 220→221 change feed step 3: events.changes, one GET route. MEASURED off /health. */ /* 210→220 2026-09-23 SC-3: credentials.space.* (8) + node.credentials.* (2). MEASURED off /health. */ /* 207→210 2026-09-23 Jev lane K: credentials.serviceKeys.{status,put,delete}. MEASURED off /health. */ /* 206→207 2026-09-23 Jev lane F: launch.suggest (placeholder mount). MEASURED off /health. */ /* 197→206 2026-09-23: the nine skills.* routes (#647 + #649). MEASURED off /health. */ /* 196→197 2026-09-19 Changes screen Phase 1 INTEGRATED WITH main: execution.gitStage mounts one more HTTP route on top of 187’s. Both land, so this moves twice from 195. MEASURED on the MERGED tree, never hand-derived. */ /* 195→196 187: execution.sessions.share — POST /v2/entities/:id/commands/sharing, a mounted HTTP route */ /* 171→195 177: the 24 container HTTP routes — ROUTES, not catalog rows */ /* 168→171 148: spaces.workflows.* — ROUTES, not catalog rows */ /* 162→165 2026-08-16 W4/132: spaces.taskWorkflows.* */ /* 157→158 2026-08-13: #188 chat route */;
     // `implemented` is registry.size — MOUNTED handlers, not behaviourally
     // implemented. Asserted as a floor only, never quoted as an implemented count.
     expect(h.implemented).toBeGreaterThan(0);
@@ -224,13 +224,15 @@ describe('projects — the ProjectResource lifecycle, really executed', () => {
     expect(read.id).toBe(projectId);
   }, SLOW);
 
-  it('lists it, and human output keeps the id a follow-up command needs', async () => {
+  it('lists it, and human output keeps the id a follow-up command needs', async (ctx) => {
+    needs(ctx, { projectId });
     const listed = await tm8(['project', 'list']);
     expect(listed.code, listed.stderr).toBe(0);
     expect(listed.stdout).toContain(projectId);
   }, SLOW);
 
-  it('updates configuration, and §7.5 gates the working-directory relocation', async () => {
+  it('updates configuration, and §7.5 gates the working-directory relocation', async (ctx) => {
+    needs(ctx, { projectId });
     const renamed = jsonOf(
       await tm8(['project', 'update', projectId, '--name', 'g06 renamed', '--format', 'json']),
     );
@@ -247,7 +249,8 @@ describe('projects — the ProjectResource lifecycle, really executed', () => {
     expect(allowed.workingDir).toBe(moved);
   }, SLOW);
 
-  it('links into a Space, and reports the two identifier domains without conflating them', async () => {
+  it('links into a Space, and reports the two identifier domains without conflating them', async (ctx) => {
+    needs(ctx, { projectId });
     const linked = await tm8(['project', 'link', projectId, '--format', 'json']);
     expect(linked.code, linked.stderr).toBe(0);
     const dto = JSON.parse(linked.stdout) as Record<string, unknown>;
@@ -274,7 +277,8 @@ describe('projects — the ProjectResource lifecycle, really executed', () => {
     }
   }, SLOW);
 
-  it('unlinks under --yes, and refuses without it', async () => {
+  it('unlinks under --yes, and refuses without it', async (ctx) => {
+    needs(ctx, { projectId });
     const blocked = await tm8(['project', 'unlink', projectId]);
     expect(blocked.code).toBe(2);
     const unlinked = await tm8(['project', 'unlink', projectId, '--yes', '--format', 'json']);
@@ -284,7 +288,8 @@ describe('projects — the ProjectResource lifecycle, really executed', () => {
     expect((await tm8(['project', 'link', projectId])).code).toBe(0);
   }, SLOW);
 
-  it('project association correct: the handler RUNS against a schema-valid body', async () => {
+  it('project association correct: the handler RUNS against a schema-valid body', async (ctx) => {
+    needs(ctx, { projectId });
     // A fabricated artifact id is a real request the Server fully evaluates:
     // it answers not_found (exit 5) from inside the handler. That resolves this
     // row from `unknown` to "the handler ran"; it does NOT exercise the success
@@ -320,7 +325,8 @@ describe('files — the composed upload and the raw-bytes download', () => {
     fileEntityId = dto.entity?.id as string;
   }, SLOW);
 
-  it('downloads the SAME bytes back, outside the JSON envelope', async () => {
+  it('downloads the SAME bytes back, outside the JSON envelope', async (ctx) => {
+    needs(ctx, { fileEntityId });
     const target = join(scratch, 'roundtrip.bin');
     const r = await tm8(['file', 'download', fileEntityId, '--output', target]);
     expect(r.code, r.stderr).toBe(0);
@@ -330,13 +336,15 @@ describe('files — the composed upload and the raw-bytes download', () => {
     expect(r.bytes).toHaveLength(0);
   }, SLOW);
 
-  it('streams the same bytes to stdout for `--output -`', async () => {
+  it('streams the same bytes to stdout for `--output -`', async (ctx) => {
+    needs(ctx, { fileEntityId });
     const r = await tm8(['file', 'download', fileEntityId, '--output', '-']);
     expect(r.code, r.stderr).toBe(0);
     expect(Buffer.compare(r.bytes, payload)).toBe(0);
   }, SLOW);
 
-  it('refuses to clobber an existing file without --overwrite', async () => {
+  it('refuses to clobber an existing file without --overwrite', async (ctx) => {
+    needs(ctx, { fileEntityId });
     const target = join(scratch, 'roundtrip.bin');
     const blocked = await tm8(['file', 'download', fileEntityId, '--output', target]);
     expect(blocked.code).toBe(2);
@@ -467,7 +475,8 @@ describe('projects.associations.correct — the --expect-version guard, proved o
     console.log(`[g06] guard fixture: pull_request ${artifactId} at version ${versionBefore}`);
   }, SLOW);
 
-  it('ACCEPTANCE — the CURRENT version is accepted: exit 0', async () => {
+  it('ACCEPTANCE — the CURRENT version is accepted: exit 0', async (ctx) => {
+    needs(ctx, { artifactId, projectId, versionBefore });
     const r = await tm8([
       'project', 'association', 'correct', artifactId,
       '--project', projectId, '--expect-version', String(versionBefore),
@@ -477,7 +486,8 @@ describe('projects.associations.correct — the --expect-version guard, proved o
     expect(r.stdout).toContain('outcome');
   }, SLOW);
 
-  it('POSITIVE CONTROL — the artifact version actually MOVED, so the replay below is genuinely stale', async () => {
+  it('POSITIVE CONTROL — the artifact version actually MOVED, so the replay below is genuinely stale', async (ctx) => {
+    needs(ctx, { artifactId, versionBefore });
     // Without this, a no-op mutation would leave the "stale" value current and
     // the refusal test would pass for entirely the wrong reason.
     await raw('entities.patch', { id: artifactId }, {
@@ -493,7 +503,8 @@ describe('projects.associations.correct — the --expect-version guard, proved o
     expect(after.version).toBeGreaterThan(versionBefore);
   }, SLOW);
 
-  it('REFUSAL — the STALE version is refused: exit 6 version_conflict', async () => {
+  it('REFUSAL — the STALE version is refused: exit 6 version_conflict', async (ctx) => {
+    needs(ctx, { artifactId, projectId, versionBefore });
     const r = await tm8([
       'project', 'association', 'correct', artifactId,
       '--project', projectId, '--expect-version', String(versionBefore),
@@ -505,7 +516,8 @@ describe('projects.associations.correct — the --expect-version guard, proved o
     expect(r.stdout).toBe('');
   }, SLOW);
 
-  it('OMISSION — the required flag is required, and never reaches the wire without it', async () => {
+  it('OMISSION — the required flag is required, and never reaches the wire without it', async (ctx) => {
+    needs(ctx, { artifactId, projectId });
     const r = await tm8(['project', 'association', 'correct', artifactId, '--project', projectId]);
     expect(r.code).toBe(2);
     expect(r.stderr).toContain('--expect-version');

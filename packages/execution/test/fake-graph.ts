@@ -28,6 +28,7 @@ import type {
   WorktreeAllocationRow,
   WorktreeAllocationState,
 } from '../src/spawn/types.js';
+import type { WorkSessionUsage, WorkSessionUsageSource } from '../src/transcript/session-usage.js';
 
 export interface FakeGraphOptions {
   workingDir: string;
@@ -39,6 +40,18 @@ export interface FakeGraphOptions {
   permissionMode?: string | null;
   /** What `parentSessionId` points at (176). Defaults to "not resolved". */
   parentKind?: SpawnContext['parentKind'];
+  /** Persona memories, as the graph column hands them over. Default: none. */
+  memories?: unknown[];
+  /** Skills already resolved across the ancestor chain. Default: none. */
+  skills?: SpawnContext['skills'];
+  /** The loader's exact equip set, e.g. what a Jev selection resolved to. */
+  skillEquips?: SpawnContext['skillEquips'];
+  /** What the loader recorded as left out (`not-selected`, …). */
+  skippedSkills?: SpawnContext['skippedSkills'];
+  /** Replaces the resolved profile snapshot, e.g. to opt into prompt v2. */
+  profileSnapshot?: Record<string, unknown>;
+  /** What `loadTaskContextSnapshot` answers; an Error makes it reject. */
+  taskContext?: Record<string, unknown> | Error;
 }
 
 export class FakeGraph implements GraphPort {
@@ -86,6 +99,9 @@ export class FakeGraph implements GraphPort {
       // answers from a field so a chat-parented spawn can be composed without a
       // database, and a resume can change it mid-test.
       parentKind: this.parentKind,
+      ...(this.options.skills ? { skills: this.options.skills } : {}),
+      ...(this.options.skillEquips ? { skillEquips: this.options.skillEquips } : {}),
+      ...(this.options.skippedSkills ? { skippedSkills: this.options.skippedSkills } : {}),
       project:
         this.options.withProject === false
           ? null
@@ -100,7 +116,7 @@ export class FakeGraph implements GraphPort {
         name: 'Draco',
         role: 'PTY engineer',
         identity: 'You own the terminal seam.',
-        memories: [],
+        memories: this.options.memories ?? [],
         model: this.options.model === undefined ? 'opus' : this.options.model,
         agentTool: null,
         mode: 'worker',
@@ -198,7 +214,7 @@ export class FakeGraph implements GraphPort {
           templateVersion: 1,
           source: 'spawn_override',
           resolvedHash: 'fixture-profile-hash',
-          snapshot: { profile: { source: 'spawn_override' } },
+          snapshot: this.options.profileSnapshot ?? { profile: { source: 'spawn_override' } },
         }
       : {
           profileId: null,
@@ -207,8 +223,21 @@ export class FakeGraph implements GraphPort {
           templateVersion: 1,
           source: 'core_default',
           resolvedHash: 'fixture-core-profile-hash',
-          snapshot: { profile: { source: 'core_default' } },
+          snapshot: this.options.profileSnapshot ?? { profile: { source: 'core_default' } },
         };
+  }
+
+  /** Every prompt-v2 context render this fake was asked for, with the auth it ran under. */
+  readonly taskContextReads: Array<{ auth: GraphAuth; sessionId: string; taskId: string; totalBytes: number }> = [];
+
+  async loadTaskContextSnapshot(
+    auth: GraphAuth,
+    input: { sessionId: string; taskId: string; totalBytes: number },
+  ): Promise<Record<string, unknown>> {
+    this.taskContextReads.push({ auth, ...input });
+    const answer = this.options.taskContext;
+    if (answer instanceof Error) throw answer;
+    return answer ?? { schemaVersion: 'tm8.entity-context.v2', id: input.taskId, kind: 'task', version: 1, asOfSeq: 1 };
   }
 
   async recordInteractionProfilePin(
@@ -285,6 +314,24 @@ export class FakeGraph implements GraphPort {
     return this.nodeActiveSessions;
   }
 
+  /** Rows boot-time auto-resume should find. Set by the test. */
+  nodeInterruptedSessions: Array<{ sessionId: string; exitedAt: Date }> = [];
+  /** `(nodeId, since)` pairs `listNodeInterruptedSessions` was asked about. */
+  readonly interruptedQueries: Array<{ nodeId: string; since: Date }> = [];
+  /** When set, the listing REJECTS. */
+  listNodeInterruptedSessionsError: Error | null = null;
+
+  async listNodeInterruptedSessions(
+    auth: GraphAuth,
+    nodeId: string,
+    since: Date,
+  ): Promise<Array<{ sessionId: string; exitedAt: Date }>> {
+    this.authSeen.push(auth);
+    this.interruptedQueries.push({ nodeId, since });
+    if (this.listNodeInterruptedSessionsError) throw this.listNodeInterruptedSessionsError;
+    return this.nodeInterruptedSessions;
+  }
+
   statusesFor(sessionId: string): string[] {
     return this.transitions.filter((t) => t.sessionId === sessionId).map((t) => t.status);
   }
@@ -311,6 +358,7 @@ export class FakeGraph implements GraphPort {
     sessionId: string,
   ): Promise<WorkSessionResumeInfo> {
     this.authSeen.push(auth);
+    if (this.resumeLookupHangs) return new Promise<never>(() => {});
     if (!this.resumeInfo || this.resumeInfo.sessionId !== sessionId) {
       throw new Error(`work session ${sessionId} not found`);
     }
@@ -337,6 +385,40 @@ export class FakeGraph implements GraphPort {
     this.authSeen.push(auth);
     this.nativeIds.push({ sessionId, nativeSessionId });
     return this.nativeIdWriteAccepted;
+  }
+
+  // --- usage instrument seam (185) --------------------------------------------
+
+  /** Usage documents recorded, in order. `afterTransitions` is how many
+   *  transitions THIS session had at the moment of the write — the instrument
+   *  must land after the ending, never before it or instead of it. */
+  readonly usageRecords: Array<{
+    sessionId: string;
+    usage: WorkSessionUsage;
+    source: WorkSessionUsageSource;
+    afterTransitions: number;
+  }> = [];
+  /** Set to make the usage write throw — every exit path must survive it. */
+  usageError: Error | null = null;
+  /** Set true to make `loadWorkSessionForResume` never answer — the stalled
+   *  reader the shutdown sweep must not wait on. */
+  resumeLookupHangs = false;
+
+  async recordWorkSessionUsage(
+    auth: GraphAuth,
+    sessionId: string,
+    usage: WorkSessionUsage,
+    source: WorkSessionUsageSource,
+  ): Promise<boolean> {
+    this.authSeen.push(auth);
+    if (this.usageError) throw this.usageError;
+    this.usageRecords.push({
+      sessionId,
+      usage,
+      source,
+      afterTransitions: this.transitions.filter((t) => t.sessionId === sessionId).length,
+    });
+    return true;
   }
 
   /** Lane facts recorded (107), in order. */

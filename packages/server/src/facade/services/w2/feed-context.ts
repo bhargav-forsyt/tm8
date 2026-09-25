@@ -41,6 +41,9 @@ import {
   EntityFeedQuerySchema,
   decodeCursor,
   encodeCursor,
+  expandActionRows,
+  type ActionRow,
+  type ActionRows,
   type ActivityItem,
   type Cursor,
   type DeliverySummary,
@@ -60,12 +63,15 @@ import {
 } from '@tm8/contract';
 import type { ZodTypeAny } from 'zod';
 
-import type { DbClaims, Querier } from '../../../db/types.js';
+import { cursorAfter, type ActionDiscovery } from './saved-views-actions.js';
+
+import type { Db, DbClaims, Querier } from '../../../db/types.js';
 import type { OperationHandler, RequestContext } from '../../../http/types.js';
 import { claimsFor, requireUuidParam } from '../../context.js';
 import type { FacadeDeps } from '../../deps.js';
 import {
   ENTITY_COLUMNS,
+  readAncestorRows,
   ENTITY_FROM,
   MICROS,
   actorOf,
@@ -77,6 +83,9 @@ import {
   type EntityRow,
 } from '../../entity-read.js';
 import { loadMessageViewsByIds } from '../../handlers/messages.js';
+import { childCursor } from './entities-commands-tracking.js';
+import { taggedQuerier } from './context-tags.js';
+import { V2_DEFAULT_TOTAL_BYTES, decodeV2Cursor, loadContextV2, parseV2Sections } from './feed-context-v2.js';
 
 // ---------------------------------------------------------------------------
 // The versioned named-scope registry — the whole M1/M3 surface
@@ -361,12 +370,20 @@ function parseFeedQuery(query: URLSearchParams): EntityFeedQuery {
 }
 
 function parseContextQuery(query: URLSearchParams): EntityContextQuery {
+  // c904 Q17: removing a knob beats changing what it means. Refused by name,
+  // before the schema, so the caller reads the reason rather than a zod issue.
+  if (query.get('schema') === 'v2' && query.has('sectionBytes')) {
+    throw new CollabError('invalid_input', 'v2 budgets are total-only; see --total-bytes', {
+      details: { reason: 'section_bytes_not_in_v2' },
+    });
+  }
   return parseQuery<EntityContextQuery>(query, EntityContextQuerySchema, (raw) => {
     if (typeof raw['sections'] === 'string') {
       raw['sections'] = raw['sections'].split(',').filter((value) => value.length > 0);
     }
     if ('totalBytes' in raw) raw['totalBytes'] = integer(raw['totalBytes']);
     if ('sectionBytes' in raw) raw['sectionBytes'] = integer(raw['sectionBytes']);
+    if ('offset' in raw) raw['offset'] = integer(raw['offset']);
   }, 'context query');
 }
 
@@ -828,9 +845,11 @@ export interface W2FeedContextServiceOptions {
    *
    * Injected rather than reimplemented: G09 already owns availability, and two
    * action discoverers would let the focus view and `actions.list` disagree
-   * about what the same caller may do.
+   * about what the same caller may do. The discovery is the contextual scope,
+   * ranked and unpaged; this service caps it and continues it with a cursor
+   * `actions.list` accepts.
    */
-  readonly actions?: (ctx: RequestContext, entityId: string) => Promise<PaletteAction[]>;
+  readonly actions?: (ctx: RequestContext, entityId: string) => Promise<ActionDiscovery>;
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +874,41 @@ const SECTION_ROW_LIMIT = 50;
 const DROP_ORDER = ['actions', 'edges', 'children', 'parents', 'messages', 'content'] as const;
 type Droppable = (typeof DROP_ORDER)[number];
 type ListName = Exclude<Droppable, 'content'>;
+
+// The section tags (`/* entities.context:<tag> */`) live in `context-tags.ts`
+// so the v2 projection can share them without an import cycle; re-exported
+// here because this module is where S2's tests and callers find them.
+export { CONTEXT_LOAD_TAGS, taggedDb, taggedQuerier, type ContextLoadTag } from './context-tags.js';
+
+/**
+ * Which optional loaders a read runs. `root`, `summary` and `seq` are not
+ * here: every view carries the root and its as-of watermark.
+ *
+ * A plan rather than `sections.has(...)` at each loader, so the rule "load only
+ * what the selected output consumes" is stated once per schema: v1 below, and
+ * the v2 projection (M2/S3) with its own, narrower plan.
+ */
+interface ContextLoadPlan {
+  readonly parents: boolean;
+  readonly children: boolean;
+  readonly edges: boolean;
+  readonly messages: boolean;
+  /** v1 renders activity only as `cursors.activity`, so this reads one row. */
+  readonly activity: boolean;
+  readonly actions: boolean;
+}
+
+/** v1: a selected section loads exactly what v1 renders for it, nothing else. */
+function v1LoadPlan(sections: ReadonlySet<EntityContextSection>): ContextLoadPlan {
+  return {
+    parents: sections.has('hierarchy'),
+    children: sections.has('hierarchy'),
+    edges: sections.has('connections'),
+    messages: sections.has('messages'),
+    activity: sections.has('activity'),
+    actions: sections.has('actions'),
+  };
+}
 
 function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8');
@@ -892,6 +946,12 @@ function capText(value: string, limit: number): { text: string; truncated: boole
   return { text: buffer.subarray(0, end).toString('utf8'), truncated: true };
 }
 
+/** The only activity v1 consumes: the key of the newest row, for its cursor. */
+interface NewestActivity {
+  id: string;
+  cursor_created_at: string;
+}
+
 interface ContextRowSet {
   root: EntityRow;
   rootSummary: EntitySummary;
@@ -910,11 +970,13 @@ interface ContextRowSet {
    * DTO inherits whatever that DTO did to the value.
    */
   messageCursors: Map<string, string>;
-  actions: PaletteAction[];
-  newestActivity: { id: string; created_at: Date | string; cursor_created_at: string } | null;
+  actions: ActionDiscovery | null;
+  newestActivity: NewestActivity | null;
   eventSeq: number;
   /** A section had more rows than the fetch cap — the view is already partial. */
   overfetched: boolean;
+  /** The children section alone had more rows than the fetch cap. */
+  childrenOverfetched: boolean;
 }
 
 function excerptOf(row: EntityRow): { excerpt: string; source: 'entity' | 'message' | 'file' } {
@@ -1055,28 +1117,50 @@ export class W2FeedContextService {
   readonly context: OperationHandler = async (ctx) => {
     const id = requireUuidParam(ctx, 'id');
     const input = parseContextQuery(ctx.query);
-    const sections = new Set(input.sections ?? ALL_SECTIONS);
+    if (input.schema === 'v2') {
+      // M2/S3a: v2 only when asked for, until S5 flips the default.
+      const sections = parseV2Sections(input.sections);
+      // M2/S3b: a foreign or cross-filter cursor fails before any statement.
+      const after = decodeV2Cursor({ id, sections, edgeType: input.edgeType, cursor: input.cursor });
+      const { claims } = await accessFor(this.deps, ctx);
+      return this.deps.db.tx(claims, (q) => loadContextV2(q, id, {
+        sections,
+        totalBytes: input.totalBytes ?? V2_DEFAULT_TOTAL_BYTES,
+        ...(input.offset === undefined ? {} : { offset: input.offset }),
+        edgeType: input.edgeType,
+        after,
+      }));
+    }
+    // The schema admits only v1 section names when `schema` is not v2.
+    const sections = new Set((input.sections as EntityContextSection[] | undefined) ?? ALL_SECTIONS);
     const totalBytes = input.totalBytes ?? DEFAULT_TOTAL_BYTES;
     const sectionBytes = input.sectionBytes ?? DEFAULT_SECTION_BYTES;
     const { claims, viewerIdentityId } = await accessFor(this.deps, ctx);
 
-    const loaded = await this.deps.db.tx(claims, (q) =>
-      this.loadContext(q, ctx, id, sections, viewerIdentityId));
+    const plan = v1LoadPlan(sections);
+    const rows = await this.deps.db.tx(claims, (q) => this.loadContext(q, id, plan, viewerIdentityId));
+    // The palette reads in its own transaction, through a `deps.db` the
+    // registration seam tags `actions` (handlers/w2/feed-context.ts). It runs
+    // AFTER the context transaction has returned its client: opened inside it,
+    // one read held two pool clients at once.
+    const actions = plan.actions && this.options.actions ? await this.options.actions(ctx, id) : null;
+    const loaded: ContextRowSet = { ...rows, actions };
     // The default section cap is a fair-share guard for structural sections,
     // but applying it to messages first starves a coordination anchor before
     // the total-budget priority loop can let its conversation win. An explicit
     // sectionBytes remains an exact caller-requested cap.
     const messageBytes = input.sectionBytes === undefined ? totalBytes : sectionBytes;
-    return boundedView(id, loaded, sections, totalBytes, sectionBytes, messageBytes);
+    return boundedView(id, loaded, sections, {
+      totalBytes, sectionBytes, messageBytes, actionsSchema: input.actionsSchema ?? 'v1',
+    });
   };
 
   private async loadContext(
     q: Querier,
-    ctx: RequestContext,
     id: string,
-    sections: ReadonlySet<EntityContextSection>,
+    plan: ContextLoadPlan,
     viewerIdentityId: string,
-  ): Promise<ContextRowSet> {
+  ): Promise<Omit<ContextRowSet, 'actions'>> {
     const rootRows = await q.query<EntityRow>(
       `/* entities.context:root */
        select ${ENTITY_COLUMNS} ${ENTITY_FROM} where e.id = $1`,
@@ -1084,29 +1168,35 @@ export class W2FeedContextService {
     );
     const root = rootRows[0];
     if (!root) throw new CollabError('not_found', `no readable entity: ${id}`);
-    const [rootSummary] = await assembleSummaries(q, [root], viewerIdentityId);
+    const [rootSummary] = await assembleSummaries(
+      taggedQuerier(q, 'summary'), [root], viewerIdentityId,
+    );
     if (!rootSummary) throw new CollabError('not_found', `no readable entity: ${id}`);
 
     let overfetched = false;
+    let childrenOverfetched = false;
     let parents: EntitySummary[] = [];
-    let children: EntitySummary[] = [];
-    if (sections.has('hierarchy')) {
-      const parentRows = await q.query<EntityRow>(
-        `/* entities.context:parents */
-         with recursive up(id, parent_id, depth) as (
-           select e.id, e.parent_id, 0 from public.entities e where e.id = $1
-           union all
-           select p.id, p.parent_id, up.depth + 1
-             from public.entities p join up on p.id = up.parent_id
-            where up.depth < 32
-         )
-         select ${ENTITY_COLUMNS} ${ENTITY_FROM}
-          where e.id in (select id from up where depth > 0)`,
-        [id],
-      );
-      parents = await assembleSummaries(q, parentRows, viewerIdentityId);
+    if (plan.parents) {
+      // Read as ids and then one point read each, NOT by joining the
+      // recursive CTE onto ENTITY_FROM -- see `readAncestorRows` for the
+      // measurement (~700ms joined vs ~26ms split) and the planner reason.
+      //
+      // includeDeleted: true preserves what this query did -- it filtered
+      // nothing, so a soft-deleted ancestor still appeared in the chain.
+      //
+      // The old query had NO `order by`, so its order was whatever the hash
+      // join happened to emit. The helper returns nearest-parent-first, which
+      // is now explicit and is the order that matters once `capList` truncates
+      // this list: the nearest ancestors are the ones worth keeping.
+      const pq = taggedQuerier(q, 'parents');
+      const parentRows = await readAncestorRows(pq, id, { includeDeleted: true });
+      parents = await assembleSummaries(pq, parentRows, viewerIdentityId);
+    }
 
-      const childRows = await q.query<EntityRow>(
+    let children: EntitySummary[] = [];
+    if (plan.children) {
+      const cq = taggedQuerier(q, 'children');
+      const childRows = await cq.query<EntityRow>(
         `/* entities.context:children */
          select ${ENTITY_COLUMNS} ${ENTITY_FROM}
           where e.parent_id = $1 and e.deleted_at is null
@@ -1114,15 +1204,17 @@ export class W2FeedContextService {
           limit ${SECTION_ROW_LIMIT + 1}`,
         [id],
       );
-      overfetched ||= childRows.length > SECTION_ROW_LIMIT;
+      childrenOverfetched = childRows.length > SECTION_ROW_LIMIT;
+      overfetched ||= childrenOverfetched;
       children = await assembleSummaries(
-        q, childRows.slice(0, SECTION_ROW_LIMIT), viewerIdentityId,
+        cq, childRows.slice(0, SECTION_ROW_LIMIT), viewerIdentityId,
       );
     }
 
     let edges: EdgeView[] = [];
-    if (sections.has('connections')) {
-      const edgeRows = await q.query<{
+    if (plan.edges) {
+      const eq = taggedQuerier(q, 'edges');
+      const edgeRows = await eq.query<{
         id: string; src_id: string; dst_id: string; type: string;
         props: Record<string, unknown> | null; created_by: string;
         created_at: Date | string; updated_at: Date | string; dst_resolved: boolean | null;
@@ -1141,9 +1233,9 @@ export class W2FeedContextService {
       const page = edgeRows.slice(0, SECTION_ROW_LIMIT);
       const endpointIds = [...new Set(page.flatMap((edge) => [edge.src_id, edge.dst_id]))];
       const endpoints = new Map(
-        (await loadEntitySummariesByIds(q, endpointIds, viewerIdentityId)).map((s) => [s.id, s]),
+        (await loadEntitySummariesByIds(eq, endpointIds, viewerIdentityId)).map((s) => [s.id, s]),
       );
-      const actors = await loadActors(q, page.map((edge) => edge.created_by));
+      const actors = await loadActors(eq, page.map((edge) => edge.created_by));
       edges = page.flatMap((edge) => {
         const source = endpoints.get(edge.src_id);
         const target = endpoints.get(edge.dst_id);
@@ -1165,8 +1257,9 @@ export class W2FeedContextService {
 
     let messages: MessageView[] = [];
     const messageCursors = new Map<string, string>();
-    if (sections.has('messages')) {
-      const messageRows = await q.query<{ entity_id: string; cursor_created_at: string }>(
+    if (plan.messages) {
+      const mq = taggedQuerier(q, 'messages');
+      const messageRows = await mq.query<{ entity_id: string; cursor_created_at: string }>(
         `/* entities.context:messages */
          select m.entity_id, ${MICROS('m.created_at')} cursor_created_at
            from public.messages m
@@ -1178,17 +1271,17 @@ export class W2FeedContextService {
       overfetched ||= messageRows.length > SECTION_ROW_LIMIT;
       for (const row of messageRows) messageCursors.set(row.entity_id, row.cursor_created_at);
       messages = await loadMessageViewsByIds(
-        q, messageRows.slice(0, SECTION_ROW_LIMIT).map((row) => row.entity_id), viewerIdentityId,
+        mq, messageRows.slice(0, SECTION_ROW_LIMIT).map((row) => row.entity_id), viewerIdentityId,
       );
     }
 
-    let newestActivity:
-      { id: string; created_at: Date | string; cursor_created_at: string } | null = null;
-    if (sections.has('activity')) {
-      const rows = await q.query<{ id: string; created_at: Date | string; cursor_created_at: string }>(
+    // Only the newest row's keyset: `cursors.activity` is all v1 renders from
+    // this section, so nothing else about the row is read.
+    let newestActivity: NewestActivity | null = null;
+    if (plan.activity) {
+      const rows = await q.query<NewestActivity>(
         `/* entities.context:activity */
-         select a.id, a.created_at,
-                ${MICROS('a.created_at')} cursor_created_at
+         select a.id, ${MICROS('a.created_at')} cursor_created_at
            from public.activity a
           where a.entity_id = $1
           order by a.created_at desc, a.id desc
@@ -1208,10 +1301,6 @@ export class W2FeedContextService {
       [root.space_id],
     );
 
-    const actions = sections.has('actions') && this.options.actions
-      ? await this.options.actions(ctx, id)
-      : [];
-
     return {
       root,
       rootSummary,
@@ -1220,10 +1309,10 @@ export class W2FeedContextService {
       edges,
       messages,
       messageCursors,
-      actions,
       newestActivity,
       eventSeq: Number(seqRows[0]?.seq ?? 0),
       overfetched,
+      childrenOverfetched,
     };
   }
 }
@@ -1237,22 +1326,53 @@ export class W2FeedContextService {
  * order, until the whole view fits — which is what makes the cap enforced
  * rather than advertised.
  */
+interface ViewBudget {
+  totalBytes: number;
+  sectionBytes: number;
+  messageBytes: number;
+  actionsSchema: 'v1' | 'v2';
+}
+
+/**
+ * The actions section in the shape the caller asked for. Under v2 the list
+ * being capped is the ROWS, and the factored header (target, epoch, actor,
+ * columns, total) is stated once around whatever rows survive.
+ */
+function actionsSection(
+  discovery: ActionDiscovery | null,
+  schema: ViewBudget['actionsSchema'],
+): { list: unknown[]; wrap: (list: unknown[]) => PaletteAction[] | ActionRows; headerBytes: number } {
+  // A section that was not requested is `[]` in either shape.
+  if (schema === 'v1' || !discovery) {
+    const list = discovery ? expandActionRows(discovery.compact).actions : [];
+    return { list, wrap: (kept) => kept as PaletteAction[], headerBytes: 0 };
+  }
+  // With no row left to carry, the header is dead weight: the section is `[]`
+  // exactly as v1's would be once the byte budget has dropped every row, and
+  // `truncated` says so.
+  const compact = discovery.compact;
+  const wrap = (kept: unknown[]): PaletteAction[] | ActionRows =>
+    kept.length === 0 ? [] : { ...compact, rows: kept as ActionRow[] };
+  const headerBytes = byteLength({ ...compact, rows: [] });
+  return { list: [...compact.rows], wrap, headerBytes };
+}
+
 function boundedView(
   id: string,
   loaded: ContextRowSet,
   sections: ReadonlySet<EntityContextSection>,
-  totalBytes: number,
-  sectionBytes: number,
-  messageBytes: number,
+  budget: ViewBudget,
 ): EntityContextView {
+  const { totalBytes, sectionBytes, messageBytes } = budget;
   let truncated = loaded.overfetched;
+  const actions = actionsSection(loaded.actions, budget.actionsSchema);
 
   const capped = {
     parents: capList(loaded.parents, sectionBytes),
     children: capList(loaded.children, sectionBytes),
     edges: capList(loaded.edges, sectionBytes),
     messages: capList(loaded.messages, messageBytes),
-    actions: capList(loaded.actions, sectionBytes),
+    actions: capList(actions.list, Math.max(0, sectionBytes - actions.headerBytes)),
   };
   for (const section of Object.values(capped)) truncated ||= section.truncated;
 
@@ -1268,7 +1388,7 @@ function boundedView(
     children: loaded.children.length,
     edges: loaded.edges.length,
     messages: loaded.messages.length,
-    actions: loaded.actions.length,
+    actions: actions.list.length,
   };
 
   let content: EntityContextView['content'];
@@ -1288,9 +1408,9 @@ function boundedView(
     children: lists.children as EntitySummary[],
     edges: lists.edges as EdgeView[],
     messages: lists.messages as MessageView[],
-    actions: lists.actions as PaletteAction[],
+    actions: actions.wrap(lists.actions),
     provenance: { operation: 'entities.context', fetchedAt, eventSeq: loaded.eventSeq },
-    cursors: cursorsFor(id, loaded, sections, lists, fetched),
+    cursors: cursorsFor(id, loaded, sections, lists, fetched, budget),
     byteSize: 0,
     truncated: false,
   });
@@ -1325,6 +1445,27 @@ function boundedView(
 }
 
 /**
+ * The `entities.feed --order newest` cursor that continues AFTER one message on
+ * `anchorId` — the same token `cursorsFor` mints for `cursors.messages`, for a
+ * caller (the change feed's `messagesNext`) that listed that message itself.
+ *
+ * `cursorCreatedAt` MUST be the `MICROS(created_at)` text of the message row,
+ * never a DTO timestamp — see LoadedContext.messageCursors.
+ */
+export function newestFeedCursorAfter(
+  anchorId: string,
+  anchorKind: string,
+  cursorCreatedAt: string,
+  messageId: string,
+): Cursor {
+  const scope = defaultScopeFor(anchorKind);
+  const fingerprint = feedCursorFingerprint({
+    entityId: anchorId, scope, order: 'newest', predicates: FEED_SCOPE_PREDICATES[scope],
+  });
+  return encodeCursor([fingerprint, cursorCreatedAt, messageId]);
+}
+
+/**
  * Continuation tokens, keyed by the operation that consumes them.
  *
  * `edges` is deliberately absent: `entities.connections` owns its own cursor
@@ -1337,12 +1478,25 @@ function cursorsFor(
   sections: ReadonlySet<EntityContextSection>,
   lists: Record<ListName, unknown[]>,
   fetched: Record<ListName, number>,
+  budget: ViewBudget,
 ): Record<string, Cursor | null> {
   const cursors: Record<string, Cursor | null> = {};
   if (sections.has('hierarchy')) {
     const last = lists.children.at(-1) as EntitySummary | undefined;
-    cursors['children'] = last && (loaded.overfetched || fetched.children > lists.children.length)
-      ? encodeCursor([last.position, last.id])
+    // `entities.children` consumes this, so it is that operation's token. When
+    // the byte caps dropped EVERY fetched child, the token starts at the first
+    // child: an empty list with a null cursor would claim there are none.
+    cursors['children'] = loaded.childrenOverfetched || fetched.children > lists.children.length
+      ? childCursor(id, last ? { position: last.position, id: last.id } : null)
+      : null;
+  }
+  // Only v2 rows carry a continuation: the cursor continues in
+  // `actions.list?schema=v2&contextEntityId=<id>&cursor=` (CLI:
+  // `tm8 action list --for <id> --cursor <c>`), the one consumer that pages.
+  if (sections.has('actions') && loaded.actions && budget.actionsSchema === 'v2') {
+    const last = lists.actions.at(-1) as ActionRow | undefined;
+    cursors['actions'] = last && fetched.actions > lists.actions.length
+      ? cursorAfter(loaded.actions, last[0])
       : null;
   }
   if (sections.has('messages') || sections.has('activity')) {

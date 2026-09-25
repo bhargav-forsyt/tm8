@@ -1,28 +1,28 @@
 {
   "schemaVersion": "tm8.conformance.w1.v1",
-  "catalogDigest": "sha256:3b2b97fc54418ed191f5bd2dbaf48f5176d0fa404b4d6ee397546cf3a1eedafa",
+  "catalogDigest": "sha256:1b1faa046bec1bba7a64797f80759ae65fb0f5d9d42313e237c80019287f1760",
   "catalog": {
-    "total": 197,
-    "v1": 195,
+    "total": 224,
+    "v1": 222,
     "reserved": 2,
-    "http": 195,
+    "http": 222,
     "ws": 1,
-    "registerableV1Http": 193,
+    "registerableV1Http": 220,
     "methods": {
-      "GET": 65,
-      "POST": 98,
-      "PATCH": 12,
-      "DELETE": 12,
-      "PUT": 8,
+      "GET": 74,
+      "POST": 108,
+      "PATCH": 14,
+      "DELETE": 14,
+      "PUT": 12,
       "WS": 2
     },
     "kinds": {
-      "read": 69,
-      "command": 126,
+      "read": 78,
+      "command": 144,
       "stream": 2
     },
-    "uniqueNames": 197,
-    "uniqueBindings": 196
+    "uniqueNames": 224,
+    "uniqueBindings": 223
   },
   "reservedOperations": [
     "search.query",
@@ -200,6 +200,76 @@
   ],
   "routes": {
     "http": [
+      {
+        "operation": "skills.roots",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/skills/roots",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.create",
+        "method": "POST",
+        "path": "/v2/spaces/:spaceId/skills",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.edit",
+        "method": "PATCH",
+        "path": "/v2/skills/:id",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.equip",
+        "method": "POST",
+        "path": "/v2/skills/:id/equip",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.unequip",
+        "method": "POST",
+        "path": "/v2/skills/:id/unequip",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.scan",
+        "method": "POST",
+        "path": "/v2/spaces/:spaceId/skills/scan",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.list",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/skills",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.preview",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/skills/preview",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "skills.show",
+        "method": "GET",
+        "path": "/v2/skills/:id",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "launch.suggest",
+        "method": "POST",
+        "path": "/v2/spaces/:spaceId/launch/suggest",
+        "status": "registered",
+        "source": "server-router"
+      },
       {
         "operation": "identity.get",
         "method": "GET",
@@ -579,6 +649,13 @@
         "source": "server-router"
       },
       {
+        "operation": "entities.commands.tick",
+        "method": "POST",
+        "path": "/v2/entities/:id/commands/tick",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
         "operation": "tracking.refresh",
         "method": "POST",
         "path": "/v2/tracking/refresh",
@@ -936,6 +1013,13 @@
         "source": "server-router"
       },
       {
+        "operation": "events.changes",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/events/changes",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
         "operation": "presence.get",
         "method": "GET",
         "path": "/v2/entities/:id/presence",
@@ -985,6 +1069,13 @@
         "source": "server-router"
       },
       {
+        "operation": "execution.sessions.share",
+        "method": "POST",
+        "path": "/v2/entities/:id/commands/sharing",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
         "operation": "execution.journal",
         "method": "GET",
         "path": "/v2/work-sessions/:workSessionId/journal",
@@ -1030,6 +1121,13 @@
         "operation": "execution.gitCommit",
         "method": "POST",
         "path": "/v2/work-sessions/:workSessionId/git/commit",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "execution.gitStage",
+        "method": "POST",
+        "path": "/v2/work-sessions/:workSessionId/git/stage",
         "status": "registered",
         "source": "server-router"
       },
@@ -1380,6 +1478,97 @@
         "operation": "credentials.loginSessions.finish",
         "method": "POST",
         "path": "/v2/identity/credentials/login-sessions/:id/finish",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.serviceKeys.status",
+        "method": "GET",
+        "path": "/v2/identity/credentials/service-keys",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.serviceKeys.put",
+        "method": "PUT",
+        "path": "/v2/identity/credentials/service-keys/:provider",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.serviceKeys.delete",
+        "method": "DELETE",
+        "path": "/v2/identity/credentials/service-keys/:provider",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.list",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/credentials",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.create",
+        "method": "POST",
+        "path": "/v2/spaces/:spaceId/credentials",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.rekey",
+        "method": "PUT",
+        "path": "/v2/space-credentials/:credentialId/secret",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.setDefault",
+        "method": "POST",
+        "path": "/v2/space-credentials/:credentialId/default",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.rename",
+        "method": "PATCH",
+        "path": "/v2/space-credentials/:credentialId",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.delete",
+        "method": "DELETE",
+        "path": "/v2/space-credentials/:credentialId",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.policy.get",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/credential-policy",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "credentials.space.policy.set",
+        "method": "PUT",
+        "path": "/v2/spaces/:spaceId/credential-policy/:provider",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "node.credentials.status",
+        "method": "GET",
+        "path": "/v2/node/credentials",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "node.credentials.policy.set",
+        "method": "PUT",
+        "path": "/v2/node/credential-policy/:provider",
         "status": "registered",
         "source": "server-router"
       },
@@ -1783,7 +1972,7 @@
         "projects.unlink"
       ]
     },
-    "unimplementedV1Http": 165
+    "unimplementedV1Http": 192
   },
   "schemas": {
     "additive": {
@@ -1833,7 +2022,7 @@
       },
       "entities.context": {
         "requestSchema": "EntityContextQuerySchema",
-        "resultSchema": "EntityContextViewSchema"
+        "resultSchema": "EntityContextResultSchema"
       },
       "interactionProfiles.propose": {
         "requestSchema": "ProposeInteractionProfileInputSchema",
@@ -1939,7 +2128,7 @@
       },
       "actions.list": {
         "requestSchema": null,
-        "resultSchema": "ActionDiscoveryResultSchema"
+        "resultSchema": "ActionListResultSchema"
       },
       "events.subscribe": {
         "requestSchema": null,
@@ -1949,6 +2138,166 @@
   },
   "help": {
     "operations": [
+      {
+        "operation": "skills.roots",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.roots",
+        "intentTags": [
+          "skills",
+          "roots"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.create",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.create",
+        "intentTags": [
+          "skills",
+          "create"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.edit",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.edit",
+        "intentTags": [
+          "skills",
+          "edit"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.equip",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.equip",
+        "intentTags": [
+          "skills",
+          "equip"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.unequip",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.unequip",
+        "intentTags": [
+          "skills",
+          "unequip"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.scan",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.scan",
+        "intentTags": [
+          "skills",
+          "scan"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.list",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.list",
+        "intentTags": [
+          "skills",
+          "list"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.preview",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.preview",
+        "intentTags": [
+          "skills",
+          "preview"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "skills.show",
+        "noun": "skill",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/skills.show",
+        "intentTags": [
+          "skills",
+          "show"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "launch.suggest",
+        "noun": "session",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/launch.suggest",
+        "intentTags": [
+          "launch",
+          "suggest"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
       {
         "operation": "identity.get",
         "noun": "identity",
@@ -2856,6 +3205,23 @@
         "publicComposite": null
       },
       {
+        "operation": "entities.commands.tick",
+        "noun": "entity",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/entities.commands.tick",
+        "intentTags": [
+          "entities",
+          "commands",
+          "tick"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
         "operation": "tracking.refresh",
         "noun": "tracking",
         "exposure": "public",
@@ -3677,7 +4043,7 @@
           "list"
         ],
         "inputSchemaRef": null,
-        "resultSchemaRef": "ActionDiscoveryResultSchema",
+        "resultSchemaRef": "ActionListResultSchema",
         "invocationSyntax": null,
         "actionDiscoverable": true,
         "reason": null,
@@ -3707,6 +4073,22 @@
         "intentTags": [
           "events",
           "poll"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "events.changes",
+        "noun": "event",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/events.changes",
+        "intentTags": [
+          "events",
+          "changes"
         ],
         "inputSchemaRef": null,
         "resultSchemaRef": null,
@@ -3830,6 +4212,23 @@
         "publicComposite": null
       },
       {
+        "operation": "execution.sessions.share",
+        "noun": "session",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/execution.sessions.share",
+        "intentTags": [
+          "execution",
+          "sessions",
+          "share"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
         "operation": "execution.journal",
         "noun": "session",
         "exposure": "public",
@@ -3938,6 +4337,23 @@
           "execution",
           "git",
           "commit"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "execution.gitStage",
+        "noun": "session",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/execution.gitStage",
+        "intentTags": [
+          "execution",
+          "git",
+          "stage"
         ],
         "inputSchemaRef": null,
         "resultSchemaRef": null,
@@ -4277,7 +4693,7 @@
           "context"
         ],
         "inputSchemaRef": "EntityContextQuerySchema",
-        "resultSchemaRef": "EntityContextViewSchema",
+        "resultSchemaRef": "EntityContextResultSchema",
         "invocationSyntax": null,
         "actionDiscoverable": true,
         "reason": null,
@@ -4782,6 +5198,234 @@
           "login",
           "sessions",
           "finish"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.serviceKeys.status",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.serviceKeys.status",
+        "intentTags": [
+          "credentials",
+          "service",
+          "keys",
+          "status"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.serviceKeys.put",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.serviceKeys.put",
+        "intentTags": [
+          "credentials",
+          "service",
+          "keys",
+          "put"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.serviceKeys.delete",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.serviceKeys.delete",
+        "intentTags": [
+          "credentials",
+          "service",
+          "keys",
+          "delete"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.list",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.list",
+        "intentTags": [
+          "credentials",
+          "space",
+          "list"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.create",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.create",
+        "intentTags": [
+          "credentials",
+          "space",
+          "create"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.rekey",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.rekey",
+        "intentTags": [
+          "credentials",
+          "space",
+          "rekey"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.setDefault",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.setDefault",
+        "intentTags": [
+          "credentials",
+          "space",
+          "set",
+          "default"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.rename",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.rename",
+        "intentTags": [
+          "credentials",
+          "space",
+          "rename"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.delete",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.delete",
+        "intentTags": [
+          "credentials",
+          "space",
+          "delete"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.policy.get",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.policy.get",
+        "intentTags": [
+          "credentials",
+          "space",
+          "policy",
+          "get"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "credentials.space.policy.set",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/credentials.space.policy.set",
+        "intentTags": [
+          "credentials",
+          "space",
+          "policy",
+          "set"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "node.credentials.status",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/node.credentials.status",
+        "intentTags": [
+          "node",
+          "credentials",
+          "status"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "node.credentials.policy.set",
+        "noun": "credential",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/node.credentials.policy.set",
+        "intentTags": [
+          "node",
+          "credentials",
+          "policy",
+          "set"
         ],
         "inputSchemaRef": null,
         "resultSchemaRef": null,
@@ -5959,6 +6603,39 @@
         },
         "migration": {
           "strategy": "graph-detail"
+        }
+      },
+      "drawing": {
+        "kind": "drawing",
+        "entityKind": true,
+        "route": {
+          "strategy": "collection",
+          "slug": "drawings"
+        },
+        "collection": {
+          "strategy": "typed-collection"
+        },
+        "projection": {
+          "strategy": "universal-typed"
+        },
+        "capabilities": {
+          "profile": "generic",
+          "genericCreate": true,
+          "genericPatch": true,
+          "genericMove": true,
+          "genericHierarchy": true,
+          "genericDeleteRestore": true,
+          "genericPoints": true,
+          "messages": true,
+          "reactions": true,
+          "connections": true,
+          "lifecycleOperations": []
+        },
+        "menu": {
+          "strategy": "registered-not-default"
+        },
+        "migration": {
+          "strategy": "drawing-detail"
         }
       },
       "chat": {

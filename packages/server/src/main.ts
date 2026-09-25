@@ -36,14 +36,20 @@ import { createDefaultScheduler, type Scheduler } from './scheduler/index.js';
 import { commandEnvelope } from './facade/context.js';
 import { createW2ExecutionDelivery, verifyDeliveryPrincipal } from './facade/services/w2/execution.js';
 import { HandlerRegistry, registerFacadeHandlers } from './facade/index.js';
+import { jevAdvisorForKey } from './jev/jev-adapter.js';
+import { createJevAdvisorResolver } from './jev/advisor.js';
+import type { SpaceCredentialProbe } from './credentials/space-credential-probe.js';
+import { DbServiceKeyStore } from './credentials/service-key-store.js';
 import { createW2BlobStore } from './files/w2-blob-store.js';
 import { createDeletedFileBlobPurgeJob, createFileUploadSweepJob } from './scheduler/jobs/file-uploads.js';
+import { createEventSubjectBackfillJob } from './scheduler/jobs/event-subject-backfill.js';
 import { createClipboardStore } from './files/clipboard-store.js';
 import { createLoopbackOwnerResolver } from './identity/loopback.js';
 import { createTrackingObserverJob } from './tracking/observer.js';
 import { createCommitRecorderJob } from './tracking/commit-recorder.js';
 import { createSessionIdentityResolver } from './http/identity-resolver.js';
 import { createForgeWatcherJob } from './tracking/loops.js';
+import { createTaskNudgeJob } from './tracking/task-nudges.js';
 import {
   dispatchSessionMessages,
   type DispatchableRoute,
@@ -60,7 +66,7 @@ import { createFacadeServer, type FacadeServer, type UpgradeTarget } from './htt
 import type { IdentityResolver, RequestIdentity } from './http/types.js';
 import { autoOwnerResolver } from './http/security.js';
 import { announceNodeClaim } from './identity/node-claim-boot.js';
-import { createStaticHandler, UI_2_0_MOUNT_PATH } from './http/static.js';
+import { createStaticHandler } from './http/static.js';
 import { createRemoteServerProxy } from './http/remote-proxy.js';
 import { createW2FileUploadRoute } from './http/w2-file-upload.js';
 import { createClipboardUploadRoute } from './http/clipboard-upload.js';
@@ -124,6 +130,12 @@ export interface BootstrapOptions {
    * empty registry is the current acceptance criterion rather than a gap.
    */
   readonly registry?: HandlerRegistry;
+  /**
+   * The vendor probe `credentials.space.create`/`rekey` run before storing a
+   * pasted key (SC-3, I6). Absent means the real vendor probe. A harness passes
+   * a deterministic one so a test run never calls a vendor over the network.
+   */
+  readonly spaceCredentialProbe?: SpaceCredentialProbe;
 }
 
 export interface BootstrappedServer {
@@ -195,6 +207,9 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
     ? createDb(config.databaseUrl, {
         idempotencyEnabled: config.idempotencyEnabled !== false,
         ...(config.dbPoolMax !== undefined ? { max: config.dbPoolMax } : {}),
+        ...(config.dbStatementTimeoutMs !== undefined
+          ? { statementTimeoutMillis: config.dbStatementTimeoutMs }
+          : {}),
       })
     : undefined;
   const dataDir = config.dataDir ?? resolveServerDataDir();
@@ -323,10 +338,16 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
    * Absent, they are simply not mounted — the honest degraded mode.
    */
   const credentials = execution
-    ? { launcher: new CredentialSessionLauncher({ pty: execution.pty }), dataDir }
+    ? {
+        launcher: new CredentialSessionLauncher({ pty: execution.pty }),
+        agentSessions: execution.spawnService,
+        dataDir,
+        ...(opts.spaceCredentialProbe ? { probeSpaceCredential: opts.spaceCredentialProbe } : {}),
+      }
     : undefined;
 
   if (db) {
+    const serviceKeys = new DbServiceKeyStore({ db, dataDir });
     registerFacadeHandlers(registry, {
       db,
       config,
@@ -341,6 +362,17 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
       ...(credentials ? { credentials } : {}),
       ...(chat ? { chat: { orchestrator: chat, dataDir } } : {}),
       ...(delivery ? { messageDelivery: delivery.messageDelivery } : {}),
+      // launch.suggest's Jev key, chosen PER REQUEST (Lane K): the caller's own
+      // TypeSafe key from Settings → agent credentials, else this node's
+      // TYPESAFE_API_KEY, else none — and every group answers `no_key`
+      // (design 01a0cb80 §8). The key is used here, server-side, and nowhere
+      // on the spawn path.
+      resolveJevAdvisor: createJevAdvisorResolver({
+        readMemberKey: (claims) => serviceKeys.resolve(claims, 'typesafe'),
+        nodeKey: process.env.TYPESAFE_API_KEY,
+        advisorForKey: jevAdvisorForKey,
+        logger: { warn: (message, fields) => console.warn(`[jev] ${message}`, fields ?? {}) },
+      }),
       resolveAuthoredFromWorkSessionId: async (ctx) => {
         const claimed = commandEnvelope(ctx).workSessionId ?? null;
         const pinned = ctx.identity.kind === 'bearer'
@@ -622,16 +654,6 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
     ...(voiceWebhook ? { voiceWebhookRoute: voiceWebhook } : {}),
     ...(remoteServerProxy ? { remoteServerProxy } : {}),
     ...(config.uiDir ? { staticHandler: createStaticHandler(config.uiDir) } : {}),
-    // The 2.0 bundle, when an operator configured one. Mounted rather than
-    // rooted so both UIs share this origin — and therefore the session cookie,
-    // without which switching lands you on a sign-in wall.
-    ...(config.ui20Dir
-      ? {
-          staticMounts: [
-            createStaticHandler(config.ui20Dir, { mountPath: UI_2_0_MOUNT_PATH }),
-          ],
-        }
-      : {}),
   });
 
   const { url } = await server.listen();
@@ -775,6 +797,26 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
         },
       }),
     );
+    const nudgeDispatch = (source: string) => (delivery
+      ? {
+          dispatch: async ({ routes, workSessionId }: {
+            routes: unknown;
+            workSessionId: string;
+          }) => {
+            await dispatchSessionMessages({
+              routes: Array.isArray(routes) ? (routes as DispatchableRoute[]) : [],
+              parentsById: new Map(),
+              requestId: `${source}:${workSessionId}`,
+              // A loop is not a session, so there is no authoring session and
+              // attribution is `recorded_only` — the same value 019 derives for
+              // any writer that is not an agent.
+              sourceWorkSessionId: null,
+              senderAttribution: 'recorded_only',
+              delivery: delivery.messageDelivery as unknown as MessageDeliveryPort,
+            });
+          },
+        }
+      : {});
     // Tier 3 forge closed loops: the WATCHER, which is the complement of the
     // queue drainer above. It decides for itself what to poll (the watch
     // list) and turns semantic changes into messages in the owning session.
@@ -796,26 +838,36 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
         // message does. Absent when there is no execution runtime: the nudge is
         // still stored, it is simply never injected — the honest degraded mode,
         // and the same one `registerFacadeHandlers` takes above.
-        ...(delivery
-          ? {
-              dispatch: async ({ routes, workSessionId }: {
-                routes: unknown;
-                workSessionId: string;
-              }) => {
-                await dispatchSessionMessages({
-                  routes: Array.isArray(routes) ? (routes as DispatchableRoute[]) : [],
-                  parentsById: new Map(),
-                  requestId: `forge-watcher:${workSessionId}`,
-                  // The watcher is not a session, so there is no authoring
-                  // session and attribution is `recorded_only` — the same value
-                  // 019 derives for any writer that is not an agent.
-                  sourceWorkSessionId: null,
-                  senderAttribution: 'recorded_only',
-                  delivery: delivery.messageDelivery as unknown as MessageDeliveryPort,
-                });
-              },
-            }
-          : {}),
+        ...nudgeDispatch('forge-watcher'),
+      }),
+    );
+    // Prompt v2 §4 task-keyed loops (207): today only task_state — a live
+    // session whose task is cancelled, completed by someone else, or whose
+    // teammate is unassigned is told to stop and report. No provider calls.
+    scheduler.register(
+      createTaskNudgeJob({
+        db,
+        claims: async () => {
+          const o = await owner();
+          return {
+            identityId: o.identityId,
+            nodeAdmin: o.isNodeAdmin,
+            requestId: 'task-nudges',
+          };
+        },
+        ...nudgeDispatch('task-nudges'),
+      }),
+    );
+    // Migration 205's online subject_ids backfill. It runs on every node that
+    // applied 205 — until it finishes, the change feed refuses windows below
+    // the watermark — and each batch is its own short transaction.
+    scheduler.register(
+      createEventSubjectBackfillJob({
+        db,
+        claims: async () => {
+          const o = await owner();
+          return { identityId: o.identityId, nodeAdmin: o.isNodeAdmin, requestId: 'event-subject-backfill' };
+        },
       }),
     );
     // The file-upload slot sweep — expiry + staged-byte cleanup (094). Only
@@ -836,6 +888,7 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
     console.log('  tracking: observer draining the refresh queue every 60s');
     console.log('  tracking: commit recorder walking active worktrees every 60s');
     console.log('  tracking: forge watcher closing CI/conflict/review loops every 90s');
+    console.log('  events: subject_ids backfill indexing older events every 60s until done');
     if (blobStore) {
       console.log('  files: upload-slot sweep expiring slots and purging staged bytes every 10m');
       console.log('  files: deleted-blob purge reclaiming soft-deleted file bytes daily (30d grace)');
@@ -957,6 +1010,24 @@ export async function main(): Promise<void> {
       `  scheduler: ${scheduler ? `${scheduler.status().jobs.length} job(s) running (loops + retention stubs; backup NOT attached)` : 'NOT RUNNING (needs a database and an execution block)'}`,
     );
     console.log(`  ws: /v2/ws  ·  health: ${url}/health`);
+
+    // AUTO-RESUME, fire-and-forget and only here. `bootstrap` has already run
+    // ghost reconciliation, which is what files a SIGKILLed session under
+    // `server_restart`, so every restart-interrupted session is visible by now.
+    // Not awaited: resumes are staggered and a boot must not wait on them.
+    // Only `main()` does this, not `bootstrap`, so a test that boots a node
+    // never spawns real agent CLIs. TM8_AUTO_RESUME=off disables it.
+    void execution
+      ?.resumeInterrupted()
+      .then(({ resumed, errors }) => {
+        if (resumed.length > 0) {
+          console.log(`  auto-resume: resumed ${resumed.length} session(s) interrupted by the last restart`);
+        }
+        for (const problem of errors) {
+          console.log(`  auto-resume could not resume ${problem.sessionId}: ${problem.message}`);
+        }
+      })
+      .catch(() => undefined);
 
     // Close the pool as well as the listener. A pool left open holds the
     // process alive past the point the operator asked it to stop, which reads

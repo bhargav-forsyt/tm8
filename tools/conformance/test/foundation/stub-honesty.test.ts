@@ -26,7 +26,15 @@ describe('W1 stub route and honesty oracle', () => {
     const http = OPERATIONS.filter(({ method }) => method !== 'WS');
     // 162 -> 165 (W4/132): the three spaces.taskWorkflows routes.
     // 171 -> 195 (2026-09-03): the 24 HTTP containers.* rows. MEASURED.
-    expect(http).toHaveLength(195);
+    // 195 -> 196 (187): execution.sessions.share mounts one POST route.
+    // 195 -> 196 (2026-09-19, Changes surface phase 1): execution.gitStage. MEASURED.
+    // 196 -> 197 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    // 2026-09-23 (filesystem skills INTEGRATED WITH main): skills.scan/list/show/preview, all v1 HTTP (3 GET/read, 1 POST/command). MEASURED on the merged tree.
+    // 2026-09-23 F4 (#648): skills.roots/create/edit/equip/unequip, all mounted v1 HTTP. MEASURED on the merged tree.
+    // 206 -> 207 (Jev lane F): launch.suggest. MEASURED.
+    expect(http).toHaveLength(222); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */ // +10 space/node credentials (SC-3). +3 service keys (Jev lane K). MEASURED.
 
     for (const operation of http) {
       const response = await fetch(new URL(fixturePath(operation.path), baseUrl), {

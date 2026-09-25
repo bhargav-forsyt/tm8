@@ -189,6 +189,22 @@ export const KIND_ART = {
     'M2.4 6.2v4.6a1.8 1.8 0 0 0 1.8 1.8h1v1.6',
   ],
 
+  /**
+   * A pencil, and the stroke it left.
+   *
+   * The stroke is the half that carries the meaning. A pencil alone is an
+   * EDIT mark — it is what every "rename this" affordance in the app already
+   * uses — so a pencil by itself would read as "edit", not "a drawing". The
+   * loose line underneath is what makes it a hand-drawn thing rather than an
+   * action, and it is deliberately not straight: `graph` owns straight lines
+   * between nodes, and the two marks must not converge at 16px.
+   */
+  drawing: [
+    'M11.4 2.7 13.3 4.6 6.9 11 4.1 11.9 5 9.1z',
+    'M10.1 4 12 5.9',
+    'M2.6 14c1.6-1.5 3.1.6 4.7-.7',
+  ],
+
   /** A sealed package — an artifact is a published bundle, bytes and all. */
   artifact: ['M8 2.4 13.4 5.3v5.4L8 13.6 2.6 10.7V5.3z', 'M2.6 5.3 8 8.2l5.4-2.9', 'M8 8.2v5.4'],
 
@@ -319,15 +335,6 @@ export const VIEW_ART = {
     'M13.2 5.4 10.6 2.8 4.6 8.8v2.6h2.6z',
     'M9.4 4l2.6 2.6',
   ],
-  /* CodeBrain — a node on a wire into a closing angle bracket. Copied
-     verbatim from `tm8_ui_2.0`'s table so the two packages draw one view one
-     way; this snapshot has no CodeBrain SCREEN, but a ref the rail can be
-     asked to render still needs a mark. */
-  codebrain: [
-    'M2.6 8h10.8',
-    'M4.4 8a1.4 1.4 0 1 0 0-.1z',
-    'M13.4 4.6 10.4 8l3 3.4',
-  ],
   /**
    * A question mark, hook and dot (Help, 2026-08-19). Deliberately NOT a
    * circled `?` and NOT a lifebuoy: `KIND_ART.commit` is a bare ring and the
@@ -393,6 +400,17 @@ export const SURFACE_ART = {
     'M6.1 8.6h2.8',
   ],
 
+  /**
+   * A DIFF: a `+` row above a `−` row.
+   *
+   * Not the branch mark (`git`, below) and not a page: this surface is not
+   * about where the lane is or which document is open, it is about what the
+   * lines DID. Plus over minus is the one silhouette that says that without a
+   * word, and it is the same vocabulary `DiffView` draws inside the panel — so
+   * the tab and its contents agree at a glance.
+   */
+  changes: ['M3 5.4h2.4', 'M4.2 4.2v2.4', 'M7.4 5.4h5.6', 'M3 10.6h2.4', 'M7.4 10.6h5.6'],
+
   /** The branch mark, shared with the Git VIEW because it is the same idea. */
   git: VIEW_ART.git,
 
@@ -451,6 +469,7 @@ export const SURFACE_ART = {
 export const SURFACE_LABEL: Readonly<Record<ContentSurface, string>> = {
   terminal: 'Terminal',
   transcript: 'Transcript',
+  changes: 'Changes',
   git: 'Git',
   debug: 'Debug',
   graph: 'Graph',

@@ -129,6 +129,18 @@ describe('every EntityDetailPanel mount wires its seam-backed surfaces', () => {
     }
   });
 
+  it.each(hosts)('%s passes changesSurface at every mount', (_label, file) => {
+    for (const { block } of mounts.filter((m) => m.file === file)) {
+      expect(
+        block.includes('changesSurface'),
+        `an <EntityDetailPanel> in ${file} does not pass changesSurface, so its Changes chip ` +
+          'would render the "unavailable in this view" fallback — and the Changes chip is the ' +
+          'one a reviewer reaches for before committing, so an unwired host would look like ' +
+          'a session with nothing to review rather than a host with nothing wired',
+      ).toBe(true);
+    }
+  });
+
   it.each(hosts)('%s passes taskGitSection at every mount', (_label, file) => {
     for (const { block } of mounts.filter((m) => m.file === file)) {
       expect(
@@ -157,6 +169,17 @@ describe('every EntityDetailPanel mount wires its seam-backed surfaces', () => {
           'session on this host falls back to the blank canvas — a ring, a verdict and no ' +
           'post-mortem. Silent in exactly the way debugSurface and attachments were: the ' +
           'canvas still renders, it just says nothing',
+      ).toBe(true);
+    }
+  });
+
+  it.each(hosts)('%s passes sessionContextSurface at every mount', (_label, file) => {
+    for (const { block } of mounts.filter((m) => m.file === file)) {
+      expect(
+        block.includes('sessionContextSurface'),
+        `an <EntityDetailPanel> in ${file} does not pass sessionContextSurface, so a live ` +
+          'session on this host shows no context number on its panel bar — and nothing on ' +
+          'screen says one is missing',
       ).toBe(true);
     }
   });
@@ -230,6 +253,12 @@ describe('every EntityDetailPanel mount wires its seam-backed surfaces', () => {
           `${file} builds gitSurface inline; use gitSurfaceFor() so every host stays identical`,
         ).toBe(true);
       }
+      if (block.includes('changesSurface')) {
+        expect(
+          block.includes('changesSurfaceFor'),
+          `${file} builds changesSurface inline; use changesSurfaceFor() so every host stays identical`,
+        ).toBe(true);
+      }
       if (block.includes('taskGitSection')) {
         expect(
           block.includes('taskGitSectionFor'),
@@ -248,6 +277,13 @@ describe('every EntityDetailPanel mount wires its seam-backed surfaces', () => {
           `${file} builds sessionStatsSurface inline; use sessionStatsSurfaceFor() so the read ` +
             'stays one-shot and file-scanning on every host — a hand-rolled copy that polls ' +
             'would re-scan a whole transcript on a timer for a session that cannot change',
+        ).toBe(true);
+      }
+      if (block.includes('sessionContextSurface')) {
+        expect(
+          block.includes('sessionContextSurfaceFor'),
+          `${file} builds sessionContextSurface inline; use sessionContextSurfaceFor() so every ` +
+            'host polls the one shared tail read at the same liveness-gated pace',
         ).toBe(true);
       }
       if (block.includes('conversationSurface')) {

@@ -14,8 +14,9 @@
 //      capture trigger and the F1/F2 guards; keeping SQL out of this package
 //      makes that mistake impossible to make here.
 
-import type { CredentialProviderName } from '@tm8/contract';
-import type { CoordinatorKind } from '@tm8/prompt';
+import type { EffectiveSkills, SkillIndexEntry, CredentialProviderName, SpawnSelection } from '@tm8/contract';
+import type { CoordinatorKind, PromptVersion } from '@tm8/prompt';
+import type { WorkSessionUsage, WorkSessionUsageSource } from '../transcript/session-usage.js';
 
 export type { CoordinatorKind };
 
@@ -149,6 +150,97 @@ export interface GitHubCredentialPort {
   resolve(auth: GraphAuth): Promise<GitHubCredential | null>;
 }
 
+/** Providers a SPACE can hold a credential for (206 `space_credentials.provider`). */
+export const SPACE_CREDENTIAL_PROVIDERS = ['anthropic', 'openai', 'github'] as const;
+export type SpaceCredentialProvider = (typeof SPACE_CREDENTIAL_PROVIDERS)[number];
+export function isSpaceCredentialProvider(value: unknown): value is SpaceCredentialProvider {
+  return (SPACE_CREDENTIAL_PROVIDERS as readonly unknown[]).includes(value);
+}
+
+/**
+ * D5 policy as the resolver reads it (design 01a0cfa8 §4). `space[p]` is the
+ * space admin's allowed-source list (absent = every source); `node[p] === false`
+ * is the node admin forbidding node fallback (absent = allowed).
+ *
+ * ENFORCED ONLY HERE. Neither 206's spawn reader nor its manifest writer reads
+ * a policy (advisory A5), so `SpawnService` is the single choke point, and it
+ * applies the policy to a pinned, an inherited and a resumed id alike.
+ */
+export interface SpaceCredentialPolicies {
+  space: Partial<Record<SpaceCredentialProvider, readonly CredentialSource[]>>;
+  node: Partial<Record<SpaceCredentialProvider, boolean>>;
+}
+
+/** A usable space credential, opened for exactly one spawn or resume. */
+export type SpaceCredentialGrant =
+  | {
+      kind: 'secret';
+      credentialId: string;
+      provider: SpaceCredentialProvider;
+      shape: 'api_key' | 'token';
+      label: string;
+      displayLogin: string | null;
+      /** Never logged, never put in an error, never recorded (I5). */
+      secret: string;
+    }
+  | {
+      kind: 'login';
+      credentialId: string;
+      provider: SpaceCredentialProvider;
+      label: string;
+      displayLogin: string | null;
+      /** The login home, `<dataDir>/credentials/spaces/<space>/<credential>`. */
+      homeDir: string;
+    };
+
+/**
+ * Why a space credential is not usable. Every one refuses the launch: none of
+ * them is a reason to fall back to another source (I3).
+ */
+export type SpaceCredentialRefusalReason =
+  | 'no_default'
+  | 'not_found'
+  | 'pending'
+  | 'stale'
+  | 'revoked'
+  | 'unreadable';
+
+export type SpaceCredentialRepoint =
+  | { ok: true; credentials: ReadonlyArray<{ provider: SpaceCredentialProvider; spaceCredentialId: string }> }
+  | { ok: false; reason: 'inactive' };
+
+export type SpaceCredentialRead =
+  | { ok: true; grant: SpaceCredentialGrant }
+  | { ok: false; reason: SpaceCredentialRefusalReason };
+
+/**
+ * Server-owned access to SPACE credentials (206). Execution never imports a
+ * database driver or the node key. Every call runs under the CALLER's claims —
+ * for an agent, its root human launcher's — so membership is the launcher's,
+ * never the persona owner's.
+ *
+ * A thrown error means the question could not be answered (the DB is down,
+ * 206 is absent); the spawn path refuses on it rather than guessing.
+ */
+export interface SpaceCredentialPort {
+  readPolicies(auth: GraphAuth, spaceId: string): Promise<SpaceCredentialPolicies>;
+  /** `credentialId` null reads the space default. */
+  read(
+    auth: GraphAuth,
+    spaceId: string,
+    provider: SpaceCredentialProvider,
+    credentialId: string | null,
+  ): Promise<SpaceCredentialRead>;
+  /** The subset of `credentialIds` that is active AND visible to the caller now. */
+  activeIds(auth: GraphAuth, credentialIds: readonly string[]): Promise<ReadonlySet<string>>;
+  /**
+   * Resume (C3): the resumer becomes the recorded launcher of every space
+   * credential the session holds, and the recorded rows come back. `inactive`
+   * means one of them is no longer active (206 refuses the re-point whole).
+   */
+  repointSession(auth: GraphAuth, sessionId: string): Promise<SpaceCredentialRepoint>;
+}
+
 /**
  * Server-owned credential minting. Execution carries opaque claims but never
  * imports a database driver or sees a human bearer token.
@@ -180,6 +272,15 @@ export interface LoadSpawnContextInput {
    * teammate's injected memory set for this session only.
    */
   memoryIds?: string[];
+  /**
+   * The EXACT memory and skill sets for this session (design 01a0cb80 §5.2).
+   * When present it replaces the teammate's working set, the tasks'
+   * `remembers` sets and the equipped skills; a selected skill the teammate
+   * is not equipped with is loaded for this session only (no edge is
+   * written), and equipped skills left out are audited as `not-selected`.
+   * Absent, the load is exactly what it was before the field existed.
+   */
+  selection?: SpawnSelection;
 }
 
 /**
@@ -187,8 +288,11 @@ export interface LoadSpawnContextInput {
  * vendor credential, and ONLY their own; `'node'` = the node's machine
  * credential. There is deliberately no value naming another member — whose
  * credential a session may use is not a client-expressible decision.
+ * `'space'` = a credential the launch SPACE holds (design 01a0cfa8), usable by
+ * every member and re-checked against the caller's membership at spawn and at
+ * resume. A client may name a space credential's id, never an account (I1).
  */
-export type CredentialSource = 'member' | 'node';
+export type CredentialSource = 'member' | 'space' | 'node';
 /** The contract's complete provider set; an alias cannot drift during rollout. */
 export type CredentialProvider = CredentialProviderName;
 export type CredentialSources = Partial<Record<CredentialProvider, CredentialSource>>;
@@ -215,6 +319,12 @@ export interface SessionLaunchPosture {
   credentialSource?: CredentialSource | null;
   /** Provider-specific posture written by current manifests. */
   credentialSources?: StoredCredentialSources | null;
+  /**
+   * The exact space credential per provider whose source is `space`. Stored
+   * JSON, so read as `unknown` values and validated by the resolver: a `space`
+   * source with no usable id here refuses rather than re-resolving (M8a).
+   */
+  spaceCredentialIds?: Partial<Record<string, unknown>> | null;
 }
 
 /** A project as the server computed it — `workingDir` is graph truth (S11). */
@@ -266,6 +376,23 @@ export interface TaskContext {
    */
   threadRootMessageId?: string | null;
   threadChannelId?: string | null;
+  /**
+   * Other entities linked to this task, as REFERENCES only: outgoing
+   * `relates_to` (teammates, sessions) and incoming non-file `attached_to`
+   * (drawings, docs, artifacts), which is what the task attach palette writes.
+   * Oldest link first and bounded by the spawn read. `linkedTotal` is the exact
+   * count, so the prompt can declare what it left out. `title` is null for a
+   * work_session, which is referenced by id alone and never by transcript or
+   * title. `remembers` and `equips` are not here, because they reach the
+   * session whole: as injected memories and as skill-index entries.
+   */
+  linked?: Array<{
+    entityId: string;
+    kind: string;
+    link: string;
+    title: string | null;
+  }>;
+  linkedTotal?: number;
 }
 
 /**
@@ -303,17 +430,17 @@ export interface SpawnContext {
    * caller predating row #11) stay valid; absent is read as "none".
    */
   skills?: ManifestSkillContext[];
+  skillEquips?: import('./skills.js').ResolvedSkillRow[];
+  skillsScannedAt?: string | null;
+  skippedSkills?: import('@tm8/contract').SkippedSkill[];
   /**
-   * Skills the resolver dropped to stay inside its cap. Carried through to the
+   * Skills omitted by context selection or serialized index budgeting. Carried through to the
    * manifest so a truncated persona is visible rather than merely smaller.
    */
   droppedSkills?: string[];
 }
 
-export interface ManifestSkillContext {
-  name: string;
-  body: string;
-}
+export type ManifestSkillContext = SkillIndexEntry;
 
 export interface CreateWorkSessionInput {
   spaceId: string;
@@ -500,6 +627,16 @@ export interface ResumeRequest {
  * sibling (`WorktreeReconcileReport`) already has, for the reason that sibling's
  * failures reach the operator at boot and this one's did not.
  */
+/**
+ * What boot-time auto-resume did. `errors` is per session and non-fatal: one
+ * session that cannot come back (cap reached, rollout missing, tool without a
+ * resume contract) must not keep the rest down.
+ */
+export interface AutoResumeReport {
+  readonly resumed: readonly string[];
+  readonly errors: readonly { readonly sessionId: string; readonly message: string }[];
+}
+
 export interface GhostReconcileReport {
   readonly retired: number;
   /** Empty on a clean sweep. Non-empty means rows were left claiming to be alive. */
@@ -540,6 +677,18 @@ export interface GraphPort {
     sessionId: string,
     profile: ResolvedInteractionProfileContext,
   ): Promise<InteractionProfilePinContext>;
+  /**
+   * Prompt v2 (spec ca8d §2.2): the task's `tm8.entity-context.v2` view, read
+   * through the same bounded projection `tm8 entity context <task>` serves and
+   * rendered AS THE SPAWNED SESSION'S ACTOR, so `you:true` and every
+   * caller-relative field match the agent's own first read. Optional: a graph
+   * without it (test fakes, older embedders) degrades the v2 header to "run
+   * `tm8 entity context` first" rather than failing the launch.
+   */
+  loadTaskContextSnapshot?(
+    auth: GraphAuth,
+    input: { sessionId: string; taskId: string; totalBytes: number },
+  ): Promise<Record<string, unknown>>;
   /** Mint a credential bound to this exact work-session/persona pair. */
   issueWorkSessionAgentToken(
     auth: GraphAuth,
@@ -591,6 +740,23 @@ export interface GraphPort {
     input: { sessionId: string; clientMutationId: string | null; nodeId: string | null },
   ): Promise<ResumeWorkSessionResult>;
   /**
+   * `public.record_work_session_usage` (185) — the whole-conversation provider
+   * usage read from the agent's own transcript once its process is gone.
+   *
+   * NOT a transition and never on the transition path: it is written AFTER
+   * the ending is recorded, best-effort, by a caller that swallows its own
+   * failure. A session whose transcript was already deleted, or lives on
+   * another node, simply keeps `usage = NULL` — which the column comment says
+   * must render as "never measured", not as zero. Resolves whether a row was
+   * written (false = the session row was gone).
+   */
+  recordWorkSessionUsage(
+    auth: GraphAuth,
+    sessionId: string,
+    usage: WorkSessionUsage,
+    source: WorkSessionUsageSource,
+  ): Promise<boolean>;
+  /**
    * `public.execution_record_native_session` — write-once native-id capture.
    * Resolves `false` when the row already held a DIFFERENT id, which is a
    * capture bug upstream and must be surfaced, never swallowed.
@@ -626,6 +792,22 @@ export interface GraphPort {
     auth: GraphAuth,
     nodeId: string,
   ): Promise<Array<{ sessionId: string; status: WorkSessionStatus }>>;
+  /**
+   * Agent sessions on THIS node that a server restart interrupted at or after
+   * `since` — the candidates boot-time auto-resume brings back.
+   *
+   * A read, like its sibling above, and scoped to `node_id` for the same
+   * reason: only the node that held the PTY knows the conversation lives on
+   * its disk. Narrowed to `ended_kind = 'server_restart'` because that is the
+   * one ending that says, first-hand or by reconciliation, "nothing was wrong
+   * with this session" — a crash, an OOM kill or an operator stop is not
+   * something a boot should quietly undo.
+   */
+  listNodeInterruptedSessions(
+    auth: GraphAuth,
+    nodeId: string,
+    since: Date,
+  ): Promise<Array<{ sessionId: string; exitedAt: Date }>>;
 
   // --- worktree provisioning (design §4) --------------------------------------
   //
@@ -731,6 +913,13 @@ export interface GraphPort {
  */
 export interface Tm8Manifest {
   manifestVersion: '1';
+  /**
+   * Which prompt frame this launch was booted with — the analytics tag that
+   * splits journals and first-read metrics by version (spec ca8d §6.3). Not
+   * the document shape; that is `manifestVersion`. The value comes from
+   * `@tm8/prompt`'s `prompt-version.ts`, never a literal here.
+   */
+  promptVersion: PromptVersion;
   sessionId: string;
   spaceId: string;
   /** RFC3339. Stamped by the composer. */
@@ -779,6 +968,17 @@ export interface Tm8Manifest {
     credentialSource: CredentialSource | null;
     /** Provider-specific choices, recorded for debug, child inheritance and resume. */
     credentialSources: ResolvedCredentialSources;
+    /**
+     * The exact space credential for every provider whose source is `space`,
+     * and for no other (206's `record_session_manifest` checks both ways and
+     * records `session_space_credentials` from it). Absent when there are none.
+     */
+    spaceCredentialIds?: Partial<Record<SpaceCredentialProvider, string>>;
+    /**
+     * What each provider this launch authenticates actually ran on (D9): the
+     * auto choice resolved, so a node-key launch is visible as one.
+     */
+    effectiveCredentialSources?: Partial<Record<SpaceCredentialProvider, CredentialSource>>;
     /** Effective shell-command networking, independent of filesystem posture. */
     commandNetwork: CommandNetworkPolicy;
     /**
@@ -797,6 +997,8 @@ export interface Tm8Manifest {
     sandboxDegraded?: string | null;
     /** The exact shell command line the PTY runs. Reproducibility, not decoration. */
     command: string;
+    /** The Ask Jev run this launch came from, when it came from one. Absent otherwise — never null. */
+    jevRunId?: string;
   };
 
   session: {
@@ -813,10 +1015,11 @@ export interface Tm8Manifest {
 
   tasks: TaskContext[];
 
-  /** Skills the agent should load. G1A composes none — the graph-side skill
-   *  resolution is post-loop work. Emitted as an empty array rather than
-   *  omitted so the CLI's shape stays stable. */
-  skills: Array<{ name: string; body: string }>;
+  /** Equipped skill metadata and explicit load pointers, never bodies. */
+  skills: ManifestSkillContext[];
+  effectiveSkills?: EffectiveSkills;
+  /** Names omitted by relevance selection or the serialized index byte budget. */
+  droppedSkills?: string[];
 
   /**
    * Present for coordinated modes — the concrete return path, and since 176
@@ -856,10 +1059,22 @@ export interface SpawnRequest {
    * source can only resolve the CALLER'S OWN RLS-scoped credential.
    */
   credentialSources?: CredentialSources | null;
+  /**
+   * A pinned space credential per provider. Valid ONLY for a provider this
+   * same request sets to `space`; with any other source it is refused.
+   */
+  spaceCredentialIds?: Partial<Record<SpaceCredentialProvider, string>> | null;
   title?: string | null;
   promptExtra?: string | null;
   /** Spawn-time memory hand-off (D3a); see `LoadSpawnContextInput.memoryIds`. */
   memoryIds?: string[];
+  /** The exact memory and skill sets; see `LoadSpawnContextInput.selection`. */
+  selection?: SpawnSelection;
+  /**
+   * The Ask Jev run this launch came from. Written to the manifest as
+   * `launch.jevRunId` and otherwise never interpreted by execution.
+   */
+  jevRunId?: string;
   /** S12: untrusted projects require per-spawn consent. */
   confirmUntrusted?: boolean;
   clientMutationId?: string | null;

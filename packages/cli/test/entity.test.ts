@@ -26,7 +26,7 @@
  * hand-wrote a URL, or bound the wrong operation name, the command and the
  * catalog disagree and the row fails.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -441,6 +441,61 @@ describe('entity update', () => {
     await drive(['entity', 'update', ENT, '--expect-version', '3', '--title', 'x']);
     expect((seen[0]?.body as { expectedVersion?: unknown }).expectedVersion).toBe(3);
   });
+
+  // The Server re-reads the row on a stale write and ships it under
+  // `details.current` (plus the RPC's `currentVersion`). Both used to be
+  // dropped, so every conflict cost the caller a re-read to learn the version.
+  describe('a version_conflict carries what the write lost to', () => {
+    const current = {
+      id: ENT,
+      kind: 'task',
+      title: 'Ship it',
+      version: 5,
+      parentId: null,
+      createdBy: { id: ACTOR, kind: 'team_member', displayName: 'Ada' },
+      counters: {},
+      state: { kind: 'task', status: 'working', priority: 'high' },
+      content: { kind: 'task', description: 'x'.repeat(10_000) },
+      hierarchy: { parents: [], children: [] },
+      connections: [],
+    };
+    beforeEach(() => {
+      reply = {
+        status: 409,
+        body: {
+          error: {
+            code: 'version_conflict',
+            message: `version conflict on ${ENT}`,
+            details: { sqlstate: '40001', entityId: ENT, currentVersion: 5, current },
+            requestId: 'req_c',
+            retryable: false,
+          },
+        },
+      };
+    });
+
+    it('human stderr names currentVersion and a one-line current state; exit stays 6', async () => {
+      const r = await drive(['entity', 'update', ENT, '--expect-version', '3', '--title', 'x']);
+      expect(r.code).toBe(6);
+      expect(r.stdout).toBe('');
+      expect(r.stderr.split('\n').filter(Boolean)).toEqual([
+        `tm8: version_conflict: version conflict on ${ENT} · requestId: req_c`,
+        '  currentVersion: 5',
+        '  current: task "Ship it" · status: working',
+      ]);
+    });
+
+    // JSON error output belongs to the receipts contract (stdout); stderr
+    // stays the same human text under every format, and never the whole row.
+    it('--format json keeps the same human stderr and leaves stdout empty; exit stays 6', async () => {
+      const r = await drive(['entity', 'update', ENT, '--expect-version', '3', '--title', 'x', '--format', 'json']);
+      expect(r.code).toBe(6);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain('  currentVersion: 5\n');
+      expect(r.stderr).toContain('  current: task "Ship it" · status: working\n');
+      expect(r.stderr).not.toContain('xxxxxxxxxx');
+    });
+  });
 });
 
 describe('entity move', () => {
@@ -584,16 +639,56 @@ describe('entity query', () => {
  * is now the honest answer for them.
  */
 describe('entity context', () => {
-  it('the bare form still sends no query parameters', async () => {
+  // M2/S5 (c761 §9): text output is v2 for every caller, immediately.
+  it('the bare form asks for v2 and nothing else; --schema v1 is the escape', async () => {
     const r = await drive(['entity', 'context', ENT]);
     expect(r.code).toBe(0);
-    expect(seen[0]?.query).toBe('');
+    expect(seen[0]?.query).toBe('?schema=v2');
+    const v1 = await drive(['entity', 'context', ENT, '--schema', 'v1']);
+    expect(v1.code).toBe(0);
+    expect(seen[1]?.query).toBe('?schema=v1');
   });
 
   it('--sections is sent as ONE comma-separated value, the shape the Server splits', async () => {
     const r = await drive(['entity', 'context', ENT, '--sections', 'summary,actions']);
     expect(r.code).toBe(0);
-    expect(seen[0]?.query).toBe('?sections=summary%2Cactions');
+    expect(seen[0]?.query).toBe('?schema=v2&sections=summary%2Cactions');
+  });
+
+  // The v1 actions section: reached by `--schema v1` for an agent (v2 lists
+  // actions in notLoaded[] instead), and by a non-agent json read's v1 default.
+  describe('the v1 actions section rolls out to tm8.actions.v2 rows', () => {
+    afterEach(() => {
+      delete process.env.TM8_JOURNAL_CLASS;
+    });
+
+    it('asks for v2 rows for an agent-class structured read, silently', async () => {
+      process.env.TM8_JOURNAL_CLASS = 'agent';
+      const r = await drive(['entity', 'context', ENT, '--format', 'json', '--schema', 'v1']);
+      expect(r.code).toBe(0);
+      expect(seen[0]?.query).toBe('?schema=v1&actionsSchema=v2');
+      expect(r.stderr).toBe('');
+    });
+
+    it('keeps a non-agent --format json read on v1 with a notice; --actions-schema pins either', async () => {
+      process.env.TM8_JOURNAL_CLASS = 'human';
+      const legacy = await drive(['entity', 'context', ENT, '--format', 'json']);
+      expect(seen[0]?.query).toBe('');
+      expect(legacy.stderr).toMatch(/still emits the v1 shape.*--actions-schema v2/s);
+
+      const pinned = await drive(['entity', 'context', ENT, '--format', 'json', '--actions-schema', 'v2']);
+      expect(seen[1]?.query).toBe('?actionsSchema=v2');
+      expect(pinned.stderr).not.toMatch(/--actions-schema/);
+
+      // No actions section, no question about its shape.
+      const none = await drive(['entity', 'context', ENT, '--format', 'json', '--sections', 'summary']);
+      expect(seen[2]?.query).toBe('?sections=summary');
+      expect(none.stderr).not.toMatch(/--actions-schema/);
+      // Only the context rollout notice (c761 §9), which `--schema` silences.
+      expect(none.stderr).toMatch(/`tm8 entity context` --format json still emits the v1 shape.*--schema v2/s);
+      await drive(['entity', 'context', ENT, '--format', 'json', '--sections', 'summary', '--schema', 'v1']);
+      expect(seen[3]?.query).toBe('?schema=v1&sections=summary');
+    });
   });
 
   it('--total-bytes and --section-bytes bind as integers', async () => {
@@ -610,7 +705,11 @@ describe('entity context', () => {
     expect(r.code).toBe(2);
     expect(seen).toHaveLength(0);
     expect(r.stderr).toContain('bogus');
-    expect(r.stderr).toContain('summary|hierarchy|connections|messages|activity|actions');
+    expect(r.stderr).toContain('assignment|summary|hierarchy|blockers|connections|messages|actions');
+    const v1 = await drive(['entity', 'context', ENT, '--schema', 'v1', '--sections', 'summary,bogus']);
+    expect(v1.code).toBe(2);
+    expect(seen).toHaveLength(0);
+    expect(v1.stderr).toContain('summary|hierarchy|connections|messages|activity|actions');
   });
 
   it('a byte budget outside the frozen schema range fails locally with the bounds', async () => {
@@ -626,7 +725,37 @@ describe('entity context', () => {
     }
   });
 
-  for (const flag of ['--depth', '--messages', '--children', '--edge-type']) {
+  it('journals the schemaVersion the Server returned (spec ca8d §6.3)', async () => {
+    const { journal } = await import('../src/journal.js');
+    const noted = vi.spyOn(journal, 'noteContextRead');
+    try {
+      reply = {
+        status: 200,
+        body: { data: { schemaVersion: 'tm8.entity-context.v1', root: { id: ENT } }, requestId: 'req_t' },
+      };
+      const r = await drive(['entity', 'context', ENT, '--format', 'json']);
+      expect(r.code).toBe(0);
+      expect(noted).toHaveBeenCalledTimes(1);
+      expect(noted).toHaveBeenCalledWith('tm8.entity-context.v1');
+    } finally {
+      noted.mockRestore();
+    }
+  });
+
+  it('journals null — never skips the read — when the response names no schemaVersion', async () => {
+    const { journal } = await import('../src/journal.js');
+    const noted = vi.spyOn(journal, 'noteContextRead');
+    try {
+      reply = { status: 200, body: { data: { root: { id: ENT } }, requestId: 'req_t' } };
+      const r = await drive(['entity', 'context', ENT, '--format', 'json']);
+      expect(r.code).toBe(0);
+      expect(noted).toHaveBeenCalledWith(null);
+    } finally {
+      noted.mockRestore();
+    }
+  });
+
+  for (const flag of ['--depth', '--messages', '--children']) {
     it(`${flag} is an ordinary unknown option now — the refusal quotes the REAL syntax`, async () => {
       const r = await drive(['entity', 'context', ENT, flag, '1']);
       expect(r.code).toBe(2);
@@ -635,6 +764,15 @@ describe('entity context', () => {
       expect(r.stderr).toContain('--sections');
     });
   }
+
+  // S3b: --edge-type is a real flag again, but only as the v2 connections
+  // filter; anywhere else it is refused before anything is sent.
+  it('--edge-type outside a v2 connections read is a usage error that sends nothing', async () => {
+    const r = await drive(['entity', 'context', ENT, '--edge-type', 'tracks']);
+    expect(r.code).toBe(2);
+    expect(seen).toHaveLength(0);
+    expect(r.stderr).toContain('--schema v2 --sections connections');
+  });
 });
 
 /**

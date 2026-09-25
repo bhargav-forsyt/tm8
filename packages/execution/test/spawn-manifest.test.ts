@@ -10,6 +10,7 @@ import {
   buildAgentCommand,
   buildCodexArgs,
   CODEX_LOOPBACK_CONFIG_OVERRIDES,
+  DEFAULT_MODEL,
   composeEnv,
   composeManifest,
   resolveCommandNetworkPolicy,
@@ -21,6 +22,7 @@ import {
   withAgentPrompt,
 } from '../src/spawn/manifest.js';
 import type { SpawnContext, SpawnRequest } from '../src/spawn/types.js';
+import { DEFAULT_PROMPT_VERSION } from '@tm8/prompt';
 
 function context(overrides: Partial<SpawnContext['teamMember']> = {}): SpawnContext {
   return {
@@ -246,17 +248,28 @@ describe('resolveLaunchConfig', () => {
     ).toBe('member');
   });
 
-  it('ignores an unrecognised stored credentialSource instead of launching on it', () => {
-    expect(
+  it('refuses an unrecognised stored credentialSource instead of launching on another (M8a)', () => {
+    // SC-2: this used to degrade to auto. An unknown recorded source is what a
+    // NEWER build's source (as `space` was) looks like to an older reader, and
+    // auto would then move the child or the resume onto a different
+    // credential than the one it ran on — I3 says refuse.
+    expect(() =>
       resolveLaunchConfig(base, context(), {}, {
         accessMode: null,
         permissionMode: null,
         credentialSource: 'somebody-else' as never,
-      }).credentialSource,
-    ).toBeNull();
+      }),
+    ).toThrow(/does not understand/);
   });
 
   it('resolves each provider credential source independently and keeps legacy fallback', () => {
+    // Exhaustive over `CredentialProviderName`, kimi and groq included. Those
+    // two entries are INERT by construction and that is deliberate rather than
+    // an oversight: a claude-code session's per-provider choice is read under
+    // `anthropic` (see `AGENT_CREDENTIAL_PROVIDER`), and answering 'node' there
+    // skips the credential port entirely — which already skips the Kimi backend
+    // with it. A `credentialSources.kimi` would be a second, quieter way to
+    // express a choice that already has one, so nothing reads it.
     expect(resolveLaunchConfig(base, context(), {}).credentialSources).toEqual({
       anthropic: null,
       openai: null,
@@ -264,6 +277,8 @@ describe('resolveLaunchConfig', () => {
       hermes: null,
       cursor: null,
       github: null,
+      kimi: null,
+      groq: null,
     });
 
     expect(resolveLaunchConfig({
@@ -281,6 +296,8 @@ describe('resolveLaunchConfig', () => {
       hermes: null,
       cursor: 'node',
       github: 'member',
+      kimi: null,
+      groq: null,
     });
 
     // A new provider-specific choice overrides only its own legacy/global arm.
@@ -295,6 +312,8 @@ describe('resolveLaunchConfig', () => {
       hermes: 'node',
       cursor: 'node',
       github: 'member',
+      kimi: 'node',
+      groq: 'node',
     });
 
     // Existing manifests remain inheritable: their one source fans out only
@@ -311,6 +330,8 @@ describe('resolveLaunchConfig', () => {
       hermes: 'member',
       cursor: 'member',
       github: 'node',
+      kimi: 'member',
+      groq: 'member',
     });
   });
 
@@ -377,6 +398,11 @@ describe('resolveWorkdir', () => {
   });
 });
 
+/** The argv tail every default (`minimal`) Claude lane carries. */
+const MINIMAL =
+  ` --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
+  ` --settings '{"skillOverrides":{"claude-api":"off","dataviz":"off","fewer-permission-prompts":"off","init":"off","keybindings-help":"off","loop":"off","run":"off","schedule":"off","update-config":"off"}}'`;
+
 describe('buildAgentCommand', () => {
   const launch = {
     mode: 'worker' as const,
@@ -394,24 +420,24 @@ describe('buildAgentCommand', () => {
 
   it('maps the resolved access posture to Claude flags without escalating it', () => {
     expect(buildAgentCommand(launch, {})).toBe(
-      "claude --permission-mode acceptEdits --model 'opus'",
+      `claude --permission-mode acceptEdits --model 'opus'${MINIMAL}`,
     );
     // `auto` is a real Claude mode, passed through rather than approximated —
     // approximating it upward would be a silent escalation, downward a hang.
     expect(buildAgentCommand({ ...launch, permissionMode: 'auto' }, {})).toBe(
-      "claude --permission-mode auto --model 'opus'",
+      `claude --permission-mode auto --model 'opus'${MINIMAL}`,
     );
     expect(
       buildAgentCommand({ ...launch, permissionMode: 'bypassPermissions' }, {}),
-    ).toBe("claude --dangerously-skip-permissions --model 'opus'");
+    ).toBe(`claude --dangerously-skip-permissions --model 'opus'${MINIMAL}`);
   });
 
   it('honours restrictive Claude access and provider reasoning effort', () => {
     expect(buildAgentCommand({ ...launch, permissionMode: 'readOnly' }, {})).toBe(
-      "claude --permission-mode plan --model 'opus'",
+      `claude --permission-mode plan --model 'opus'${MINIMAL}`,
     );
     expect(buildAgentCommand({ ...launch, reasoningEffort: 'low' }, {})).toBe(
-      "claude --permission-mode acceptEdits --model 'opus' --effort low",
+      `claude --permission-mode acceptEdits --model 'opus' --effort low${MINIMAL}`,
     );
   });
 
@@ -420,7 +446,7 @@ describe('buildAgentCommand', () => {
     // class: unquoted it expands to `1` or `m` if such a file exists in the
     // workdir, and the agent silently starts on the wrong model.
     expect(buildAgentCommand({ ...launch, model: 'claude-opus-5[1m]' }, {})).toBe(
-      "claude --permission-mode acceptEdits --model 'claude-opus-5[1m]'",
+      `claude --permission-mode acceptEdits --model 'claude-opus-5[1m]'${MINIMAL}`,
     );
   });
 
@@ -785,6 +811,47 @@ describe('composeEnv', () => {
     expect('TM8_JOURNAL_PATH' in env).toBe(false);
   });
 
+  describe('CLAUDE_CODE_AUTO_COMPACT_WINDOW — removed, and stays removed', () => {
+    // tm8 used to pin every claude-code launch to a 200k auto-compaction
+    // window. That knob is gone: the harness's own default now decides where
+    // a session compacts, and no tm8 code names the variable. These pin both
+    // halves of "gone" — the launch never sets it, and composeEnv's allowlist
+    // never lets the server process's own value leak into a child.
+    const withLaunch = (overrides: Partial<Parameters<typeof resolveLaunchConfig>[0]>, member = {}) => {
+      const launch = resolveLaunchConfig({ ...base, ...overrides }, context(member), {});
+      return composeManifest({
+        sessionId: 'sess-compact',
+        request: { ...base, ...overrides },
+        context: context(member),
+        launch,
+        workdir: { mode: 'project', path: '/tmp/tm8-fixture' },
+        command: buildAgentCommand(launch, {}),
+        baseUrl: 'http://127.0.0.1:4610',
+      });
+    };
+
+    it('is ABSENT from a claude-code launch environment', () => {
+      const m = withLaunch({});
+      expect(m.launch.tool).toBe('claude-code');
+      expect('CLAUDE_CODE_AUTO_COMPACT_WINDOW' in composeEnv(m, '/tmp/m.json', 'http://x', {})).toBe(false);
+    });
+
+    it('is ABSENT from a codex launch environment', () => {
+      const m = withLaunch({}, { model: 'gpt-5.6-sol', agentTool: 'codex' });
+      expect(m.launch.tool).toBe('codex');
+      expect('CLAUDE_CODE_AUTO_COMPACT_WINDOW' in composeEnv(m, '/tmp/m.json', 'http://x', {})).toBe(false);
+    });
+
+    it('never inherits the variable from the server process', () => {
+      for (const member of [{}, { model: 'gpt-5.6-sol', agentTool: 'codex' }]) {
+        const env = composeEnv(withLaunch({}, member), '/tmp/m.json', 'http://x', {
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500000',
+        });
+        expect('CLAUDE_CODE_AUTO_COMPACT_WINDOW' in env).toBe(false);
+      }
+    });
+  });
+
   it('uses only the explicitly minted session credential and never inherits one', () => {
     const inherited = composeEnv(manifest, '/tmp/m.json', 'http://x', {
       TM8_AGENT_TOKEN: 'operator-token-must-not-cross',
@@ -827,6 +894,89 @@ describe('composeEnv', () => {
     const env = composeEnv(manifest, '/tmp/m.json', 'http://x', { CLAUDECODE: '1' });
     expect(env.CLAUDECODE).toBe('');
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBe('');
+  });
+
+  /**
+   * WHAT A KEYLESS CREDENTIAL HOME IS FOR, stated as the difference between two
+   * `composeEnv` calls that differ in ONE argument.
+   *
+   * `DbAgentCredentialHome.resolve` can find an `active` Kimi row whose key file
+   * it cannot read — a partial write, a restored backup, a hand-edited
+   * directory, a 0700 mode lost to an operator's `chown`. The question is what
+   * it hands back, and the two candidate answers produce the two environments
+   * below. They are asserted TOGETHER, in one test, because neither is
+   * interesting alone: the fix is the DELTA, and a test that only asserted the
+   * fixed arm would still pass if suppression were removed from both.
+   *
+   * Arm 1 (`undefined`) is the pre-fix behaviour and the reason this matters.
+   * The node's own `ANTHROPIC_API_KEY` is forwarded by `AUTH_ENV_KEYS`, and
+   * every line that would remove it lives inside `if (credentialHome)`. So a
+   * member who deliberately connected Kimi gets a `claude-code` session running
+   * on the NODE's Anthropic key: the wrong vendor, the wrong account billed, and
+   * nothing anywhere to say so. That is not the "has not connected" case the
+   * null return is documented for — that member connected, and the row says so.
+   *
+   * Arm 2 is the fix. A home with no `apiKey` still carries the provider, so
+   * suppression runs and `CLAUDE_CONFIG_DIR` is pinned to the member's own
+   * `kimi/` directory; the routing block is skipped because `apiKey` is absent.
+   * The session then starts with NO Anthropic credential at all and fails
+   * visibly and attributably, which is the behaviour the file's own header
+   * demands of a stale credential and is owed equally to an unreadable one.
+   */
+  it('a keyless credential home suppresses the node key that a null home leaves behind', () => {
+    const nodeEnv = { ANTHROPIC_API_KEY: 'sk-ant-node-account' };
+
+    // ARM 1 — no credential home. The node's key survives into the session.
+    const unresolved = composeEnv(manifest, '/tmp/m.json', 'http://x', nodeEnv);
+    expect(unresolved.ANTHROPIC_API_KEY).toBe('sk-ant-node-account');
+    expect(unresolved).not.toHaveProperty('CLAUDE_CONFIG_DIR');
+
+    // ARM 2 — an active kimi row whose key could not be read.
+    const keyless = composeEnv(manifest, '/tmp/m.json', 'http://x', nodeEnv, undefined, undefined, {
+      provider: 'kimi',
+      homeDir: '/var/lib/tm8/credentials/identity-alice',
+      configDir: '/var/lib/tm8/credentials/identity-alice/kimi',
+    });
+
+    // The node key is GONE — this single assertion is the finding.
+    expect(keyless).not.toHaveProperty('ANTHROPIC_API_KEY');
+    // And so is the other Anthropic precedence name, which the kimi row also
+    // suppresses: injecting neither while leaving `ANTHROPIC_AUTH_TOKEN` live
+    // would move the same silent fallback one variable to the left.
+    expect(keyless).not.toHaveProperty('ANTHROPIC_AUTH_TOKEN');
+    // Nothing was injected in its place. `apiKey` is absent, so the routing
+    // block is skipped: no bearer token and no Moonshot base URL, because there
+    // is no key to send to it. A base URL without a key is a 401 far from here.
+    expect(keyless).not.toHaveProperty('ANTHROPIC_BASE_URL');
+    // The CLI is pointed at the member's own directory, which holds no Anthropic
+    // login either, so there is no third place for a credential to come from.
+    expect(keyless.CLAUDE_CONFIG_DIR).toBe('/var/lib/tm8/credentials/identity-alice/kimi');
+  });
+
+  /**
+   * The same shape for Groq, where the variable is `OPENAI_API_KEY` and the
+   * suppression is therefore load-bearing in a way Anthropic's is not: it is
+   * BOTH the node key deleted and the key routing would have set. A keyless
+   * home must delete it and put nothing back.
+   */
+  it('a keyless groq home leaves no node OPENAI_API_KEY and no half-configured route', () => {
+    const env = composeEnv(
+      manifest,
+      '/tmp/m.json',
+      'http://x',
+      { OPENAI_API_KEY: 'sk-openai-node-account' },
+      undefined,
+      undefined,
+      {
+        provider: 'groq',
+        homeDir: '/var/lib/tm8/credentials/identity-alice',
+        configDir: '/var/lib/tm8/credentials/identity-alice/groq',
+      },
+    );
+
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    expect(env).not.toHaveProperty('OPENAI_BASE_URL');
+    expect(env.CODEX_HOME).toBe('/var/lib/tm8/credentials/identity-alice/groq');
   });
 });
 
@@ -957,6 +1107,9 @@ describe('composeManifest', () => {
     });
 
     expect(manifest.manifestVersion).toBe('1');
+    // §6.3: the analytics tag, from @tm8/prompt's single source of truth.
+    expect(manifest.promptVersion).toBe(DEFAULT_PROMPT_VERSION);
+    expect(manifest.promptVersion).toBe('1');
     expect(manifest.mode).toBe('coordinated-worker');
     expect(manifest.coordinator).toEqual({
       sessionId: 'coord-session-1',
@@ -985,6 +1138,36 @@ describe('composeManifest', () => {
       pinRevision: 0,
       snapshot: { profile: { source: 'core_default' } },
     });
+  });
+
+  it('stamps promptVersion "2" only when the pinned profile opts a worker mode into tm8.core.v2 (spec ca8d Q14)', () => {
+    const v2Profile = {
+      profileId: 'profile-v2',
+      profileVersion: 1,
+      templateKey: 'tm8.chat.core',
+      templateVersion: 1,
+      source: 'teammate_default' as const,
+      resolvedHash: 'hash-v2',
+      pinRevision: 1,
+      snapshot: { agentProjection: { promptPolicy: { kernelTemplate: 'tm8.core.v2' } } },
+    };
+    const compose = (mode: 'worker' | 'coordinated-worker' | 'coordinator', profile?: typeof v2Profile) =>
+      composeManifest({
+        sessionId: 'sess-v2',
+        request: { ...base, parentSessionId: 'coord-session-1' },
+        context: context(),
+        launch: { mode, model: 'opus', agentTool: 'claude-code', permissionMode: 'bypassPermissions' },
+        ...(profile ? { interactionProfile: profile } : {}),
+        workdir: { mode: 'project', path: '/tmp/tm8-fixture' },
+        command: 'claude',
+        baseUrl: 'http://127.0.0.1:4610',
+      });
+    expect(compose('worker', v2Profile).promptVersion).toBe('2');
+    expect(compose('coordinated-worker', v2Profile).promptVersion).toBe('2');
+    // Out of v2's scope: a coordinator on the same profile keeps v1.
+    expect(compose('coordinator', v2Profile).promptVersion).toBe('1');
+    // The core default (tm8.core.v1) keeps every worker on v1 — the rollout default.
+    expect(compose('worker').promptVersion).toBe(DEFAULT_PROMPT_VERSION);
   });
 
   it('titles a session from its first task, then from the persona', () => {
@@ -1016,5 +1199,48 @@ describe('composeManifest', () => {
     };
     expect(composeManifest({ ...args, context: withTask }).session.title).toBe('wire the prompt seam');
     expect(composeManifest({ ...args, context: context() }).session.title).toBe('Draco session');
+  });
+});
+
+// --- no spawn-time Jev ---------------------------------------------------------
+//
+// Jev is a launch-UI advisor now (design 01a0cb80 §7.4): spawn resolves nothing
+// from it. The launch block a plain spawn writes is exactly what it was before
+// spawn-time routing existed, minus the two always-null Jev blocks that #647
+// added. Pinning the key set means a field that sneaks back in — null or
+// not — fails here rather than in a reviewer's diff.
+
+describe('composeManifest launch block without Jev', () => {
+  const args = {
+    sessionId: 's-1',
+    request: base,
+    context: context(),
+    launch: resolveLaunchConfig(base, context(), {}),
+    workdir: { mode: 'project' as const, path: '/tmp/tm8-fixture' },
+    command: 'claude',
+    baseUrl: 'http://127.0.0.1:17777',
+  };
+
+  it('carries exactly the launch facts, with no routing or context-engineering block', () => {
+    const launch = composeManifest(args).launch;
+    expect(Object.keys(launch).sort()).toEqual([
+      'accessMode',
+      'command',
+      'commandNetwork',
+      'credentialSource',
+      'credentialSources',
+      'model',
+      'permissionMode',
+      'reasoningEffort',
+      'sandboxDegraded',
+      'tool',
+    ]);
+  });
+
+  it('resolves the model from the request, then the persona, then the default — nothing else', () => {
+    expect(resolveLaunchConfig({ ...base, model: 'claude-haiku-4-5-20251001' }, context(), {}).model).toBe('claude-haiku-4-5-20251001');
+    expect(resolveLaunchConfig(base, context(), {}).model).toBe('opus');
+    expect(resolveLaunchConfig(base, context({ model: null }), {}).model).toBe(DEFAULT_MODEL);
+    expect(resolveLaunchConfig(base, context(), {}).reasoningEffort).toBeNull();
   });
 });

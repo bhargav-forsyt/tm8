@@ -22,6 +22,7 @@ import {
   SHA256_HEX_RE,
 } from './contract.js';
 import { ArtifactManifestSchema } from './artifact-manifest.js';
+import type { SameShape } from './launch-suggest.js';
 import type {
   ArtifactsCreateInput, ArtifactsPreviewStartInput,
   ArtifactsPublishInput, ArtifactsRestoreInput,
@@ -50,24 +51,36 @@ import type {
   ContainersUnexposeInput, ContainersUpdateInput, SurfaceAttachGrant,
   ComposerInteractionPolicy, Connections, CorrectProjectAssociationInput,
   CreateEdgeInput, CreateEntityInput, CreateSpaceInput, CreateTaskInput, CreateVoiceTokenInput,
-  CredentialConnectionView, CredentialProviderName, CredentialsDeleteInput,
+  CredentialConnectionView, CredentialProviderName, CredentialRoutingView, CredentialsDeleteInput,
   CredentialsDeleteResult, CredentialsLoginSessionFinishInput,
   CredentialsLoginSessionFinishResult, CredentialsLoginSessionStartInput,
   CredentialsLoginSessionStartResult, CredentialsStatusView,
+  CredentialsServiceKeyDeleteInput, CredentialsServiceKeyDeleteResult,
+  CredentialsServiceKeyPutInput, CredentialsServiceKeysStatusView,
+  ServiceKeyProviderName, ServiceKeyView,
+  CredentialPolicySource, CredentialsSpaceCommandInput, CredentialsSpaceCreateInput,
+  CredentialsSpaceDeleteResult, CredentialsSpaceListView, CredentialsSpacePolicySetInput,
+  CredentialsSpacePolicySetResult, CredentialsSpacePolicyView, CredentialsSpaceRekeyInput,
+  CredentialsSpaceRenameInput, NodeCredentialPolicyEntry, NodeCredentialStatusEntry,
+  NodeCredentialsPolicySetInput, NodeCredentialsStatusView, SpaceCredentialPolicyEntry,
+  SpaceCredentialProviderName, SpaceCredentialShape, SpaceCredentialStatus, SpaceCredentialView,
   CustomEntityKind, CustomFieldDef, CustomFieldValue, DeleteMessageInput,
   DeliverySummary, EdgeCorrectionResult, EdgeGroup, EdgeView,
   EntityBadges, EntityCapabilities, EntityConnectionsQuery, EntityContent,
-  EntityContextQuery, EntityContextView, EntityCounters, EntityDetail,
+  EntityContextQuery, EntityContextResult, EntityContextV2View, EntityContextView, EntityCounters, EntityDetail,
   EntityFeedPage, EntityFeedQuery, EntityKind, EntityKindCreateInput,
   EntityKindDef, EntityKindUpdateInput, EntityStaleness, EntityState, EntitySummary, ErrorCode,
   ErrorDetails, ExecutionDispatchInput, ExecutionDispatchResult,
-  ExecutionPromptInput, ExecutionResumeInput, ExecutionSpawnInput,
+  ExecutionPromptInput, ExecutionResumeInput, ExecutionSpawnInput, SpawnSelection,
+  ExecutionSessionsShareInput,
   ExecutionStreamsAttachInput, ExecutionTerminateInput,
   ExecutionGitCheckpointInput, ExecutionGitRollbackInput, ExecutionGitCommitInput, ExecutionGitMergeInput,
   ExecutionGitCherryPickInput, ExecutionGitBranchInput, ExecutionGitStashInput,
+  ExecutionGitStageInput,
   FeedItem, FeedPolicy,
   FileAttachment, FileUploadCompleteInput, FileUploadGrant, FileUploadInitInput,
   GateTaskInput,
+  TickCriteriaInput,
   GraphEdgeView, GraphQuery, GraphResult, GrantPointsInput, HandoffListQuery, HandoffView,
   Hierarchy, HomeSnapshot, IdentityProfileUpdateInput, IdentityProfileView,
   InboxListQuery, InboxMarkReadInput, InboxRecipient,
@@ -78,7 +91,7 @@ import type {
   MessageDeliveryQuery, MessageDeliveryRecord,
   MessageChatTurnRecord, MessageDeliveryView, MessagePart, MessageView, MoveEntityInput,
   NavChannelNode,
-  NotificationItem, Page, PaletteAction, PatchEdgeInput, PatchEntityInput,
+  NotificationItem, Page, PaletteAction, ActionRows, ActionDiscoveryPage, ActionListResult, PatchEdgeInput, PatchEntityInput,
   PatchMessageInput, PatchTaskInput, PlacementInput, PointEventView,
   PostMessageInput, PostMessageWireInput, PresenceSnapshot, StartChatInput,
   StartChatResult,
@@ -106,14 +119,14 @@ import type {
   SessionLaunchRecord,
   SessionFileChange, SessionFileChanges, SessionFileHunk,
   SessionTranscriptEntry, SessionTranscriptPage, SessionTranscriptStats,
-  SessionTranscriptStuck,
+  SessionTranscriptStuck, SessionTranscriptContext,
   ResolveInviteInput, SpaceMemberRole, SpawnWorkdir, StatusCategory, StreamAttachGrant, TaskAxis, TaskAxisInput, TaskWorkflow, TaskWorkflowInput,
   Workflow, WorkflowInput, WorkflowState, WorkflowStateInput, WorkflowTransition, WorkflowTransitionInput,
   TeammateProfileDefaultView, ToolDiscoveryPolicy, TrackingPrMergeInput, TrackingRefreshInput,
   UndoToken, UpdateInteractionProfileDraftInput, UpdateMemberRoleInput, UpdateMenuInput,
   UpdateSpaceInput, ValidateInteractionProfileInput, VoiceParticipant, VoiceTokenGrant, WithdrawHandoffInput,
   ExecutionTerminalStartInput,
-  WorkInput, WorkSessionEndedKind, WorkSessionKind, WorkSessionShareMode, WorkSessionStatus, WorkSessionWorkdirMode, WorktreeStatus, WorkspaceControlAck, WorkspaceControlFrame,
+  WorkInput, WorkSessionDriveMode, WorkSessionEndedKind, WorkSessionKind, WorkSessionShareMode, WorkSessionStatus, WorkSessionWorkdirMode, WorktreeStatus, WorkspaceControlAck, WorkspaceControlFrame,
   WorkspaceEvent,
 } from './contract.js';
 import type { WireErrorBody } from './envelope.js';
@@ -153,6 +166,8 @@ export const CoreEntityKindSchema = z.enum([
   'chat',
   // Containers (177): a machine an agent runs in or drives.
   'container',
+  // Drawings (194): an Excalidraw canvas as an entity.
+  'drawing',
 ]);
 
 export const CustomEntityKindSchema = z.custom<CustomEntityKind>(
@@ -219,6 +234,23 @@ export const GraphContentInputSchema = z.object({
   source: z.string().nullable().optional(),
 }).passthrough();
 
+/**
+ * 194 — the drawing write door's input. Every member optional because a patch
+ * carries only what changed: the debounced editor sends `elements` and
+ * `appState` and never restates the title, and `null` MERGES in the door.
+ *
+ * The element shape is deliberately unpinned (`z.record(z.unknown())`): an
+ * Excalidraw element is ~30 fields of upstream's private shape, so pinning it
+ * would make every Excalidraw release a contract change for no safety we act
+ * on. The CONTAINER types are pinned, which is also what the doors check.
+ */
+export const DrawingContentInputSchema = z.object({
+  format: z.string().min(1).optional(),
+  elements: z.array(z.record(z.unknown())).optional(),
+  appState: z.record(z.unknown()).optional(),
+  files: z.record(z.unknown()).optional(),
+}).passthrough();
+
 export const WorkStatusSchema = z.enum(['open', 'pulled', 'working', 'in_review', 'done', 'blocked', 'cancelled']);
 /**
  * The closed four. `z.ZodType<StatusCategory>` on purpose: the annotation makes
@@ -233,6 +265,16 @@ export const WorkSessionStatusSchema: z.ZodType<WorkSessionStatus> =
   z.enum(['spawning', 'running', 'idle', 'exited', 'failed']);
 export const WorkSessionShareModeSchema: z.ZodType<WorkSessionShareMode> =
   z.enum(['none', 'space', 'explicit']);
+/**
+ * Mirrors `work_sessions.drive_mode`'s CHECK exactly — 187.
+ *
+ * TWO values, not three, and deliberately not a mirror of share_mode: watching
+ * has a per-person future ('explicit') that typing does not, and giving drive a
+ * value the gate does not read would be the same inert vocabulary 187's header
+ * complains about.
+ */
+export const WorkSessionDriveModeSchema: z.ZodType<WorkSessionDriveMode> =
+  z.enum(['owner', 'space']);
 /** Mirrors `work_sessions.session_kind`'s CHECK exactly — 083, widened by 101. */
 export const WorkSessionKindSchema: z.ZodType<WorkSessionKind> =
   z.enum(['agent', 'credential', 'shell']);
@@ -296,6 +338,20 @@ export function pageOf<T>(item: z.ZodType<T>): z.ZodType<Page<T>> {
     total: z.number().int().nonnegative().optional(),
   }).strict();
 }
+
+export const SkillIndexEntrySchema = z.object({
+  entityId: z.string(), name: z.string(), description: z.string(),
+  provider: z.enum(['claude', 'agents', 'codex', 'hermes', 'tm8']),
+  level: z.enum(['system', 'admin', 'user', 'project', 'nested', 'plugin', 'synced', 'session', 'space']),
+  sourcePath: z.string().optional(), loadPointer: z.string(), native: z.boolean(), hash: z.string().optional(),
+  allowImplicitInvocation: z.boolean().optional(),
+  viaTaskId: z.string().optional(),
+}).strict();
+export const EffectiveSkillsSchema = z.object({
+  native: z.array(SkillIndexEntrySchema), indexed: z.array(SkillIndexEntrySchema),
+  skipped: z.array(z.object({ entityId: z.string(), name: z.string(), hash: z.string().optional(), sourcePath: z.string().optional(), reason: z.string() }).strict()),
+  scannedAt: z.string().nullable(),
+}).strict();
 
 export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
   z.object({
@@ -407,12 +463,32 @@ export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
     sizeBytes: z.number().nonnegative(),
   }).strict(),
   z.object({
-    kind: z.enum(['spell', 'skill']),
+    kind: z.literal('skill'),
+    description: z.string().optional(),
+    equipped: z.boolean(),
+    changedOnDisk: z.boolean(),
+    provider: z.enum(['claude', 'agents', 'codex', 'hermes', 'tm8']),
+    level: z.enum(['system', 'admin', 'user', 'project', 'nested', 'plugin', 'synced', 'session', 'space']),
+    root: z.object({ kind: z.enum(['home', 'project', 'plugin', 'subdir']), ref: z.string().nullable() }).strict().optional(),
+    sourcePath: z.string().optional(),
+    dirName: z.string().optional(),
+    frontmatter: z.record(z.unknown()),
+    loaderMetadata: z.record(z.unknown()).optional(),
+    contentHash: z.string().optional(),
+    fileMtime: z.string().optional(),
+    bodyBytes: z.number().int().nonnegative().optional(),
+    bundle: z.object({ scripts: z.number().int().nonnegative(), references: z.number().int().nonnegative(), assets: z.number().int().nonnegative() }).strict().optional(),
+    missing: z.boolean(),
+    lastSeenAt: z.string().optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal('spell'),
     description: z.string().optional(),
     equipped: z.boolean(),
   }).strict(),
   z.object({
     kind: z.literal('work_session'),
+    skills: EffectiveSkillsSchema.optional(),
     status: WorkSessionStatusSchema,
     agentTool: z.string().nullable(),
     model: z.string().nullable(),
@@ -438,6 +514,22 @@ export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
     // Absent = a node that predates the field; explicit null = a run with no
     // persona, which renders the tool alone. See the DTO note in contract.ts.
     teammate: ActorSummarySchema.nullable().optional(),
+    // 187: whether a non-owner who may WATCH this terminal may also TYPE into
+    // it. Optional and not nullable for the usual additive reason — a pre-187
+    // node omits it and a reader takes the absence as 'owner', which is the
+    // rule that node is in fact enforcing.
+    //
+    // This arm is `.strict()`, and that is the whole reason this line exists:
+    // the projector emits whatever the entity reader produced, and a field the
+    // reader spreads but the schema does not name is not dropped, it is a
+    // refusal — `OffContractEventError` on `entity.upsert`, i.e. the space's
+    // event stream stops. The TS type gaining a field is only half of adding
+    // one.
+    driveMode: WorkSessionDriveModeSchema.optional(),
+    // 202: when a human last set the dials (null = never). Named here for the
+    // reason driveMode is above — this arm is `.strict()`, so a field the
+    // reader spreads and this schema does not name stops the event stream.
+    sharingSetAt: z.string().nullable().optional(),
   }).strict(),
   z.object({
     kind: z.literal('collection'),
@@ -492,6 +584,12 @@ export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
     graphType: z.string().min(1),
     nodeCount: z.number().int().nonnegative(),
     edgeCount: z.number().int().nonnegative(),
+  }).strict(),
+  // 194 — which canvas format, and how big. The scene itself is content.
+  z.object({
+    kind: z.literal('drawing'),
+    format: z.string().min(1),
+    elementCount: z.number().int().nonnegative(),
   }).strict(),
   // 176 — the chat row's facts. `runtimeState` is the durable claim about the
   // headless child; `turnState` is the queue. They are independent: a chat can
@@ -861,6 +959,20 @@ export const EntityContentSchema: z.ZodType<EntityContent> = z.lazy(() => z.unio
     layout: z.record(z.object({ x: z.number(), y: z.number() }).passthrough()),
     source: z.string().nullable(),
   }).passthrough(),
+  /*
+   * 194 — the Excalidraw scene. `passthrough` and `z.record(z.unknown())` are
+   * the point, not laxity: an Excalidraw element is ~30 fields of upstream's
+   * private shape, so pinning it would turn every Excalidraw release into a
+   * contract change while buying no safety we act on. What IS pinned is the
+   * container types, which is what the doors check too.
+   */
+  z.object({
+    kind: z.literal('drawing'),
+    format: z.string().min(1),
+    elements: z.array(z.record(z.unknown())),
+    appState: z.record(z.unknown()),
+    files: z.record(z.unknown()),
+  }).passthrough(),
   // A chat has no content beyond its summary (R5): the working directory and
   // the native session id are the two facts that stay server-side.
   z.object({ kind: z.literal('chat') }).strict(),
@@ -944,6 +1056,8 @@ const CollectionFiltersSchema = z.object({
     direction: z.enum(['incoming', 'outgoing']),
     entityId: EntityIdSchema,
   }).strict().optional(),
+  skillProvider: z.string().optional(), skillLevel: z.string().optional(), skillRoot: z.string().optional(), skillMissing: z.boolean().optional(),
+  skillEquipped: z.boolean().optional(),
   readyToPull: z.boolean().optional(),
   inReviewForActorId: EntityIdSchema.optional(),
   mentionedActorId: EntityIdSchema.optional(),
@@ -963,6 +1077,14 @@ const CollectionFiltersSchema = z.object({
   // encode this phase's incompleteness as a permanent law.
   category: z.array(StatusCategorySchema).optional(),
   deleted: z.enum(['exclude', 'only', 'include']).optional(),
+  // Memory text terms, any-of (collections.ts). Each term is trimmed and must
+  // survive it: a blank term is a substring of everything, the
+  // confident-EVERYTHING twin of the confident-zero the refinements below
+  // refuse. An empty array is refused for the same reason.
+  terms: z.array(z.string().trim().min(1)).min(1).optional(),
+  // Title substring (collections.ts). Trimmed and non-empty for the same
+  // reason `terms` is: a blank needle is a substring of every title.
+  titleContains: z.string().trim().min(1).max(200).optional(),
 }).strict().superRefine((f, ctx) => {
   // A22: refused, not silently empty. The two filters are kind-disjoint (no
   // row is both a task and a work_session), so their conjunction can only
@@ -1734,12 +1856,32 @@ export const AuthInviteSignupResultSchema: z.ZodType<AuthInviteSignupResult> = z
 // ledger is enabled.
 // ---------------------------------------------------------------------------
 
-/** All six declared login-terminal providers; credential storage remains shape-specific. */
+/**
+ * Every declared login-terminal provider; credential storage remains
+ * shape-specific.
+ *
+ * `kimi` and `groq` are login-terminal providers like the rest — same Connect
+ * button, same PTY, same probe — but the program that terminal runs is tm8's
+ * own paste harness rather than a vendor CLI, because neither vendor ships one.
+ * The wire does not distinguish them, and deliberately so: a client rendering
+ * a connection card needs the provider name and its status, not the mechanism
+ * by which the secret was captured.
+ */
 export const CredentialProviderNameSchema: z.ZodType<CredentialProviderName> =
-  z.enum(['anthropic', 'openai', 'github', 'gemini', 'hermes', 'cursor']);
+  z.enum(['anthropic', 'openai', 'github', 'gemini', 'hermes', 'cursor', 'kimi', 'groq']);
 
 /** Mirrors 083's `account_agent_credentials.status` CHECK exactly. */
 const CredentialStatusSchema = z.enum(['active', 'stale', 'revoked']);
+
+// `active` is not derivable from the rest of the card: a `kimi` entry that is
+// not connected still describes what connecting it would do, so the UI must be
+// told which sentence to write rather than inferring it from `connected`.
+export const CredentialRoutingViewSchema: z.ZodType<CredentialRoutingView> = z.object({
+  agentTool: z.string(),
+  role: z.literal('backend'),
+  counterpart: CredentialProviderNameSchema,
+  active: z.boolean(),
+}).strict();
 
 export const CredentialConnectionViewSchema: z.ZodType<CredentialConnectionView> = z.object({
   provider: CredentialProviderNameSchema,
@@ -1756,6 +1898,9 @@ export const CredentialConnectionViewSchema: z.ZodType<CredentialConnectionView>
   status: z.union([CredentialStatusSchema, z.literal('unavailable')]).nullable(),
   connectedAt: z.string().nullable(),
   lastVerifiedAt: z.string().nullable(),
+  // Nullable-never-absent, like `login` above: six of the eight providers route
+  // nothing, permanently.
+  routing: CredentialRoutingViewSchema.nullable(),
 }).strict();
 
 export const CredentialsStatusViewSchema: z.ZodType<CredentialsStatusView> = z.object({
@@ -1780,6 +1925,178 @@ export const CredentialsDeleteResultSchema: z.ZodType<CredentialsDeleteResult> =
     sessionId: z.string().optional(),
     reason: z.string(),
   }).strict()),
+}).strict();
+
+// ---------------------------------------------------------------------------
+// credentials.serviceKeys.* — keys tm8 uses server-side, never agent credentials
+// ---------------------------------------------------------------------------
+
+/** Deliberately NOT a member of `CredentialProviderNameSchema`: see the DTO. */
+export const ServiceKeyProviderNameSchema: z.ZodType<ServiceKeyProviderName> = z.enum(['typesafe']);
+
+/**
+ * The longest key accepted. TypeSafe keys are far shorter; the bound only keeps
+ * a pasted essay out of the ciphertext column (093's own bound is 4096 bytes).
+ */
+export const SERVICE_KEY_MAX_LENGTH = 1024;
+
+export const ServiceKeyViewSchema: z.ZodType<ServiceKeyView> = z.object({
+  provider: ServiceKeyProviderNameSchema,
+  connected: z.boolean(),
+  // Four characters at most: a hint for recognition, never enough to use.
+  keyHint: z.string().max(4).nullable(),
+  updatedAt: z.string().nullable(),
+  nodeFallback: z.boolean(),
+}).strict();
+
+export const CredentialsServiceKeysStatusViewSchema: z.ZodType<CredentialsServiceKeysStatusView> = z.object({
+  keys: z.array(ServiceKeyViewSchema),
+  store: z.enum(['present', 'absent']),
+}).strict();
+
+export const CredentialsServiceKeyPutInputSchema: z.ZodType<CredentialsServiceKeyPutInput> = z.object({
+  // Trimmed before the bound so a trailing newline from a paste is not a key
+  // character; whitespace INSIDE a key is refused because no API key has any.
+  apiKey: z.string().trim().min(8).max(SERVICE_KEY_MAX_LENGTH).regex(/^\S+$/, 'an API key contains no whitespace'),
+  clientMutationId: z.string().min(1).optional(),
+}).strict();
+
+export const CredentialsServiceKeyDeleteInputSchema: z.ZodType<CredentialsServiceKeyDeleteInput> = z.object({
+  clientMutationId: z.string().min(1).optional(),
+}).strict();
+
+export const CredentialsServiceKeyDeleteResultSchema: z.ZodType<CredentialsServiceKeyDeleteResult> = z.object({
+  provider: ServiceKeyProviderNameSchema,
+  revoked: z.boolean(),
+}).strict();
+
+// ---------------------------------------------------------------------------
+// credentials.space.* and node.credentials.* — space credentials (206)
+// ---------------------------------------------------------------------------
+
+export const SpaceCredentialProviderNameSchema: z.ZodType<SpaceCredentialProviderName> =
+  z.enum(['anthropic', 'openai', 'github']);
+export const SpaceCredentialShapeSchema: z.ZodType<SpaceCredentialShape> = z.enum(['login', 'api_key', 'token']);
+export const SpaceCredentialStatusSchema: z.ZodType<SpaceCredentialStatus> =
+  z.enum(['pending', 'active', 'stale', 'revoked']);
+export const CredentialPolicySourceSchema: z.ZodType<CredentialPolicySource> = z.enum(['member', 'space', 'node']);
+
+/** 206's label CHECK: 1..80 characters once trimmed. */
+export const SPACE_CREDENTIAL_LABEL_MAX_LENGTH = 80;
+/** The longest pasted secret accepted; 206 bounds the ciphertext at 8192 bytes. */
+export const SPACE_CREDENTIAL_SECRET_MAX_LENGTH = 4096;
+
+const SpaceCredentialLabelSchema = z.string().trim().min(1).max(SPACE_CREDENTIAL_LABEL_MAX_LENGTH);
+// Trimmed before the bound so a paste's trailing newline is not a key
+// character; whitespace INSIDE is refused because no API key or PAT has any.
+const SpaceCredentialSecretSchema = z.string().trim().min(8).max(SPACE_CREDENTIAL_SECRET_MAX_LENGTH)
+  .regex(/^\S+$/, 'a key contains no whitespace');
+
+export const SpaceCredentialViewSchema: z.ZodType<SpaceCredentialView> = z.object({
+  id: z.string(),
+  spaceId: z.string(),
+  provider: SpaceCredentialProviderNameSchema,
+  shape: SpaceCredentialShapeSchema,
+  label: z.string(),
+  isDefault: z.boolean(),
+  status: SpaceCredentialStatusSchema,
+  createdByAccountId: z.string().nullable(),
+  displayLogin: z.string().nullable(),
+  // Four characters at most: a hint for recognition, never enough to use.
+  keyHint: z.string().max(4).nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastUsedAt: z.string().nullable(),
+  lastProbeAt: z.string().nullable(),
+}).strict();
+
+export const CredentialsSpaceListViewSchema: z.ZodType<CredentialsSpaceListView> = z.object({
+  spaceId: z.string(),
+  credentials: z.array(SpaceCredentialViewSchema),
+}).strict();
+
+export const CredentialsSpaceCreateInputSchema: z.ZodType<CredentialsSpaceCreateInput> = z.object({
+  provider: SpaceCredentialProviderNameSchema,
+  shape: z.enum(['api_key', 'token']),
+  label: SpaceCredentialLabelSchema,
+  secret: SpaceCredentialSecretSchema,
+  clientMutationId: z.string().min(1).optional(),
+}).strict().refine(
+  // 206's provider/shape CHECK, stated here so the refusal names the rule
+  // instead of arriving as a constraint violation after the vendor probe.
+  (input) => (input.provider === 'github') === (input.shape === 'token'),
+  { message: 'github takes a token; anthropic and openai take an api_key', path: ['shape'] },
+);
+
+export const CredentialsSpaceRekeyInputSchema: z.ZodType<CredentialsSpaceRekeyInput> = z.object({
+  secret: SpaceCredentialSecretSchema,
+  clientMutationId: z.string().min(1).optional(),
+}).strict();
+
+export const CredentialsSpaceRenameInputSchema: z.ZodType<CredentialsSpaceRenameInput> = z.object({
+  label: SpaceCredentialLabelSchema,
+  clientMutationId: z.string().min(1).optional(),
+}).strict();
+
+export const CredentialsSpaceCommandInputSchema: z.ZodType<CredentialsSpaceCommandInput> = z.object({
+  clientMutationId: z.string().min(1).optional(),
+}).strict();
+
+export const CredentialsSpaceDeleteResultSchema: z.ZodType<CredentialsSpaceDeleteResult> = z.object({
+  credentialId: z.string(),
+  revoked: z.boolean(),
+  terminatedLoginSessionIds: z.array(z.string()),
+  terminatedAgentSessionIds: z.array(z.string()),
+  failures: z.array(z.object({
+    step: z.enum(['loginSession', 'agentSession', 'files']),
+    sessionId: z.string().optional(),
+    reason: z.string(),
+  }).strict()),
+}).strict();
+
+export const SpaceCredentialPolicyEntrySchema: z.ZodType<SpaceCredentialPolicyEntry> = z.object({
+  provider: SpaceCredentialProviderNameSchema,
+  allowedSources: z.array(CredentialPolicySourceSchema).nullable(),
+}).strict();
+
+export const NodeCredentialPolicyEntrySchema: z.ZodType<NodeCredentialPolicyEntry> = z.object({
+  provider: SpaceCredentialProviderNameSchema,
+  allowNode: z.boolean().nullable(),
+}).strict();
+
+export const CredentialsSpacePolicyViewSchema: z.ZodType<CredentialsSpacePolicyView> = z.object({
+  spaceId: z.string(),
+  providers: z.array(SpaceCredentialPolicyEntrySchema),
+  node: z.array(NodeCredentialPolicyEntrySchema),
+}).strict();
+
+export const CredentialsSpacePolicySetInputSchema: z.ZodType<CredentialsSpacePolicySetInput> = z.object({
+  // 206's A11 set rule: non-empty, no repeats. Null removes the policy.
+  allowedSources: z.array(CredentialPolicySourceSchema).min(1).max(3)
+    .refine((sources) => new Set(sources).size === sources.length, 'a source is named twice')
+    .nullable(),
+  clientMutationId: z.string().min(1).optional(),
+}).strict();
+
+export const CredentialsSpacePolicySetResultSchema: z.ZodType<CredentialsSpacePolicySetResult> = z.object({
+  spaceId: z.string(),
+  provider: SpaceCredentialProviderNameSchema,
+  allowedSources: z.array(CredentialPolicySourceSchema).nullable(),
+}).strict();
+
+export const NodeCredentialStatusEntrySchema: z.ZodType<NodeCredentialStatusEntry> = z.object({
+  provider: SpaceCredentialProviderNameSchema,
+  allowNode: z.boolean().nullable(),
+  envKeyPresent: z.boolean(),
+}).strict();
+
+export const NodeCredentialsStatusViewSchema: z.ZodType<NodeCredentialsStatusView> = z.object({
+  providers: z.array(NodeCredentialStatusEntrySchema),
+}).strict();
+
+export const NodeCredentialsPolicySetInputSchema: z.ZodType<NodeCredentialsPolicySetInput> = z.object({
+  allowNode: z.boolean().nullable(),
+  clientMutationId: z.string().min(1).optional(),
 }).strict();
 
 /**
@@ -1808,8 +2125,16 @@ export const CredentialsLoginSessionStartInputSchema:
     // There is deliberately no command/args/flags field: see the DTO.
     cols: TerminalDimSchema,
     rows: TerminalDimSchema,
+    spaceCredential: z.union([
+      z.object({ label: SpaceCredentialLabelSchema }).strict(),
+      z.object({ credentialId: z.string().uuid() }).strict(),
+    ]).optional(),
     clientMutationId: z.string().min(1).optional(),
-  }).strict();
+  }).strict().refine(
+    // 206: a space login exists for the two vendor CLIs a login terminal runs.
+    (input) => input.spaceCredential === undefined || input.provider === 'anthropic' || input.provider === 'openai',
+    { message: 'a space login exists only for anthropic and openai', path: ['provider'] },
+  );
 
 export const CredentialsLoginSessionStartResultSchema:
   z.ZodType<CredentialsLoginSessionStartResult> = z.object({
@@ -1818,6 +2143,7 @@ export const CredentialsLoginSessionStartResultSchema:
     provider: CredentialProviderNameSchema,
     expiresAt: IsoTimestamp,
     command: z.string().min(1),
+    spaceCredential: SpaceCredentialViewSchema.optional(),
   }).strict();
 
 export const CredentialsLoginSessionFinishInputSchema:
@@ -1838,6 +2164,7 @@ export const CredentialsLoginSessionFinishResultSchema:
     status: CredentialStatusSchema,
     stored: z.boolean(),
     terminated: z.boolean(),
+    spaceCredential: SpaceCredentialViewSchema.optional(),
   }).strict();
 
 export const UndoTokenSchema: z.ZodType<UndoToken> = z.object({
@@ -2155,7 +2482,9 @@ export const GrantPointsInputSchema: z.ZodType<GrantPointsInput> = z.object({
 export const CompleteTaskInputSchema: z.ZodType<CompleteTaskInput> = z.object({
   ...commandContextShape,
   expectedVersion: z.number().finite(),
-  completerIds: z.array(EntityIdSchema).min(1),
+  // a uuid, checked here: a non-uuid reached SQL and came back as not_found
+  // quoting raw Postgres text, which reads as "the TASK is missing".
+  completerIds: z.array(z.string().uuid({ message: 'completerIds (--by) must be actor ids (uuids)' })).min(1),
 }).strict();
 
 export const PullInputSchema: z.ZodType<PullInput> = z.object({
@@ -2201,6 +2530,13 @@ export const GateTaskInputSchema: z.ZodType<GateTaskInput> = z.object({
   ...commandContextShape,
   expectedVersion: z.number().finite(),
   gate: z.enum(['none', 'pr_merged']),
+}).strict();
+
+export const TickCriteriaInputSchema: z.ZodType<TickCriteriaInput> = z.object({
+  ...commandContextShape,
+  expectedVersion: z.number().finite(),
+  criterionIds: z.array(z.string().min(1)).min(1),
+  done: z.boolean().optional(),
 }).strict();
 
 export const TaskAxisInputSchema: z.ZodType<TaskAxisInput> = z.object({
@@ -2271,6 +2607,13 @@ export const UpdateSpaceInputSchema: z.ZodType<UpdateSpaceInput> = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   githubRepo: z.string().nullable().optional(),
+  // 187. This object is `.strict()`, so the keys have to be NAMED here or the
+  // request is a 400 at the door — `w2_update_space` would never see them, and
+  // the allow-list in `identity-spaces.ts` would be filtering a body that was
+  // already refused. Not nullable: there is no "unset" for a default, only the
+  // two postures, and the RPC validates the vocabulary again on its side.
+  sessionShareDefault: z.enum(['none', 'space']).optional(),
+  sessionDriveDefault: WorkSessionDriveModeSchema.optional(),
 }).strict();
 
 /** The role vocabulary, in one place, so the wire and the check constraint agree. */
@@ -2305,7 +2648,7 @@ export const UpdateMemberRoleInputSchema: z.ZodType<UpdateMemberRoleInput> = z.o
 // `board` widened 2026-08-16 in the same lockstep (the task kanban tab).
 // `help` widened 2026-08-19 in the same lockstep (the Help shelf). Menu-eligible
 // but not in the shipped default spine — see the type for why.
-export const MenuViewRefSchema = z.enum(['dashboard', 'feed', 'inbox', 'workspace', 'graph', 'channels', 'files', 'settings', 'git', 'messages', 'board', 'craft', 'help', 'codebrain']);
+export const MenuViewRefSchema = z.enum(['dashboard', 'feed', 'inbox', 'workspace', 'graph', 'channels', 'files', 'settings', 'git', 'messages', 'board', 'craft', 'help']);
 // `worktree` un-excluded 2026-07-31 in lockstep with the MenuKindRef type:
 // menu-visible, still not menu-creatable (creation stays with the saga).
 // `channel` un-excluded 2026-08-01, same lockstep — it became a collection
@@ -2718,14 +3061,25 @@ export const SpawnWorkdirSchema: z.ZodType<SpawnWorkdir> = z.discriminatedUnion(
 
 const SpawnUuidSchema = z.string().uuid();
 
-const CredentialSourceSchema = z.enum(['member', 'node']);
+const CredentialSourceSchema = z.enum(['member', 'space', 'node']);
 const CredentialSourcesSchema = z.object({
   anthropic: CredentialSourceSchema.optional(),
   openai: CredentialSourceSchema.optional(),
   github: CredentialSourceSchema.optional(),
 }).strict();
+const SpaceCredentialIdsSchema = z.object({
+  anthropic: SpawnUuidSchema.optional(),
+  openai: SpawnUuidSchema.optional(),
+  github: SpawnUuidSchema.optional(),
+}).strict();
 
-export const ExecutionSpawnInputSchema: z.ZodType<ExecutionSpawnInput> = z.object({
+/** `selection` (design 01a0cb80 §5.2): the exact sets, bounded like `memoryIds` and the skill index. */
+export const SpawnSelectionSchema = z.object({
+  memoryIds: z.array(SpawnUuidSchema).max(32),
+  skillIds: z.array(SpawnUuidSchema).max(128),
+}).strict();
+
+const executionSpawnInputObject = z.object({
   ...commandContextShape,
   clientMutationId: z.string().min(1),
   spaceId: SpawnUuidSchema,
@@ -2745,12 +3099,47 @@ export const ExecutionSpawnInputSchema: z.ZodType<ExecutionSpawnInput> = z.objec
   credentialSources: CredentialSourcesSchema.optional(),
   // Deprecated compatibility carrier. Provider-specific keys above win.
   credentialSource: CredentialSourceSchema.optional(),
+  spaceCredentialIds: SpaceCredentialIdsSchema.optional(),
   title: z.string().optional(),
   promptExtra: z.string().nullable().optional(),
   memoryIds: z.array(SpawnUuidSchema).max(32).optional(),
+  selection: SpawnSelectionSchema.optional(),
+  jevRunId: SpawnUuidSchema.optional(),
   cols: TerminalDimSchema,
   rows: TerminalDimSchema,
 }).strict();
+
+export const SPAWN_SELECTION_WITH_MEMORY_IDS_MESSAGE =
+  'selection and memoryIds cannot be combined: selection is the exact memory and skill set for the session, '
+  + 'memoryIds adds to the working set — send one or the other';
+
+export const ExecutionSpawnInputSchema: z.ZodType<ExecutionSpawnInput> = executionSpawnInputObject.superRefine(
+  (input, ctx) => {
+    if (input.selection && input.memoryIds !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['selection'],
+        message: SPAWN_SELECTION_WITH_MEMORY_IDS_MESSAGE,
+      });
+    }
+  },
+);
+
+type Assert<T extends true> = T;
+
+// The new fields' schema and type must agree key for key; `z.ZodType<T>`
+// alone cannot prove that for optional keys (see `SameShape`).
+export type SpawnSelectionShapeProof = [
+  Assert<SameShape<z.infer<typeof SpawnSelectionSchema>, SpawnSelection>>,
+  Assert<SameShape<
+    NonNullable<z.infer<typeof executionSpawnInputObject>['selection']>,
+    NonNullable<ExecutionSpawnInput['selection']>
+  >>,
+  Assert<SameShape<
+    z.infer<typeof executionSpawnInputObject>['jevRunId'],
+    ExecutionSpawnInput['jevRunId']
+  >>,
+];
 
 /**
  * execution.terminal.start — a vanilla shell session (101).
@@ -2827,6 +3216,24 @@ export const ExecutionStreamsAttachInputSchema: z.ZodType<ExecutionStreamsAttach
   mode: z.enum(['view', 'drive']),
 }).strict();
 
+/**
+ * At least one dial must be named. `.strict()` rejects unknown keys, and the
+ * refinement rejects the empty patch — the RPC refuses it too (22023), but a
+ * request that cannot do anything should not reach the database to find out.
+ */
+export const ExecutionSessionsShareInputSchema: z.ZodType<ExecutionSessionsShareInput> = z.object({
+  ...commandContextShape,
+  // No 'explicit'. It is readable on a stored row and not writable here — see
+  // ExecutionSessionsShareInput for why a value with no list behind it must not
+  // become settable through the first door that could set it.
+  shareMode: z.enum(['none', 'space']).optional(),
+  driveMode: z.enum(['owner', 'space']).optional(),
+  expectedVersion: z.number().int().nonnegative().optional(),
+}).strict().refine(
+  (v) => v.shareMode !== undefined || v.driveMode !== undefined,
+  { message: 'name shareMode, driveMode, or both' },
+) as z.ZodType<ExecutionSessionsShareInput>;
+
 export const ExecutionGitCheckpointInputSchema: z.ZodType<ExecutionGitCheckpointInput> = z.object({
   ...commandContextShape,
   message: z.string().min(1).optional(),
@@ -2843,6 +3250,39 @@ export const ExecutionGitCommitInputSchema: z.ZodType<ExecutionGitCommitInput> =
   message: z.string().min(1),
   paths: z.array(z.string().min(1)).optional(),
   all: z.boolean().optional(),
+}).strict();
+
+/**
+ * Stage/unstage. `paths` and `all` are both optional HERE and the SERVER
+ * refuses the empty pair — the refusal names which verb wanted what
+ * (`nothing_to_stage` / `nothing_to_unstage`), which a schema error could not.
+ */
+export const ExecutionGitStageInputSchema: z.ZodType<ExecutionGitStageInput> = z.object({
+  ...commandContextShape,
+  action: z.enum(['stage', 'unstage']),
+  paths: z.array(z.string().min(1)).optional(),
+  all: z.boolean().optional(),
+  /**
+   * PART of one file. Absent from this object, the outer `.strict()` refused
+   * every hunk request with `Unrecognized key(s) in object: 'hunks'` while the
+   * contract type advertised the field — the feature was unreachable over HTTP
+   * and nothing was red, because `z.ZodType<T>` is covariant in its output and
+   * a MISSING OPTIONAL KEY still satisfies it. The compiler cannot catch this
+   * class; `packages/server/test/facade/input-schema-seam.test.ts` does.
+   *
+   * `indices` mirrors the contract's `number[]` rather than tightening to
+   * positive integers, for the reason stated above about `paths`/`all`: the
+   * SERVER refuses out-of-range and non-integer indices by name
+   * (`no_hunks_selected`, `invalid_hunk_index`, `hunk_index_out_of_range`, and
+   * it names the offending index), and a zod error here would replace those
+   * with a generic one. Shape belongs to the schema; which hunks exist is a
+   * fact only the worktree has.
+   */
+  hunks: z.object({
+    path: z.string().min(1),
+    indices: z.array(z.number()),
+    digest: z.string().min(1).optional(),
+  }).strict().optional(),
 }).strict();
 
 export const ExecutionGitMergeInputSchema: z.ZodType<ExecutionGitMergeInput> = z.object({
@@ -2946,6 +3386,7 @@ export const SessionJournalRecordSchema: z.ZodType<SessionJournalRecord> = z.obj
     truncated: z.boolean(),
   }),
   calls: z.array(SessionJournalCallSchema),
+  contextRead: z.object({ schemaVersion: z.string().nullable() }).optional(),
   result: z.object({ exitCode: z.number().int(), error: z.string().nullable() }),
   tokens: z.object({
     estimator: z.literal('chars/4'),
@@ -3043,6 +3484,7 @@ export const SessionFileChangeSchema: z.ZodType<SessionFileChange> = z.object({
   linesRemoved: z.number().int().nonnegative(),
   hunks: z.array(SessionFileHunkSchema),
   hunksTruncated: z.boolean(),
+  lastTurn: z.boolean(),
 }).strict();
 
 export const SessionFileChangesSchema: z.ZodType<SessionFileChanges> = z.object({
@@ -3051,6 +3493,27 @@ export const SessionFileChangesSchema: z.ZodType<SessionFileChanges> = z.object(
   totalRemoved: z.number().int().nonnegative(),
   filesTruncated: z.boolean(),
   source: z.literal('transcript'),
+  turns: z.number().int().positive(),
+}).strict();
+
+const TokenCount = z.number().int().nonnegative().nullable();
+
+export const SessionTranscriptContextSchema: z.ZodType<SessionTranscriptContext> = z.object({
+  // Null is unknown and 0 is a reported zero — never collapsed into each other.
+  usedTokens: TokenCount,
+  capacityTokens: z.number().int().positive().nullable(),
+  cacheReadTokens: TokenCount,
+  requestInputTokens: TokenCount,
+  model: z.string().nullable(),
+  observedAt: IsoTimestamp.nullable(),
+  source: z.enum(['claude_request_usage', 'codex_request_usage']).nullable(),
+  capacitySource: z.enum(['provider', 'runtime']).nullable(),
+  unavailableReason: z.enum([
+    'not_reported',
+    'incomplete_usage',
+    'sample_outside_window',
+    'awaiting_new_sample',
+  ]).nullable(),
 }).strict();
 
 export const SessionTranscriptPageSchema: z.ZodType<SessionTranscriptPage> = z.object({
@@ -3079,6 +3542,8 @@ export const SessionTranscriptPageSchema: z.ZodType<SessionTranscriptPage> = z.o
   windowStart: z.number().int().nonnegative().nullable(),
   hasOlder: z.boolean(),
   fileChanges: SessionFileChangesSchema.nullable().optional(),
+  // Optional: an older server omits it, and that is distinct from null.
+  context: SessionTranscriptContextSchema.nullable().optional(),
 }).strict();
 
 // ---------------------------------------------------------------------------
@@ -3250,11 +3715,75 @@ export const EntityFeedPageSchema: z.ZodType<EntityFeedPage> = z.lazy(() => z.ob
   previousCursor: CursorSchema.nullable().optional(),
 }).strict());
 
+const ENTITY_CONTEXT_V1_SECTIONS = ['summary', 'hierarchy', 'connections', 'messages', 'activity', 'actions'] as const;
+const ENTITY_CONTEXT_V2_SECTIONS = ['assignment', 'summary', 'hierarchy', 'blockers', 'connections', 'messages', 'actions'] as const;
+const ENTITY_CONTEXT_V2_PAGED: readonly string[] = ['hierarchy', 'blockers', 'connections', 'messages'];
+
+/**
+ * One query shape for both DTOs; `schema` picks which section names and budget
+ * knobs are legal. v1's rules are unchanged: absent `schema` is v1 until the
+ * rollout step (M2/S5) flips the default.
+ */
 export const EntityContextQuerySchema: z.ZodType<EntityContextQuery> = z.object({
-  sections: uniqueArray(z.enum(['summary', 'hierarchy', 'connections', 'messages', 'activity', 'actions'])).optional(),
+  schema: z.enum(['v1', 'v2']).optional(),
+  sections: uniqueArray(z.enum([
+    'summary', 'hierarchy', 'connections', 'messages', 'activity', 'actions', 'assignment', 'blockers',
+  ])).optional(),
   totalBytes: z.number().int().min(1024).max(32_768).optional(),
   sectionBytes: z.number().int().min(512).max(8192).optional(),
-}).strict();
+  offset: z.number().int().nonnegative().optional(),
+  actionsSchema: z.enum(['v1', 'v2']).optional(),
+  cursor: CursorSchema.optional(),
+  edgeType: z.string().regex(/^[a-z][a-z_]{0,63}$/).optional(),
+}).strict().superRefine((query, issues) => {
+  const v2 = query.schema === 'v2';
+  // c761 §5: a context cursor continues exactly ONE paged v2 section, and
+  // `--edge-type` filters the connections section only.
+  const only = query.sections?.length === 1 ? query.sections[0] : undefined;
+  if (query.cursor !== undefined && !(v2 && only !== undefined && ENTITY_CONTEXT_V2_PAGED.includes(only))) {
+    issues.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['cursor'],
+      message: 'a context cursor continues exactly one paged v2 section (hierarchy, blockers, connections or messages)',
+    });
+  }
+  if (query.edgeType !== undefined && !(v2 && only === 'connections')) {
+    issues.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['edgeType'],
+      message: 'edgeType filters the v2 connections section; pass sections=connections alone',
+    });
+  }
+  const legal: readonly string[] = v2 ? ENTITY_CONTEXT_V2_SECTIONS : ENTITY_CONTEXT_V1_SECTIONS;
+  for (const section of query.sections ?? []) {
+    if (!legal.includes(section)) {
+      issues.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sections'],
+        message: `${section} is not a ${v2 ? 'v2' : 'v1'} section`,
+      });
+    }
+  }
+  if (v2 && query.sectionBytes !== undefined) {
+    issues.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['sectionBytes'],
+      message: 'v2 budgets are total-only; see --total-bytes',
+    });
+  }
+  // c904 §2.4: an offset names a page of the body, and only of the body.
+  if (query.offset !== undefined) {
+    const sections = query.sections ?? [];
+    const bodyOnly = sections.length === 1 && (sections[0] === 'assignment' || sections[0] === 'summary');
+    if (!v2 || !bodyOnly) {
+      issues.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['offset'],
+        message: 'offset pages the v2 body: use it with schema=v2 and sections=assignment',
+      });
+    }
+  }
+});
 
 export const EntityContextViewSchema: z.ZodType<EntityContextView> = z.lazy(() => z.object({
   schemaVersion: z.literal('tm8.entity-context.v1'),
@@ -3268,7 +3797,7 @@ export const EntityContextViewSchema: z.ZodType<EntityContextView> = z.lazy(() =
   children: z.array(EntitySummarySchema),
   edges: z.array(EdgeViewSchema),
   messages: z.array(MessageViewSchema),
-  actions: z.array(PaletteActionSchema),
+  actions: z.union([z.array(PaletteActionSchema), ActionRowsSchema]),
   provenance: z.object({
     operation: z.custom<OperationName>(isOperationName),
     fetchedAt: IsoTimestamp,
@@ -3278,6 +3807,155 @@ export const EntityContextViewSchema: z.ZodType<EntityContextView> = z.lazy(() =
   byteSize: z.number().int().nonnegative(),
   truncated: z.boolean(),
 }).strict());
+
+
+// entities.context v2 (c761 §3, c904 §2). Strict throughout: a field the spec
+// did not name is a bug in the projection, not an extension.
+const ContextExpandOpSchema = z.object({
+  operation: z.custom<OperationName>(isOperationName),
+  params: z.record(z.unknown()),
+}).strict();
+const ContextRefSchema = z.union([
+  z.object({
+    id: EntityIdSchema,
+    kind: z.string().min(1),
+    title: z.string(),
+    status: z.string(),
+    titleTruncated: z.literal(true).optional(),
+    deleted: z.literal(true).optional(),
+  }).strict(),
+  z.object({ id: EntityIdSchema, unreadable: z.literal(true) }).strict(),
+]);
+const ContextMessageSchema = z.union([
+  z.object({
+    id: EntityIdSchema,
+    from: z.string(),
+    fromTruncated: z.literal(true).optional(),
+    at: IsoTimestamp,
+    text: z.string(),
+    truncated: z.literal(true).optional(),
+    replyTo: EntityIdSchema.optional(),
+    toMe: z.literal(true).optional(),
+  }).strict(),
+  z.object({
+    id: EntityIdSchema,
+    from: z.string(),
+    fromTruncated: z.literal(true).optional(),
+    at: IsoTimestamp,
+    redacted: z.literal(true),
+  }).strict(),
+]);
+const NullableString = z.string().nullable().optional();
+
+export const EntityContextV2ViewSchema: z.ZodType<EntityContextV2View> = z.object({
+  schemaVersion: z.literal('tm8.entity-context.v2'),
+  id: EntityIdSchema,
+  kind: z.string().min(1),
+  title: z.string(),
+  version: z.number().int().nonnegative(),
+  status: z.string(),
+  asOfSeq: z.number().int().nonnegative(),
+  parent: ContextRefSchema.nullable().optional(),
+  priority: NullableString,
+  gate: z.union([
+    z.literal('none'),
+    z.object({
+      kind: z.literal('pr_merged'),
+      prs: z.array(z.union([
+        z.object({ url: z.string(), state: z.string(), ci: z.string().nullable() }).strict(),
+        // c761 §6: a tracked PR the caller cannot read is named, never dropped.
+        z.object({ id: EntityIdSchema, unreadable: z.literal(true) }).strict(),
+      ])),
+      more: z.literal(true).optional(),
+    }).strict(),
+  ]).optional(),
+  assignees: z.array(z.object({
+    id: EntityIdSchema,
+    name: z.string(),
+    you: z.literal(true).optional(),
+    by: z.string().optional(),
+    at: IsoTimestamp.optional(),
+  }).strict()).optional(),
+  assignment: z.object({
+    text: z.string(),
+    bytes: z.number().int().nonnegative(),
+    complete: z.boolean(),
+    offset: z.number().int().nonnegative().optional(),
+    expand: z.string().optional(),
+    expandOp: ContextExpandOpSchema.optional(),
+  }).strict().optional(),
+  acceptance: z.array(z.object({ id: z.string(), done: z.boolean(), text: z.string() }).strict()).optional(),
+  acceptanceWrite: z.object({ write: z.string(), writeOp: ContextExpandOpSchema }).strict().optional(),
+  blockers: z.array(z.object({
+    id: EntityIdSchema,
+    title: z.string(),
+    status: z.string(),
+    resolved: z.literal(false),
+    titleTruncated: z.literal(true).optional(),
+    deleted: z.literal(true).optional(),
+  }).strict()).optional(),
+  children: z.array(ContextRefSchema).optional(),
+  outline: z.array(z.object({
+    level: z.number().int().min(1),
+    text: z.string(),
+    offset: z.number().int().nonnegative(),
+  }).strict()).optional(),
+  outlineTruncated: z.literal(true).optional(),
+  teammate: NullableString,
+  agentTool: NullableString,
+  model: NullableString,
+  checkoutBranch: NullableString,
+  startedAt: NullableString,
+  exitedAt: NullableString,
+  endedKind: NullableString,
+  endedReason: NullableString,
+  tasks: z.array(ContextRefSchema).optional(),
+  runtimeState: NullableString,
+  turnState: NullableString,
+  turnCount: z.number().int().nonnegative().nullable().optional(),
+  lastTurnAt: NullableString,
+  mode: NullableString,
+  projectId: NullableString,
+  anchor: ContextRefSchema.optional(),
+  parentMessage: ContextRefSchema.nullable().optional(),
+  attachments: z.array(z.object({
+    id: EntityIdSchema,
+    name: z.string(),
+    bytes: z.number().int().nonnegative().nullable(),
+  }).strict()).optional(),
+  connections: z.array(z.object({
+    type: z.string().min(1),
+    dir: z.enum(['out', 'in']),
+    other: ContextRefSchema,
+    resolved: z.boolean().optional(),
+  }).strict()).optional(),
+  messages: z.array(ContextMessageSchema).optional(),
+  omitted: z.array(z.object({
+    section: z.string().min(1),
+    kept: z.number().int().nonnegative(),
+    more: z.boolean(),
+    totalAtLeast: z.number().int().nonnegative().optional(),
+    reason: z.enum(['budget', 'rowLimit', 'fetchLimit']),
+    expand: z.string().optional(),
+    expandOp: ContextExpandOpSchema.optional(),
+  }).strict()),
+  notLoaded: z.array(z.object({
+    section: z.string().min(1),
+    expand: z.string().optional(),
+    expandOp: ContextExpandOpSchema.optional(),
+  }).strict()),
+  errors: z.array(z.object({ section: z.string().min(1), code: z.string().min(1), retry: z.boolean() }).strict()),
+  budget: z.object({
+    requested: z.number().int().positive(),
+    used: z.number().int().nonnegative(),
+  }).strict(),
+}).strict();
+
+/** What `entities.context` returns: v1, or v2 when `schema=v2` asked for it. */
+export const EntityContextResultSchema: z.ZodType<EntityContextResult> = z.union([
+  EntityContextViewSchema,
+  EntityContextV2ViewSchema,
+]);
 
 const OperationNameSchema = z.custom<OperationName>(isOperationName, 'must be a catalogued operation name');
 
@@ -3529,6 +4207,14 @@ export const SpaceSummarySchema: z.ZodType<SpaceSummary> = z.object({
   // an older node parses unchanged.
   unreadTotal: z.number().int().nonnegative().nullable(),
   githubRepo: z.string().nullable().optional(),
+  // 187, the space-wide DEFAULT posture new sessions are spawned with — not a
+  // statement about any existing session, each of which carries its own pair.
+  // Optional for the additive reason, and it matters here more than usual:
+  // this object is `.strict()` and is re-parsed on the way OUT of storage, so
+  // a node that stores the keys without naming them here answers 503
+  // `stored Space settings violate the frozen contract` for the whole space.
+  sessionShareDefault: z.enum(['none', 'space']).optional(),
+  sessionDriveDefault: WorkSessionDriveModeSchema.optional(),
   createdAt: IsoTimestamp,
 }).strict();
 
@@ -3704,6 +4390,40 @@ export const ActionDiscoveryResultSchema: z.ZodType<ActionDiscoveryResult> = z.o
   actions: z.array(PaletteActionSchema),
 }).strict();
 
+const ActionRowsShape = {
+  schema: z.literal('tm8.actions.v2'),
+  actorId: EntityIdSchema,
+  target: z.object({
+    id: EntityIdSchema,
+    kind: z.string().min(1),
+    version: z.number().int().positive(),
+  }).strict().optional(),
+  capabilityEpoch: z.string().min(1),
+  columns: z.tuple([
+    z.literal('operation'), z.literal('kind'), z.literal('authzTarget'), z.literal('exposure'),
+  ]),
+  rows: z.array(z.tuple([
+    OperationNameSchema,
+    z.string(),
+    z.enum(['server', 'space', 'project', 'entity', 'session']),
+    z.enum(['public', 'composite', 'internal', 'reserved']),
+  ])),
+  total: z.number().int().nonnegative(),
+};
+
+export const ActionRowsSchema: z.ZodType<ActionRows> = z.object(ActionRowsShape).strict();
+
+export const ActionDiscoveryPageSchema: z.ZodType<ActionDiscoveryPage> = z.object({
+  ...ActionRowsShape,
+  nextCursor: CursorSchema.nullable(),
+}).strict();
+
+/** What `actions.list` returns: v1, or the v2 page when `schema=v2` asked for it. */
+export const ActionListResultSchema: z.ZodType<ActionListResult> = z.union([
+  ActionDiscoveryResultSchema,
+  ActionDiscoveryPageSchema,
+]);
+
 // ---------------------------------------------------------------------------
 // Wire envelope + error body (DEV-6 / DEV-8)
 // ---------------------------------------------------------------------------
@@ -3714,6 +4434,7 @@ export const CommandErrorCodeSchema: z.ZodType<CommandErrorCode> = z.enum([
   'version_conflict', 'conflict', 'invariant_violation',
   'payload_too_large', 'rate_limited', 'limit_exceeded',
   'not_implemented', 'upstream_unavailable',
+  'context_budget_too_small',
 ]);
 
 export const ErrorCodeSchema: z.ZodType<ErrorCode> = z.enum([

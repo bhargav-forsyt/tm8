@@ -75,15 +75,26 @@ describe.sequential('W3.G15 public reserved and residual honesty', () => {
     // 131 -> 135: credentials.*; all four are mounted.
     // 144 -> 150 (2026-08-12, Git UI landing): the six execution.git* rows,
     // all mounted.
-    expect(OPERATIONS).toHaveLength(197); // +25 (177) containers
+    // 197 -> 198 (187, session sharing): execution.sessions.share, one
+    // POST command — registered and mounted, so every count below moves
+    // by exactly one and the residual set is unchanged.
+    // 198 -> 199 (2026-09-19, Changes screen Phase 1): execution.gitStage, one
+    // public v1 POST. It is HTTP, so it moves EVERY count on this page in
+    // lockstep a second time: catalog 198 -> 199, catalog-non-WS 196 -> 197,
+    // mounted routes 196 -> 197, registered handlers 194 -> 195. MEASURED from
+    // this file's own failing run on the MERGED tree, not derived.
+    expect(OPERATIONS).toHaveLength(224); /* +1 events.changes (change feed step 3). MEASURED. */ // SC-3: +10 credentials.space.* / node.credentials.* rows. MEASURED.  +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // +1 launch.suggest (Jev lane F) // +9 skills (2026-09-23) // +25 (177) containers, +1 (187), +1 (gitStage) /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     // 171 -> 195: 24 container HTTP rows. The 25th is the WS alias.
-    expect(OPERATIONS.filter((operation) => operation.method !== 'WS')).toHaveLength(195);
+    // 196 -> 197 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    expect(OPERATIONS.filter((operation) => operation.method !== 'WS')).toHaveLength(222); /* +1 events.changes (change feed step 3). MEASURED. */ // SC-3: +10 credentials.space.* / node.credentials.* rows. MEASURED.  +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // +1 launch.suggest (Jev lane F). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(health).toMatchObject({
       ok: true,
       server: 'tm8-server',
       // /health.operations counts ROUTES, not catalog rows (WS never mounts).
-      operations: 195, // +24 (177): the container HTTP rows
-      implemented: 193, // +24 (177): all registered, all mounted
+      operations: 222, /* +1 entities.commands.tick (bug 01a0d2f1). */ /* +1 events.changes (change feed step 3). MEASURED. */ // +10 SC-3 space/node credential ops // +3 service keys (Jev lane K) // +1 launch.suggest (Jev lane F) // +9 skills (2026-09-23) // +24 (177): the container HTTP rows; +1 (187); +1 (gitStage)
+      implemented: 220, /* +1 entities.commands.tick (bug 01a0d2f1). */ /* +1 events.changes (change feed step 3). MEASURED. */ // +10 SC-3, mounted with the credential seam // +3 service keys, mounted with the credential seam (Jev lane K) // +1 launch.suggest (Jev lane F, placeholder handler) // +9 skills (2026-09-23) // +24 (177): all registered, all mounted; +1 (187); +1 (gitStage)
     });
   });
 
@@ -150,7 +161,16 @@ describe.sequential('W3.G15 public reserved and residual honesty', () => {
     // five residual container reads answer 501 — so 188 answer for real.
     // 193 - 5 = 188, and the residual membership asserted above is what makes
     // that subtraction checkable rather than a fudge.
-    expect(implemented).toHaveLength(188);
+    // 188 -> 189 (187): execution.sessions.share is mounted, and a no-body
+    // probe fails its schema with 400 rather than 501, so it counts here.
+    // 188 -> 189 (2026-09-19, Changes screen Phase 1): execution.gitStage is a
+    // real mounted handler, not a residual 501, so the v1 non-WS population
+    // moves 193 -> 194 and the subtraction carries: 194 - 5 = 189. MEASURED
+    // from this assertion's own failing run (`Received 189`), not derived.
+    // 189 -> 190 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    expect(implemented).toHaveLength(215); /* +1 events.changes (change feed step 3). MEASURED. */ // +10 SC-3 space/node credential ops, +9 skills (2026-09-23), +1 launch.suggest (Jev lane F), +3 service keys (Jev lane K), MEASURED /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
   });
 
   /**

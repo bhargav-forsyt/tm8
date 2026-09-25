@@ -97,8 +97,22 @@ describe('W1 adopted catalog target', () => {
     // never carried: `OPERATIONS.length` = 197, `V1_OPERATIONS.length` = 195.
     // The Design's PROSE says 27 rows and is wrong; §4.1's list is 25 and the
     // coordinator ruled on it.
-    expect(OPERATIONS).toHaveLength(197);
-    expect(V1_OPERATIONS).toHaveLength(195);
+    // 197 -> 198 (187, terminal sharing): execution.sessions.share, v1, so
+    // 195 -> 196 too. MEASURED on this tree per PIN RULE v3, never carried.
+    // 197 -> 198 (2026-09-19, Changes surface phase 1): execution.gitStage,
+    // the index verb (stage|unstage) the review screen commits through. v1,
+    // so 195 -> 196. MEASURED on this tree per PIN RULE v3, never carried.
+    // 198 -> 199 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    // 199 -> 203 (2026-09-23, filesystem skills INTEGRATED WITH main): skills.scan,
+    // skills.list, skills.show and skills.preview, all v1, so 197 -> 201. The
+    // stack pinned against its own older base and never saw main's 199.
+    // MEASURED on the merged tree from this assertion's own failing run.
+    // 203 -> 208 (2026-09-23): skills.roots/create/edit/equip/unequip (F4, #648), all v1. MEASURED on the merged tree.
+    // 208 -> 209 (2026-09-23, Jev lane F): launch.suggest, a v1 POST command. MEASURED from this assertion's own failing run.
+    expect(OPERATIONS).toHaveLength(224); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */ // +10 credentials.space.* and node.credentials.* (SC-3). MEASURED. // +3 credentials.serviceKeys.* (Jev lane K). MEASURED.
+    expect(V1_OPERATIONS).toHaveLength(222); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */ // +10 (SC-3). MEASURED. // +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // // launch.suggest is v1: 206 -> 207. MEASURED.
     expect(RESERVED_OPERATIONS.map((operation) => operation.name)).toEqual([
       'search.query',
       'bridge.fetchBlob',
@@ -133,7 +147,16 @@ describe('W1 adopted catalog target', () => {
     // under its own name; it carries `aliasOf` and is excluded from
     // MOUNTED_OPERATIONS, so nothing mounts a second socket. Counting rows and
     // counting mounts are different questions and this pin asks the first.
-    }).toEqual({ GET: 65, POST: 98, PATCH: 12, DELETE: 12, PUT: 8, WS: 2 });
+    // 187: POST 98->99 — execution.sessions.share, a POST command on the
+    // entity-command shape. Nothing else moves. MEASURED from the failing run.
+    // 2026-09-19 (Changes surface phase 1): POST 98->99 — execution.gitStage,
+    // a command row on the session's git path. MEASURED on this tree.
+    // POST 99 -> 100 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): both new rows are POST commands. MEASURED on the merged tree from this assertion's own failing run.
+    // 2026-09-23 (filesystem skills INTEGRATED WITH main): GET 65->68 (skills.list,
+    // skills.show, skills.preview), POST 100->101 (skills.scan). MEASURED on the merged tree.
+    // 2026-09-23 F4: GET 68->69 (roots), POST 101->104 (create/equip/unequip), PATCH 12->13 (edit). MEASURED.
+    // 2026-09-23 Jev lane F: POST 104->105 (launch.suggest). MEASURED.
+    }).toEqual({ GET: 74, POST: 108, PATCH: 14, DELETE: 14, PUT: 12, WS: 2 }); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */ // SC-3. MEASURED.
     expect({
       read: count('kind', 'read'),
       command: count('kind', 'command'),
@@ -142,7 +165,16 @@ describe('W1 adopted catalog target', () => {
     // 141: command 101->104 (three new commands). MEASURED.
     // 148: read 64->65, command 104->106. MEASURED.
     // Containers: read 65->69, command 106->126, stream 1->2. MEASURED.
-    }).toEqual({ read: 69, command: 126, stream: 2 });
+    // 187: command 126->127. MEASURED.
+    // Changes surface phase 1: command 126->127 (execution.gitStage). MEASURED.
+    // command 127 -> 128 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main):
+    // execution.sessions.share and execution.gitStage are both kind: command.
+    // MEASURED from this assertion's own failing run (Received: command 128).
+    // 2026-09-23 (filesystem skills INTEGRATED WITH main): read 69->72, command 128->129.
+    // MEASURED on the merged tree.
+    // 2026-09-23 F4: read 72->73, command 129->133. MEASURED.
+    // 2026-09-23 Jev lane F: command 133->134 (launch.suggest). MEASURED.
+    }).toEqual({ read: 78, command: 144, stream: 2 }); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */ // SC-3. MEASURED.
   });
 });
 
@@ -199,6 +231,10 @@ describe('W1 frozen-row schema amendments', () => {
       'chat',
       // 2026-09-03: `container` — the machine kind (177, CONTAINERS §3.1).
       'container',
+      // 2026-09-17: `drawing` — an Excalidraw canvas as an entity (194).
+      // Creatable through the ordinary envelope, unlike `chat`/`container`:
+      // nothing runtime stands behind a drawing, only its detail row.
+      'drawing',
     ]);
     expect(CoreEntityKindSchema.safeParse('ui_template').success).toBe(false);
   });

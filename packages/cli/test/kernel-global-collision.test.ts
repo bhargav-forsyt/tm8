@@ -302,7 +302,14 @@ describe('CLASS SWEEP: every flag the projection publishes can actually be recei
     // 142 -> 144 (2026-08-12): collections.addItem/removeItem.
     // 144 -> 150 (2026-08-12, Git UI landing): the six execution.git* rows.
     // 172 -> 197 (2026-09-03, containers): the 25 containers.* rows. MEASURED.
-    expect(rows.length).toBe(197);
+    // 197 -> 198 (187): execution.sessions.share. Its only flags are the two
+    // dials and `--expect-version`, all of which the projection publishes and
+    // the kernel receives — which is exactly what this sweep is for. MEASURED.
+    // 197 -> 198 (Changes screen Phase 1): execution.gitStage, the index verb
+    // behind the Changes surface — public, v1, deliberately commandless like the
+    // rest of the session git rail. MEASURED from this file's own failing run.
+    // 198 -> 199 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): execution.gitStage. MEASURED.
+    expect(rows.length).toBe(224); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ /* +1 events.changes (change feed step 3). MEASURED. */ // +10 credentials.space.* + node.credentials.* (SC-3). MEASURED. // +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // // +1 launch.suggest (Jev lane F). MEASURED. // +9 skills.* rows (2026-09-23, #647 + #649). MEASURED.
     expect(rows.filter((r) => r.syntax !== null).length).toBeGreaterThan(90);
     const result = sweep(rows);
     expect(result.valueProbes).toBeGreaterThan(100);
@@ -399,6 +406,7 @@ const kebab = (s: string): string => s.replace(/([a-z0-9])([A-Z])/g, '$1-$2').to
  */
 const DELIBERATE_SPELLINGS: Readonly<Record<string, string>> = {
   confirm: '--yes, the §7.5 destructive confirmation (interaction-profile activate|retire set body.confirm from it)',
+  done: '--untick, which sets done:false for `task tick`; ticking is the default (2026-09-24)',
   enabled: '--off, which sets enabled:false for `entity react`',
   isNodeAdmin: '--node-admin, which sets isNodeAdmin:true for `auth signup` (2026-08-02)',
   // execution.gitCommit is a deliberately COMMANDLESS catalog row (the CLI
@@ -418,6 +426,10 @@ const DELIBERATE_SPELLINGS: Readonly<Record<string, string>> = {
   screenshot: '--no-screenshot, the same negative spelling — `containers.computer` returns an image by default (2026-09-03)',
   // `ro` is not a top-level flag and must not become one: it belongs to ONE
   // mount, and a bare `--ro` could not say WHICH. Same shape as isInitial above.
+  // SC-3: node.credentials.policy.set is deliberately COMMANDLESS (human
+  // settings only, `cmd: null`), so allowNode reaches the wire only from the UI
+  // seam — there is no CLI flag to collide with. Same shape as `all` above.
+  allowNode: 'no CLI flag: node.credentials.policy.set is a commandless human-settings row; the node settings screen sets it (2026-09-23)',
   ro: '`--mount <host>:<guest>:ro`, a per-element suffix — a top-level --ro could not name which mount it meant (2026-09-03)',
 };
 

@@ -137,6 +137,13 @@ describe('W5.C generator proof', () => {
       // spaceId and provider, so {} is correctly refused.
       'credentials.delete',
       'credentials.loginSessions.finish',
+      // Jev lane K: service-key delete carries only clientMutationId; the
+      // provider rides the path. (put requires apiKey, so {} is refused.)
+      'credentials.serviceKeys.delete',
+      // SC-3: space-credential delete and setDefault carry only
+      // clientMutationId; the credential id rides the path.
+      'credentials.space.delete',
+      'credentials.space.setDefault',
       'entityKinds.update',
       // 2026-08-12 (Git UI landing): the two git verbs whose bodies are
       // all-optional — a bare {} checkpoint takes the default label; a bare {}
@@ -146,6 +153,9 @@ describe('W5.C generator proof', () => {
       'execution.terminate',
       'files.uploadAbort',
       'projects.update',
+      // 2026-09-23: skills.scan — every field optional; a bare {} scans the
+      // Space's authorized roots.
+      'skills.scan',
       'spaces.update',
       'tracking.refresh',
       // 2026-07-31: voice.token.create's whole input is the optional command
@@ -198,6 +208,21 @@ describe('W5.C generator proof', () => {
     // schema would refuse every legitimate upload — it is enumerated in
     // UNBOUND_COMMAND_OPERATIONS instead. The family's five reads bind nothing,
     // as reads do. MEASURED.
-    expect(ENTRIES).toHaveLength(118);
+    // +1 (187): ExecutionSessionsShareInputSchema binds
+    // execution.sessions.share. It is a COMMAND with a JSON body, so it binds
+    // like every other command and is NOT in UNBOUND_COMMAND_OPERATIONS —
+    // the refinement that rejects an empty body is a constraint inside the
+    // schema, not a reason to have none. MEASURED.
+    // +1 (2026-09-19, Changes screen Phase 1): `execution.gitStage` binds its
+    // command body. A path-scoped stage takes a real input DTO — the worktree
+    // and the pathspecs — so it binds the way every other execution.git*
+    // command does, and lands in ENTRIES rather than in
+    // UNBOUND_COMMAND_OPERATIONS. MEASURED from this assertion's own failing
+    // run (`expected ... length of 118 but got 119`), never hand-derived.
+    // 119 -> 120 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    // 120 -> 125 (2026-09-23): skills.scan + F4's create/edit/equip/unequip. MEASURED.
+    expect(ENTRIES).toHaveLength(136); // +7 SC-3 space/node credential command schemas. MEASURED. // +2 service-key put/delete (Jev lane K); +1 launch.suggest (Jev lane F, 2026-09-23). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
   });
 });

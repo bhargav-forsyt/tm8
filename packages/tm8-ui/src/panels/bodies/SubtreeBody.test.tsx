@@ -165,10 +165,20 @@ describe('the composed metadata grid', () => {
     expect(grid.textContent).toContain(parent.title);
   });
 
-  it('renders the id and the scalars the strip does not own', () => {
+  it('does NOT print the id, and renders the scalars the strip does not own', () => {
     const { getByTestId } = renderBody();
     const grid = getByTestId('subtree-grid');
-    expect(grid.textContent).toContain(taskUuidTitle.id);
+    /*
+     * THE ID LEFT THIS GRID — owner decision, 2026-09-07 — and this assertion
+     * is inverted rather than deleted, because "the id is not printed here" is
+     * now the thing worth holding: it spent 41.8px of every task on a
+     * 36-character token that means nothing to a reader.
+     *
+     * IT MOVED, IT WAS NOT REMOVED. `Copy ID` lives in the panel's `⋯`
+     * overflow — see `panel-controls.test.tsx`, which holds its new home, so a
+     * capability cannot quietly disappear between the two files.
+     */
+    expect(grid.textContent).not.toContain(taskUuidTitle.id);
     /*
      * `Due` LEFT THIS GRID on 2026-08-28, and the reason is the rule the next
      * test states rather than an exception to it.
@@ -616,6 +626,21 @@ describe('LINKED — connection peers as chips', () => {
     const section = expandFold(getByTestId('linked-section'));
     fireEvent.click(within(section).getByText(taskBlocked.title));
     expect(onOpenEntity).toHaveBeenCalledWith(taskBlocked.id);
+  });
+
+  it('leaves out the edges the attachment strip already draws as tiles', () => {
+    // The attach palette's links are tiles in the strip; LINKED must not draw
+    // the same edge a second time. Skipped by EDGE id, not by peer or type.
+    const detail = taskDetail();
+    const docEdge = [...detail.connections.outgoing, ...detail.connections.incoming]
+      .flatMap((group) => group.edges)
+      .find((edge) => edge.source.id === docLayoutSpec.id || edge.target.id === docLayoutSpec.id);
+    expect(docEdge, 'the fixture task links the layout spec').toBeDefined();
+    const { getByTestId } = renderBody({ stripEdgeIds: new Set([docEdge!.id]) });
+    const section = expandFold(getByTestId('linked-section'));
+    expect(section.textContent).not.toContain(docLayoutSpec.title);
+    expect(section.textContent).toContain(taskBlocked.title);
+    expect(section.textContent).toContain('3');
   });
 });
 

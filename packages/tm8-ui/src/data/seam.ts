@@ -1,3 +1,7 @@
+import type { SkillPort } from '../skills/port';
+import type { JevPort } from '../jev/port';
+import type { FixtureJevScenario } from './fixtures/jev-fixture';
+import type { LaunchSuggestInput } from '@tm8/contract';
 /**
  * THE FACADE SEAM — the typed interface the UI consumes for everything between
  * the server's HTTP/WS surface and the UI's stores.
@@ -101,6 +105,7 @@ import type {
   RedeemInviteInput,
   SpaceInviteView,
   UpdateMemberRoleInput,
+  UpdateSpaceInput,
   ActivityItem,
   ArtifactPreviewSession,
   ArtifactsPreviewStartInput,
@@ -121,8 +126,23 @@ import type {
   CredentialProviderName,
   CredentialsDeleteResult,
   CredentialsLoginSessionFinishResult,
+  CredentialsLoginSessionStartInput,
   CredentialsLoginSessionStartResult,
   CredentialsStatusView,
+  CredentialsServiceKeyDeleteResult,
+  CredentialPolicySource,
+  CredentialsSpaceCreateInput,
+  CredentialsSpaceDeleteResult,
+  CredentialsSpaceListView,
+  CredentialsSpacePolicySetResult,
+  CredentialsSpacePolicyView,
+  NodeCredentialPolicyEntry,
+  NodeCredentialsStatusView,
+  SpaceCredentialProviderName,
+  SpaceCredentialView,
+  CredentialsServiceKeysStatusView,
+  ServiceKeyProviderName,
+  ServiceKeyView,
   Cursor,
   DurableWorkspaceEvent,
   EdgeView,
@@ -143,6 +163,7 @@ import type {
   ContainersTerminalStartInput,
   ContainersTerminalStartResult,
   ExecutionResumeInput,
+  ExecutionSessionsShareInput,
   ExecutionTerminateInput,
   FileUploadAbortInput,
   FileUploadCompleteInput,
@@ -189,14 +210,17 @@ import type {
   ExecutionGitMergeInput,
   ExecutionGitCherryPickInput,
   ExecutionGitBranchInput,
+  ExecutionGitStageInput,
   ExecutionGitStashInput,
   ExecutionGitRollbackInput,
   SessionGitCheckpointResult,
   SessionGitCommitResult,
   SessionGitDiff,
+  SessionGitDiffScope,
   SessionGitMergeResult,
   SessionGitCherryPickResult,
   SessionGitBranchResult,
+  SessionGitStageResult,
   SessionGitStashResult,
   SessionGitRollbackResult,
   SessionGitStatus,
@@ -426,6 +450,21 @@ export interface FileBlameOpts {
 export interface GitDiffOpts {
   /** Unified-diff byte cap; server default 256 KiB, max 1 MiB. */
   maxBytes?: number;
+  /**
+   * NARROW TO ONE FILE. Not a client-side convenience: the whole-session text
+   * is byte-capped, so a file past the cap is ABSENT from it, not truncated —
+   * slicing the big diff cannot answer "show me this one file" for exactly the
+   * files a reviewer most needs to see. The server re-runs git scoped to the
+   * path, and an untracked path is answered against /dev/null.
+   */
+  path?: string;
+  /**
+   * WHICH COMPARISON. `session` (default) is working tree vs the merge-base —
+   * what this lane changed. `staged` is index vs HEAD: what a commit would
+   * write, exactly. `unstaged` is working tree vs index. Only git can tell
+   * these apart; a client cannot derive one from another.
+   */
+  scope?: SessionGitDiffScope;
 }
 
 export interface Seam {
@@ -791,6 +830,13 @@ export interface Seam {
      * omitted context earns an honest `invalid_input` rather than a
      * synthesized id the caller could not reconcile.
      */
+    skills?: SkillPort;
+    /**
+     * `launch.suggest` — Ask Jev on LaunchSheet and the Run popup (design
+     * 01a0cb80 §5.1). Optional like `skills`: a seam without it renders the
+     * button refused-with-reason, never hidden.
+     */
+    jev?: JevPort;
     createEdge(input: CreateEdgeInput): Promise<CommandResult>;
     deleteEdge(edgeId: string, ctx?: CommandContext): Promise<CommandResult>;
     /**
@@ -869,6 +915,13 @@ export interface Seam {
       memberId: EntityId,
       input: UpdateMemberRoleInput,
     ): Promise<CommandResult>;
+    /**
+     * `spaces.update` (PATCH /v2/spaces/:spaceId). Absent keys are left alone
+     * — the server forwards only the keys the body names — so a caller that
+     * changes one sharing default cannot reset the other. The admin rule and
+     * the vocabulary live in `w2_update_space`; this seam checks neither.
+     */
+    updateSpace(spaceId: SpaceId, input: UpdateSpaceInput): Promise<SpaceSummary>;
     /**
      * Mint a join code. `role` is what redemption confers and may be `admin` or
      * `member` — never `owner`: a code travels out of band, and a bearer
@@ -988,6 +1041,25 @@ export interface Seam {
     prompt(id: EntityId, input: ExecutionPromptInput): Promise<CommandResult>;
     terminate(id: EntityId, input: ExecutionTerminateInput): Promise<CommandResult>;
     /**
+     * `execution.sessions.share` (187) — TURN ONE OR BOTH OF THIS SESSION'S
+     * SHARING DIALS.
+     *
+     * TWO INDEPENDENT DIALS, and the input type is what keeps them
+     * independent: `shareMode` is who may WATCH the terminal's bytes and
+     * `driveMode` is who may TYPE into it. The RPC merges on omission — a
+     * patch that names only one leaves the other exactly where it was — so a
+     * caller that means "open watching" must not send a `driveMode` it did
+     * not intend to author.
+     *
+     * NOT a metadata control. The session ROW's visibility is governed by
+     * `entities_select` and is space-wide regardless of these dials; what
+     * they gate is the byte stream, through `grant_stream_attach`. Narrowing
+     * either dial revokes the live grants it no longer covers, so this is a
+     * command with an immediate effect on other people's open terminals and
+     * carries `expectedVersion` for the same reason `complete` does.
+     */
+    shareSession(id: EntityId, input: ExecutionSessionsShareInput): Promise<CommandResult>;
+    /**
      * Bring an `exited`/`failed` session back with its agent's conversation
      * restored. `clientMutationId` is REQUIRED by the contract DTO (unlike
      * terminate's optional `force`), and the server's `.strict()` schema
@@ -1057,6 +1129,14 @@ export interface Seam {
     gitCheckpoint(id: EntityId, input: ExecutionGitCheckpointInput): Promise<SessionGitCheckpointResult>;
     gitRollback(id: EntityId, input: ExecutionGitRollbackInput): Promise<SessionGitRollbackResult>;
     gitCommit(id: EntityId, input: ExecutionGitCommitInput): Promise<SessionGitCommitResult>;
+    /**
+     * STAGE / UNSTAGE without committing — the review half of `gitCommit`.
+     * Unstage is a path-scoped MIXED reset (`git reset HEAD -- <paths>`): the
+     * index moves, the working tree does not, and `--hard` exists at no layer
+     * of this rail. Answers with the post-operation status so a caller never
+     * has to render a list it knows is one round-trip stale.
+     */
+    gitStage(id: EntityId, input: ExecutionGitStageInput): Promise<SessionGitStageResult>;
     gitMerge(id: EntityId, input: ExecutionGitMergeInput): Promise<SessionGitMergeResult>;
     /**
      * Tier 2 completion (Amendment 8). Cherry-pick's direction is fixed by
@@ -1121,13 +1201,56 @@ export interface Seam {
      * credential can be revoked while a session it opened refuses to die.
      */
     disconnect(provider: CredentialProviderName): Promise<CredentialsDeleteResult>;
-    /** Opens the login PTY. The answer names a work_session to host. */
+    /**
+     * Opens the login PTY. The answer names a work_session to host.
+     * `spaceCredential` makes it a SPACE login (SC-4): `{ label }` opens a new
+     * pending space credential, `{ credentialId }` logs in again onto one.
+     */
     startLogin(
       spaceId: SpaceId,
       provider: CredentialProviderName,
+      spaceCredential?: CredentialsLoginSessionStartInput['spaceCredential'],
     ): Promise<CredentialsLoginSessionStartResult>;
     /** Harvests what the terminal achieved. `connected` and `stored` differ. */
     finishLogin(workSessionId: EntityId): Promise<CredentialsLoginSessionFinishResult>;
+    /**
+     * Service keys (`credentials.serviceKeys.*`) — keys the SERVER uses for this
+     * member, today only the TypeSafe key behind ✦ Ask Jev. Pasted here, never
+     * shown back beyond four characters, never given to an agent session.
+     */
+    serviceKeys(): Promise<CredentialsServiceKeysStatusView>;
+    saveServiceKey(provider: ServiceKeyProviderName, apiKey: string): Promise<ServiceKeyView>;
+    removeServiceKey(provider: ServiceKeyProviderName): Promise<CredentialsServiceKeyDeleteResult>;
+    /**
+     * SPACE credentials (`credentials.space.*`, 206/SC-3) — credentials the
+     * SPACE owns, which every member may launch with (D3). Human-only like the
+     * rest of this block. Every answer is metadata: a secret goes OUT in a
+     * create or rekey body and never comes back (I5).
+     *
+     * Rights are the server's (D11: creator or space admin changes one; space
+     * admin sets policy). A refusal arrives as a `forbidden` CollabError BEFORE
+     * any vendor probe, so a caller renders its message, not a probe failure.
+     */
+    space: {
+      list(spaceId: SpaceId): Promise<CredentialsSpaceListView>;
+      create(spaceId: SpaceId, input: Omit<CredentialsSpaceCreateInput, 'clientMutationId'>): Promise<SpaceCredentialView>;
+      rekey(credentialId: string, secret: string): Promise<SpaceCredentialView>;
+      rename(credentialId: string, label: string): Promise<SpaceCredentialView>;
+      setDefault(credentialId: string): Promise<SpaceCredentialView>;
+      /** Revoke, then kill every live session on it whoever launched it (D7). */
+      remove(credentialId: string): Promise<CredentialsSpaceDeleteResult>;
+      policy(spaceId: SpaceId): Promise<CredentialsSpacePolicyView>;
+      setPolicy(
+        spaceId: SpaceId,
+        provider: SpaceCredentialProviderName,
+        allowedSources: CredentialPolicySource[] | null,
+      ): Promise<CredentialsSpacePolicySetResult>;
+    };
+    /** The node's own fallback credentials (D9) — node admin only. */
+    node: {
+      status(): Promise<NodeCredentialsStatusView>;
+      setPolicy(provider: SpaceCredentialProviderName, allowNode: boolean | null): Promise<NodeCredentialPolicyEntry>;
+    };
   };
 
   // -- liveness (Delta 2, LLD C-1 / §9) --------------------------------------
@@ -1167,6 +1290,12 @@ export interface FixtureControls {
   setLiveness(spaceId: SpaceId, liveEntityIds: string[], nodeBootId?: string): void;
   triggerResync(spaceId: SpaceId): void;
   setPrMergeGuard(guard: FixturePrMergeGuard): void;
+  /** Script `launch.suggest`: every group ok, one group failed, no key, or a 501 node. */
+  setJevScenario(scenario: FixtureJevScenario): void;
+  /** Hold each Ask Jev answer this long (ms), so the asking state is visible. */
+  setJevDelay(ms: number): void;
+  /** Every `launch.suggest` input received, in order. */
+  jevRequests(): readonly LaunchSuggestInput[];
 }
 
 export interface FixtureSeam extends Seam {

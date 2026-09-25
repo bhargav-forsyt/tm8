@@ -409,7 +409,18 @@ describe('seam-real: prepare-not-wire is a type-level property', () => {
       // Amendment 8 (2026-08-09): Tier 2 completion — gitBranch,
       // gitCherryPick, gitStash join the rail's verbs.
       'gitBranch', 'gitCheckpoint', 'gitCherryPick', 'gitCommit', 'gitMerge', 'gitRollback',
+      // Changes surface (Phase 1): `gitStage` — `execution.gitStage`, the
+      // INDEX verb the review surface needs. It is the stage/unstage pair
+      // behind one method, because both are one route and one DTO; two
+      // methods would be two places for the same pathspec list to drift.
+      // Inserted at its sorted position between gitRollback and gitStash
+      // rather than appended — one insertion, so the silent-duplicate
+      // risk the appended groups below guard against does not arise.
+      'gitStage',
       'gitStash',
+      // Jev lane U (design 01a0cb80 §5.1): `jev` — the `launch.suggest` port,
+      // one namespaced member like `skills`. Inserted at its sorted position.
+      'jev',
       'markRead',
       // Amendment 11 (2026-08-13): `tracking.pr.merge` — the FORGE WRITE, and
       // the counterpart to `gitMerge`'s deliberate exclusion from the tracking
@@ -495,6 +506,17 @@ describe('seam-real: prepare-not-wire is a type-level property', () => {
        */
       'createContainer', 'containerLifecycle', 'destroyContainer',
       'startContainerTerminal', 'containerProviders',
+      // 187: `shareSession` — `execution.sessions.share`, the WATCH and DRIVE
+      // dials on a work session. Appended rather than inserted at its sorted
+      // position, the same posture as the five above and for the same reason.
+      //
+      // ONE method for two dials, because the RPC MERGES: an omitted key is
+      // left alone, never defaulted. Two methods would be two places for a
+      // caller to clobber the dial it was not thinking about.
+      'shareSession',
+      // F4 (#648): `skills` — the skill port (roots, create, edit, equip,
+      // unequip, preview), one namespaced member. Appended like the rows above.
+      'skills',
       'terminate',
       // 2026-08-16 (attention history): `updateAttentionRequest` — the
       // PER-REQUEST write. `resolveAttention` above is the bulk verb and
@@ -504,6 +526,10 @@ describe('seam-real: prepare-not-wire is a type-level property', () => {
       // Amendment 4 (2026-08-01): updateProfile — identity display (067).
       // The viewer's OWN profile row; the op names no subject by design.
       'updateProfile',
+      // 187 follow-through: `updateSpace` — `spaces.update`, a PATCH. The
+      // Session sharing settings section writes the two space-wide defaults
+      // through it, one key per click; absent keys are left alone.
+      'updateSpace',
       'upsertReadMark', 'work',
     ].sort());
     expect(Object.keys(seam.liveness).sort()).toEqual(['onChange', 'refresh', 'statusOf']);

@@ -306,9 +306,17 @@ describe('W5.C schema-valid stub sweep — all 98 v1 non-WS operations', () => {
     // 160 -> 163 (2026-08-16, W4/132): spaces.taskWorkflows list/upsert/delete.
     // 166 -> 169 (148): spaces.workflows list/upsert/delete.
     // 169 -> 193 (177): the 24 container HTTP rows. MEASURED.
-    expect(SURFACE).toHaveLength(193);
-    expect(rows).toHaveLength(193);
-    expect(new Set(rows.map((r) => r.op)).size).toBe(193);
+    // 193 -> 194 (187): execution.sessions.share, one POST command. MEASURED.
+    // 193 -> 194 (2026-09-19, Changes screen Phase 1: execution.gitStage, one public v1 POST, mounted with a real facade handler. MEASURED from this file's own failing run, not derived.)
+    // 194 -> 195 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this
+    // branch's execution.gitStage BOTH land, so this moves twice. Git merged
+    // the number line silently — only the comment beside it conflicted. MEASURED on the merged tree from this assertion's own failing run.
+    // 195 -> 204 (2026-09-23): the nine skills.* v1 HTTP rows. MEASURED.
+    expect(SURFACE).toHaveLength(220); // +10 SC-3 space/node credential ops. MEASURED. // +3 service keys (Jev lane K); /* +1 events.changes (change feed step 3). MEASURED. */ +1 launch.suggest (Jev lane F, 2026-09-23). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
+    // 194 -> 195 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): sharing + gitStage. MEASURED on the merged tree from this assertion's own failing run.
+    expect(rows).toHaveLength(220); // +10 SC-3. MEASURED. // +3 service keys (Jev lane K); /* +1 events.changes (change feed step 3). MEASURED. */ +1 launch.suggest (Jev lane F). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
+    // 194 -> 195 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): registerable v1 HTTP. MEASURED from this assertion's own failing run (Received 195).
+    expect(new Set(rows.map((r) => r.op)).size).toBe(220); // +10 SC-3. MEASURED. // +3 service keys (Jev lane K); /* +1 events.changes (change feed step 3). MEASURED. */ +1 launch.suggest (Jev lane F). MEASURED. /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
   });
 
   /**
@@ -966,7 +974,102 @@ describe('W5.C schema-valid stub sweep — all 98 v1 non-WS operations', () => {
     // every search phrased in terms of the thing being added. Any branch that
     // adds a migration file touches this line, and the only reliable way to
     // find that out before CI does is to know it is here.
-    expect(server.appliedMigrations.length).toBe(172);
+    //
+    // 172 -> 173 (2026-09-15): ONE file, 185_work_session_usage.sql (the
+    // exit-time usage instrument on work_sessions), MEASURED on the merged
+    // tree as every row above instructs:
+    //   git ls-tree -r --name-only origin/main db/migrations | grep -c '\.sql$' -> 172
+    //   ls db/migrations/*.sql | wc -l                                          -> 173
+    //   duplicate prefixes                                                      -> 0
+    //   git rev-list --count HEAD..origin/main                                  -> 0
+    // Main had not moved under this branch, so the two differ by exactly its
+    // one file. A migration landing on main first makes this a conflict BY
+    // CONSTRUCTION — RE-MEASURE, do not add.
+    //
+    // 173 -> 174 (2026-09-15): ONE file, 186_menu_codebrain_tab_removed.sql
+    // (the CodeBrain tab and its ref leave the menu), MEASURED the same way on
+    // the merged tree rather than incremented:
+    //   git ls-tree -r --name-only origin/main db/migrations | grep -c '\.sql$' -> 173
+    //   ls db/migrations/*.sql | wc -l                                          -> 174
+    //   duplicate prefixes                                                      -> 0
+    //   git rev-list --count HEAD..origin/main                                  -> 0
+    // Main had not moved under this branch either, so the two again differ by
+    // exactly its one file. The prose above is right that this pin is a bare
+    // integer invisible to any grep phrased as the thing being added — it was
+    // found here by running the suite, which is the other way it says to find
+    // it. RE-MEASURE, do not add.
+    //
+    // 174 -> 175 (187): ONE file, 187_work_session_sharing.sql (the two space
+    // sharing defaults, work_sessions.drive_mode, the inheriting trigger, and
+    // the re-defined grant_stream_attach). MEASURED the same way, not
+    // incremented:
+    //   git ls-tree -r --name-only origin/main db/migrations | grep -c '\.sql$' -> 174
+    //   ls db/migrations/*.sql | wc -l                                          -> 175
+    //   duplicate prefixes                                                      -> 0
+    //   git rev-list --count HEAD..origin/main                                  -> 0
+    // Main has not moved under this branch, so the two differ by exactly its
+    // one file.
+    //
+    // 175 -> 178 (196): THREE files, and none of the three arithmetic is this
+    // branch's alone. The pin is a statement about the tree that exists AFTER
+    // this branch merges, and this branch is the THIRD of three to touch it in
+    // one afternoon, so the number cannot be derived from what is on disk here.
+    // Written out, because a bare integer is exactly what nobody can reconstruct
+    // later:
+    //
+    //   base main fa9a9aed                                              176 files, pin 175
+    //   #636  repairs the inherited red, adds no migration              176 files, pin 176
+    //   #635  adds 195_*.sql                                            177 files, pin 177
+    //   THIS  adds 196_kimi_groq_credentials.sql                        178 files, pin 178
+    //
+    // The 176/175 gap at the base is NOT this branch's to explain away:
+    // 194_drawing_kind.sql landed on main in 5e1f9e1e ("Drawing as an entity,
+    // with Excalidraw", #627) WITHOUT updating this number, so main has been red
+    // on this assertion since it merged. That is precisely the failure every
+    // paragraph above predicts — a bare integer no grep phrased as "drawing"
+    // could ever reach. It is recorded here rather than quietly absorbed,
+    // because a branch that silently fixes an inherited red teaches the next
+    // author that the pin drifts harmlessly. #636 owns that repair.
+    //
+    // THIS BRANCH'S FILE WAS RENUMBERED 195 -> 196, and that is the load-bearing
+    // half. #635 also adds a `195_*.sql`. Two files sharing a numeric prefix
+    // survive every pre-merge check on both branches — git does not conflict on
+    // two ADDED files with different names, `migrations-check.sh:70` sees one
+    // tree at a time, and `db/migrate.mjs:146` only refuses the duplicate at
+    // DEPLOY time, by which point it is on main. The duplicate-prefix assertion
+    // below is the check that would have caught it, and it can only catch it
+    // after the merge that creates it. So the collision is resolved BEFORE the
+    // merge instead: #635 keeps 195_, this branch takes 196_.
+    //
+    // MEASURED on this branch's tree, not incremented:
+    //   git ls-tree -r --name-only fa9a9aed db/migrations | grep -c '\.sql$' -> 176
+    //   ls db/migrations/*.sql | wc -l                                       -> 177
+    //   duplicate prefixes                                                   -> 0
+    //
+    // 177 on disk, 178 pinned: the one file of the difference is #635's 195_,
+    // which is not in this worktree and cannot be. THIS ASSERTION IS THEREFORE
+    // RED ON THIS BRANCH ALONE AND GREEN ONLY ONCE #635 HAS MERGED — deliberately,
+    // and stated here so the next reader does not "fix" it back down to 177 and
+    // hand main a silently-short count. If this branch ends up landing BEFORE
+    // #635, this number is wrong and the correct edit is 177, not a re-guess.
+    // 178 -> 181 (2026-09-23): 197, 198 and 199, the filesystem-skills migrations. MEASURED.
+    // 181 -> 183 (2026-09-23, Jev lane F): 200_continue_a_session (#652, which
+    // left this pin at 181 — main read 182 here) and 201_jev_runs. MEASURED.
+    // 183 -> 184 (2026-09-23): 202_work_session_sharing_provenance. MEASURED:
+    //   ls db/migrations/*.sql | wc -l -> 184, duplicate prefixes -> 0.
+    // 184 -> 185 (Jev lane K): 203_account_service_keys, on top of #661's 202. MEASURED.
+    // 185 -> 186 (M1-B): 204_session_bridge_keeps_the_tick. MEASURED:
+    //   ls db/migrations/*.sql | wc -l -> 186, duplicate prefixes -> 0.
+    // 186 -> 187 (space credentials SC-1, #678): 206_space_credentials, on top
+    //   of #676's 204. MEASURED: ls db/migrations/*.sql | wc -l -> 187,
+    //   duplicate prefixes -> 0. 205 is held by open #671 and re-bumps at its merge.
+    // 187 -> 188 (change feed step 2, PR #671): 205_workspace_event_subject_ids,
+    //   rebased onto main AFTER #678 took 206, so 205 fills the one gap the SC-1
+    //   comment above reserved and the chain is contiguous 1..206 again.
+    //   MEASURED: ls db/migrations/*.sql | wc -l -> 188, duplicate prefixes -> 0.
+    // 188 -> 189 (M5/S1): 207_task_keyed_session_nudges. MEASURED:
+    //   ls db/migrations/*.sql | wc -l -> 189, duplicate prefixes -> 0.
+    expect(server.appliedMigrations.length).toBe(190); // 189 -> 190: 208_event_subject_ids_canonical_set (change feed step 3). MEASURED.
 
     // EVERY PREFIX IS UNIQUE. The count pin above catches a file that VANISHES;
     // it is structurally incapable of catching the failure that has now happened
@@ -1250,6 +1353,16 @@ const HANDLER_AUTHORED_400: readonly string[] = [
   // `authKind` is `browser`, so the R2 guard ADMITS it and they answer
   // normally rather than 400.
   'credentials.delete',
+  // Jev lane K: the service-key put/delete read `:provider` off the PATH and
+  // refuse the sweep's synthetic value against the one-member set — handler-
+  // reached, like credentials.delete above.
+  'credentials.serviceKeys.delete',
+  'credentials.serviceKeys.put',
+  // SC-3: policy.set on both space and node read `:provider` off the PATH and
+  // refuse the sweep's synthetic value, like the service-key ops above.
+  // credentials.space.create is NOT here: it refuses a non-member of the
+  // synthetic space (403) before the vendor probe, so it never reaches a 400.
+  'credentials.space.policy.set',
   'entities.commands.linkCommit',
   'entities.commands.linkPr',
   'entityKinds.create',
@@ -1260,6 +1373,8 @@ const HANDLER_AUTHORED_400: readonly string[] = [
   'interactionProfiles.retire',
   'interactionProfiles.updateDraft',
   'interactionProfiles.validate',
+  // SC-3: node policy set reads `:provider` off the PATH (see space above).
+  'node.credentials.policy.set',
   // 2026-08-10 (files consolidation): projects.files.read validates its `path`
   // query in-handler, and folderUploads.init validates its manifest in-handler;
   // the sweep's synthetic bodies reach both refusals.

@@ -85,6 +85,12 @@ export type TileBadgeSource =
   | 'agentTool'
   | 'model'
   | 'shareMode'
+  // 187 — the OTHER dial. Its own badge rather than a clause inside
+  // `shareMode`'s, because the two are independent: a session can be
+  // watchable by the space with drive still held by its owner, and folding
+  // them into one word would make the common case unreadable and the
+  // uncommon one invisible.
+  | 'driveMode'
   // other kinds
   | 'channelTopic'
   | 'unread'
@@ -103,6 +109,9 @@ export type TileBadgeSource =
   | 'sha'
   | 'mimeType'
   | 'sizeBytes'
+  | 'level'
+  | 'missing'
+  | 'skillRoot'
   | 'equipped'
   | 'collectionType'
   | 'itemCount'
@@ -378,6 +387,22 @@ export type ActionRef =
   // so a launch config would open a card asking for things already decided.
   | 'resume'
   | 'prompt-session'
+  // THE SHARING CONTROL (187) — `execution.sessions.share`; the WATCH dial picks the half.
+  //
+  // Two refs for one slot, on the `terminate`/`resume` model next door: the
+  // verb a row offers depends on the row's OWN `shareMode`, and
+  // `ActionAvailability` has no `hidden`, so a single ref could only ever
+  // render one label. `sharingControlFor` in `domain/actions.ts` picks
+  // between them, and the component that holds the row calls it — the same
+  // derivation, for the same reason, as the process control.
+  //
+  // BOTH DIALS, since 187's follow-through: the slot no longer fires on
+  // click. It opens `RowSharingControl`, a popover with the watch dial and the
+  // drive dial as labelled radiogroups — the "surface that can ask the
+  // question properly" the drive dial was waiting for. The ref still names
+  // the slot and gates it; it no longer says which way a click goes.
+  | 'share-session'
+  | 'unshare-session'
   // §8 share-into-session (seam-deferred, §10.7)
   | 'share-into-session'
   | 'withdraw-handoff'
@@ -587,9 +612,19 @@ export interface ListSection {
  * you are looking at, the sections are triage grouping WITHIN it. T0-1 draws
  * both at once — tabs above, group headers below — so neither supersedes the
  * other.
+ *
+ * A KIND WITH NO WORKFLOW MAY DECLARE ITS OWN TABS. The ruled four are the
+ * default, not a requirement. A skill is a file on disk, seeded `done` as a
+ * resolution predicate, so its four-tab row always opened on an empty To Do
+ * and kept everything under Done (user report on task 01a0ccd9: "they dont
+ * make sense"). A skill tabs by the facts it does have (All · Equipped · Not
+ * equipped · Missing files), so the id is a plain string. Only the ruled four
+ * are `StatusCategory` literals, and only those get a `CategoryGlyph`. Tabs
+ * that overlap rather than partition name their total with
+ * `ListConfig.tabTotal`.
  */
 export interface StatusCategoryTab {
-  id: StatusCategory;
+  id: StatusCategory | (string & {});
   label: string;
   filter: QueryFilter;
 }
@@ -608,6 +643,15 @@ export interface ListConfig {
    * the query it claims to summarise.
    */
   categories?: readonly StatusCategoryTab[];
+  /**
+   * The tab whose count IS the kind's total, for a tab row that OVERLAPS
+   * rather than partitions (skills: All · Equipped · Not equipped · Missing
+   * files). Omitted means the tabs partition the kind: the selector total is
+   * their sum and the footer lists each band. When set, the selector total is
+   * this tab's count, and the footer is dropped, because a line of overlapping
+   * counts reads as a breakdown that adds up.
+   */
+  tabTotal?: string;
   /**
    * WHICH of those four the panel OPENS ON, before the viewer has ever picked
    * a tab for this kind. Omitted means the first one, which is `to_do`.
@@ -979,6 +1023,9 @@ export type BodyArchetype =
   | 'hub'
   | 'profile'
   | 'generic'
+  // F4 (#648): a file-backed body with its equipment. Named for what the
+  // body SHOWS, never after a kind (§15.2 no-branching).
+  | 'equipment'
   | 'terminal'
   // Surface wave (kind-bodies-2): project's governed body and
   // interaction_profile's restricted body.
@@ -1042,6 +1089,18 @@ export type ContentBlockKind =
   // studio is where you EDIT a blueprint; this block is where every other
   // surface can SEE it, so a graph stops rendering two different ways.
   | 'blueprint'
+  // The Excalidraw canvas (194). Unlike `blueprint`, which is read-only
+  // because Craft owns editing a graph, this block IS the editor: a drawing
+  // has no studio screen of its own, so the panel is where it is drawn. The
+  // component behind it is lazily imported — Excalidraw is ~47 MB unpacked
+  // and must never enter the main chunk.
+  //
+  // NAMED `canvas`, NOT `drawing`, and the difference is load-bearing: a block
+  // id that spells a kind name makes `case 'drawing':` in a component
+  // indistinguishable from a kind literal, which §15.2 forbids and its scanner
+  // cannot tell apart. The block is also the thing a FUTURE second canvas
+  // format would reuse, so naming it after one kind was wrong anyway.
+  | 'canvas'
   // Artifact viewer: the artifact kind's rendered bundle, in-block. The iframe
   // SHIPS here and autoruns when the detail opens (owner ruling 2026-08-16,
   // superseding the earlier click-gate); the sandbox posture is unchanged —
@@ -1160,7 +1219,49 @@ export interface PanelConfig {
    * session surface draws, replies inline where they landed.
    */
   threads?: boolean;
+  /**
+   * THE ATTACH PALETTE (task 01a0cfb0): the chip row under the description,
+   * one chip per row, in this order after the leading ＋ Attach. Each row
+   * names the kind its picker searches and the graph link it writes, so
+   * `files/AttachPalette.tsx` holds no kind literal and no edge-type literal
+   * (§15.2).
+   * Absent ⇒ no palette, and the strip keeps its lone ＋ tile.
+   */
+  attachPalette?: readonly AttachPaletteRow[];
   z4?: { immersive?: boolean };
+}
+
+/** One chip of the attach palette (see `PanelConfig.attachPalette`). */
+export interface AttachPaletteRow {
+  /** The one kind this chip's picker searches, and the only kind it links. */
+  kind: string;
+  /** The chip's word, plural ("Docs"). */
+  label: string;
+  /** The edge the pick writes. Must accept `kind` in the DB edge registry. */
+  edgeType: string;
+  /**
+   * Which end the ANCHOR is. `outgoing`: anchor → picked, as with `remembers`,
+   * `equips` and `relates_to`. `incoming`: picked → anchor, as with
+   * `attached_to`, whose source is the attachment.
+   */
+  direction: 'outgoing' | 'incoming';
+  /**
+   * The picker also offers "＋ New …":
+   *   · 'composer' opens the host's existing create dialog for the kind (the
+   *     memory composer, which writes its own link);
+   *   · 'attached' creates the entity with `attachTo` on this row's edge in
+   *     the same command, then opens it.
+   * Absent ⇒ pick-only.
+   */
+  create?: 'composer' | 'attached';
+  /**
+   * Set when two linked peers of this kind with the same title COLLIDE
+   * downstream. Skills do: a spawn loads only the first of two same-name task
+   * skills and declares the other skipped. The picker marks a candidate whose
+   * normalized title matches one already linked through this row, with this
+   * sentence, so the collision shows at attach time, not only at Run.
+   */
+  titleCollision?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,7 +1400,7 @@ export interface KindConfig {
    * `list.quickCreate` continues to decide whether the header has a create
    * affordance at all.
    */
-  createForm?: 'scheduled-work' | 'file-upload';
+  createForm?: 'scheduled-work' | 'file-upload' | 'skill-file';
   /** WLT §2.1; null for channel (special — reserved word) AND message (anchored). */
   slug: string | null;
   strategy: RouteStrategy;
@@ -1327,7 +1428,7 @@ export interface KindConfig {
    *
    * It was declared per-row when `task` was the only launchable kind, and the
    * cost of that showed up as absence: launching is open to every kind the
-   * server will derive a task for (migration 064 — all but `work_session`), but
+   * server will derive a task for (migration 064; `work_session` too since 200), but
    * eleven kinds simply never set the flag and so never grew a Run button.
    * Making the permissive case the default turns a forgotten flag from a
    * silently missing feature into a deliberate opt-out.

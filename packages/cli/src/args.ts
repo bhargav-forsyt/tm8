@@ -27,11 +27,41 @@
  * not exist in this grammar at all.
  */
 import { readFileSync } from 'node:fs';
+import { resolveJournalClass } from './journal-stats.js';
+import { isAgentContext } from './credentials.js';
+import { resolveReceiptMode, type ReceiptMode } from './receipt.js';
 import { CliError, EXIT_USAGE } from './exit.js';
 import { journal } from './journal.js';
 import { OUTPUT_FORMATS, type OutputFormat } from './output.js';
 
 /** Global options. They bind target, context, and output, never payload. */
+/**
+ * WHAT AN AGENT GETS WHEN IT ASKS FOR NOTHING.
+ *
+ * `--terse` (F5) shipped opt-in and, measured across 640 journaled sessions,
+ * was passed by 19 of them. Meanwhile `entity get` — the single most expensive
+ * command in the corpus at 40.2M est tokens — returns 67,669 bytes where its
+ * terse projection returns 32,071, and the fields it drops are decoration:
+ * counters, badges, spaceId, visibility, position, timestamps. `version` and
+ * `state` are never projected away, so the optimistic-concurrency guard and the
+ * work signals survive intact.
+ *
+ * An opt-in saving nobody opts into is not a saving. So for an AGENT-class
+ * invocation the projection is the default, and the three escapes that already
+ * existed still hold: `--full` restores the envelope in one flag, every
+ * projected node is stamped `projected: true` so no reader has to guess which
+ * shape it holds, and a HUMAN at their own terminal is untouched.
+ *
+ * TM8_NO_TERSE_DEFAULT=1 is the kill switch — one env var, no deploy, if the
+ * journal A/B says this costs an agent something it needed.
+ */
+function defaultRender(): 'full' | 'terse' {
+  if (process.env.TM8_NO_TERSE_DEFAULT === '1') return 'full';
+  // Same class heuristic the journal and the read-cache use, so the three
+  // subsystems can never disagree about who is running.
+  return resolveJournalClass(process.env, [], process.cwd()) === 'agent' ? 'terse' : 'full';
+}
+
 export const GLOBAL_OPTIONS = ['server', 'space', 'as', 'format', 'timeout', 'no-color', 'quiet', 'fresh', 'terse', 'full'] as const;
 
 /**
@@ -45,10 +75,12 @@ export const BOOLEAN_OPTIONS: ReadonlySet<string> = new Set([
   // §7.5 destructive confirmation
   'yes',
   // §4 per-command booleans
+  'all',                 // skill scan --all
   'off',                 // entity react --off
   'ready',               // entity query --ready
   'unread',              // inbox list --unread
   'until-match',         // event watch --until-match
+  'events',              // event changes --events — thin rows instead of the digest
   'overwrite',           // file download --overwrite
   'force',               // session terminate --force
   'grant-only',          // session attach --grant-only
@@ -59,6 +91,7 @@ export const BOOLEAN_OPTIONS: ReadonlySet<string> = new Set([
   'confirm-agent-generated', // teammate interaction-profile set-default
   'no-session-link',     // entity create — suppress the automatic created_in edge
   'clear',               // task axis --clear
+  'untick',              // task tick --untick
   'node-admin',          // auth signup --node-admin
   'print-token',         // auth login — print instead of storing per-server
   'show',                // auth claim --show — reprint the on-box claim token
@@ -200,6 +233,12 @@ export interface GlobalOptions {
    * request — so when both are present, full wins.
    */
   render: 'full' | 'terse';
+  /**
+   * How the ten receipt commands print (spec 01a0cf2e, `receipt.ts`): the
+   * compact receipt for agent-class callers, today's result for `--full`, and
+   * today's result plus a deprecation notice for everyone else.
+   */
+  receipts: ReceiptMode;
   help: boolean;
   version: boolean;
 }
@@ -212,6 +251,12 @@ export interface ParsedInvocation {
   /** Everything after a literal `--`, unparsed. */
   passthrough: string[];
   globals: GlobalOptions;
+  /**
+   * The argv this invocation was parsed from, verbatim. An error receipt's
+   * `next` (spec 01a0cf2e §4.3) is "the same command" plus or minus one flag,
+   * and only the caller's own tokens say what that command was.
+   */
+  argv: readonly string[];
 }
 
 export function parseFormat(raw: string): OutputFormat {
@@ -401,12 +446,18 @@ export function parseInvocation(argv: readonly string[]): ParsedInvocation {
     color: !noColor,
     quiet,
     fresh,
-    render: full ? 'full' : terse ? 'terse' : 'full',
+    render: full ? 'full' : terse ? 'terse' : defaultRender(),
+    receipts: resolveReceiptMode({
+      full,
+      agentContext: isAgentContext(process.env),
+      journalClass: resolveJournalClass(process.env, [], process.cwd()),
+      env: process.env,
+    }),
     help,
     version,
   };
 
-  return { positionals, options: new OptionBag(bag), passthrough, globals };
+  return { positionals, options: new OptionBag(bag), passthrough, globals, argv: [...argv] };
 }
 
 /**

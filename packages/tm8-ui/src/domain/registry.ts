@@ -542,6 +542,18 @@ const CATEGORY_TABS: readonly StatusCategoryTab[] = [
 ];
 
 /**
+ * The skill kind's own tab row, in place of the ruled four; see the skill
+ * entry. Each tab keeps `deleted: 'exclude'` so the Archived chip composes
+ * with it exactly as it does with a category tab.
+ */
+const SKILL_TABS: readonly StatusCategoryTab[] = [
+  { id: 'all', label: 'All', filter: { deleted: 'exclude' } },
+  { id: 'equipped', label: 'Equipped', filter: { skillEquipped: true, deleted: 'exclude' } },
+  { id: 'not_equipped', label: 'Not equipped', filter: { skillEquipped: false, deleted: 'exclude' } },
+  { id: 'missing', label: 'Missing files', filter: { skillMissing: true, deleted: 'exclude' } },
+];
+
+/**
  * ARCHIVED, AS A FILTER CHIP — the other half of retiring the archive tab.
  *
  * `deleted` is a SCALAR clause, so `narrow()`'s later-wins rule lets this
@@ -789,6 +801,30 @@ const ROWS: readonly KindConfig[] = [
     }),
     panel: {
       archetype: 'subtree',
+      /* THE ATTACH PALETTE (task 01a0cfb0, decisions on 01a0008f). One chip
+         per kind, each writing the link that kind already means to a task.
+         Every pair was checked against the DB edge registry: `remembers`
+         src * (090), `equips` src task (001), `attached_to` src
+         file|doc|artifact (052) and drawing (194), `relates_to` * → *. */
+      attachPalette: [
+        { kind: 'memory', label: 'Memories', edgeType: 'remembers', direction: 'outgoing', create: 'composer' },
+        { kind: 'drawing', label: 'Drawings', edgeType: 'attached_to', direction: 'incoming', create: 'attached' },
+        { kind: 'doc', label: 'Docs', edgeType: 'attached_to', direction: 'incoming', create: 'attached' },
+        { kind: 'artifact', label: 'Artifacts', edgeType: 'attached_to', direction: 'incoming' },
+        {
+          kind: 'skill',
+          label: 'Skills',
+          edgeType: 'equips',
+          direction: 'outgoing',
+          /* A spawn keeps the first of two same-name task skills (name key as
+             in execution's `skillIdentityKey`) and skips the other. */
+          titleCollision: 'A skill with this name is already equipped here. A Run loads only the first one.',
+        },
+        // Links, never assigns: an assignee is a task field, not an edge.
+        { kind: 'team_member', label: 'Teammates', edgeType: 'relates_to', direction: 'outgoing' },
+        // Context for a spawned session, by id only (never a transcript).
+        { kind: 'work_session', label: 'Sessions', edgeType: 'relates_to', direction: 'outgoing' },
+      ],
       /* The task's memory working set (085 widened `remembers.src_kinds` to
          the wildcard; P2 auto-injects a spawn task's remembered memories).
          Declared as the SAME block the teammate row uses — `SubtreeBody`
@@ -905,6 +941,7 @@ const ROWS: readonly KindConfig[] = [
           { source: 'agentTool' },
           { source: 'model' },
           { source: 'shareMode' },
+          { source: 'driveMode' },
           { source: 'workingActors' },
         ],
         pulse: { signal: 'terminal-activity', gate: 'live' },
@@ -993,8 +1030,14 @@ const ROWS: readonly KindConfig[] = [
        * control" ruling that took the tick out in the first place. The swap is
        * per-ROW state, so the component that sees the row owns it; this array
        * keeps saying which verbs the kind HAS.
+       *
+       * `share-session` follows the identical reading (187). Declared here in
+       * its PRIVATE half, because that is the state a session is in before
+       * anyone has decided anything about it; `sharingControlFor` swaps it to
+       * `unshare-session` from the row's own `shareMode`, and `unshare-session`
+       * is absent from this array for exactly the reason `resume` is.
        */
-      rowActions: ['complete', 'terminate'],
+      rowActions: ['complete', 'share-session', 'terminate'],
       stateControl: SESSION_STATE_CONTROL,
     }),
     panel: {
@@ -1488,17 +1531,32 @@ const ROWS: readonly KindConfig[] = [
     chip: { glyph: '✦', tintBy: 'equipped', tones: { true: 'run', false: 'idle' } },
     card: { fields: ['equipped', 'excerpt', 'activityAt'] },
     list: baseList({
-      tile: { badges: [{ source: 'equipped' }] },
-      inlineEdit: { title: true },
+      tile: { badges: [{ source: 'provider' }, { source: 'level' }, { source: 'skillRoot' }, { source: 'equipped' }, { source: 'missing' }] },
+      filters: [
+        { id: 'provider', label: 'Provider', options: ['agents', 'claude', 'codex', 'hermes', 'tm8'].map(value => ({ id: value, label: value, filter: { skillProvider: value } })) },
+        { id: 'level', label: 'Level', options: ['project', 'user', 'nested', 'system', 'admin', 'plugin', 'synced', 'session', 'space'].map(value => ({ id: value, label: value, filter: { skillLevel: value } })) },
+        { id: 'equipped', label: 'Equipped', options: [{ id: 'mine', label: 'Equipped by me', filter: { edge: { type: 'equips', direction: 'incoming', entityId: VIEWER_ACTOR } } }] },
+      ],
+      inlineEdit: { title: false },
+      // NOT THE RULED FOUR. A skill is a file on disk, seeded `done` as a
+      // resolution predicate (like the fact kinds above), so To Do / In
+      // Progress / Cancelled were permanently empty and every skill sat under
+      // Done (user ruling, task 01a0ccd9). It tabs by what a skill does have:
+      // whether anyone equips it and whether its files are still on disk. The
+      // bands overlap (a missing skill can still be equipped), so `All`
+      // carries the total. The old `Missing` filter chip is now a tab.
+      categories: SKILL_TABS,
+      tabTotal: 'all',
     }),
     panel: {
-      archetype: 'generic',
+      archetype: 'equipment',
       blocks: [
         { block: 'fields', label: 'DEFINITION' },
         { block: 'items', label: 'EQUIPPED BY' },
         COLLECTIONS_BLOCK,
       ],
     },
+    createForm: 'skill-file',
     palette: { createLabel: 'New skill' },
   },
 
@@ -1757,6 +1815,50 @@ const ROWS: readonly KindConfig[] = [
     },
     editFields: [
       { target: 'title', label: 'Title', required: true, placeholder: 'Launch flow' },
+    ],
+  },
+
+  /*
+   * -- drawing (migration 194: an Excalidraw canvas as an entity) --
+   *
+   * THE CANVAS IS THE BODY. `graph` reasoned its way to putting a picture
+   * first and this row inherits that conclusion, but goes one step further:
+   * the blueprint block is READ-ONLY because Craft's studio is where a graph
+   * is edited, and a drawing has no studio. The panel is the only place it is
+   * ever drawn, so the block is the editor.
+   *
+   * `quickCreate` is on: a drawing's empty state is a legitimate starting
+   * point — a title and a blank canvas is exactly what "new drawing" means,
+   * unlike a kind that needs a runtime binding before it means anything.
+   *
+   * `primaries: ['edit']` covers the TITLE only. The scene is saved by the
+   * canvas itself under the ordinary version guard, not through the edit
+   * sheet, which is why no scene field is declared here (§15.1 requires every
+   * declared field to be reachable, and a 40-shape scene is not a form input).
+   */
+  {
+    kind: 'drawing',
+    label: 'Drawing',
+    labelPlural: 'Drawings',
+    icon: '✎',
+    iconArt: KIND_ART.drawing,
+    slug: 'drawings',
+    strategy: 'collection',
+    defaultMode: 'list',
+    hiddenModes: ['board', 'tree'],
+    chip: { glyph: '✎', tintBy: 'none' },
+    card: { fields: ['excerpt', 'activityAt', 'createdBy'] },
+    list: baseList({
+      quickCreate: true,
+      tile: { badges: [{ source: 'messages' }] },
+    }),
+    panel: {
+      archetype: 'generic',
+      blocks: [{ block: 'canvas' }, { block: 'fields', label: 'DRAWING' }, COLLECTIONS_BLOCK],
+      primaries: ['edit'],
+    },
+    editFields: [
+      { target: 'title', label: 'Title', required: true, placeholder: 'Login wireframe' },
     ],
   },
 
@@ -2226,33 +2328,36 @@ const ROWS: readonly KindConfig[] = [
 
 /**
  * The ONE authority for "which kinds cannot launch" — a DENYLIST, because the
- * answer is now "all of them but one".
+ * answer is "all of them".
  *
- * `derive_task_for_entity` (064) raises for `work_session` and auto-derives a
- * "Work on: <title>" task for every other live kind, so the backend's answer to
- * "can I point an agent at this?" is yes-except-one. Expressing that as ~20
- * hand-written `launchable: true` rows made the common case the one you had to
- * remember, and the flag was in fact missing from eleven kinds that the server
- * would have happily launched — Run simply did not appear on them.
+ * `derive_task_for_entity` (064) derives a "Work on: <title>" task for every
+ * live kind, so the backend's answer to "can I point an agent at this?" is yes.
+ * Expressing that as ~20 hand-written `launchable: true` rows made the common
+ * case the one you had to remember, and the flag was in fact missing from
+ * eleven kinds that the server would have happily launched — Run simply did
+ * not appear on them.
  *
  * Inverted, `launchable` stops being an input a row can forget and becomes
  * DERIVED OUTPUT of this set (see below), so a new kind is launchable by
  * default and opting out is a deliberate, visible edit in one place.
+ *
+ * EMPTY, and the set stays so that opting out remains a one-line edit here.
+ *
+ *   · `work_session` was the one refusal, and it was the backend's: 064 raised
+ *     for it on the reading that "a session is a run — it is not something you
+ *     run". Migration 200 lifts it on the owner's ask ("sessions also should
+ *     have a play button … it spawns another session with context of this
+ *     session"): ▶ on a session derives a "Continue: <title>" task that points
+ *     back at it and tells the new agent to read its transcript and wait. The
+ *     launch popup treats that subject as CONTINUED, not edited — see
+ *     `continuesSubject` in `domain/launch.ts`.
+ *   · `graph` and `loop` were here briefly, carried over from the `launchable:
+ *     false` rows this set replaced. Owner ruling 2026-08-17: both launch.
+ *     Their old rationale argued that Run MEANS something else on those kinds
+ *     — but that is an argument about which verb should be PRIMARY, not about
+ *     whether an agent can be pointed at the row.
  */
-const NOT_LAUNCHABLE: ReadonlySet<string> = new Set([
-  // The only refusal, and it is the BACKEND's: `derive_task_for_entity` raises
-  // for `work_session`. A session is a run — it is not something you run.
-  'work_session',
-  //
-  // `graph` and `loop` were here briefly, carried over from the `launchable:
-  // false` rows this set replaced. Owner ruling 2026-08-17: both launch. Their
-  // old rationale argued that Run MEANS something else on those kinds (a graph
-  // is orchestrated from the Craft tab; a loop's job is to run something else
-  // on a period) — but that is an argument about which verb should be PRIMARY,
-  // not about whether an agent can be pointed at the row, and the server will
-  // derive a task for either. Whatever else a kind offers, "work on this" is
-  // still a coherent thing to ask for.
-]);
+const NOT_LAUNCHABLE: ReadonlySet<string> = new Set<string>([]);
 
 /**
  * `run` — the launch action, in every place that renders one.

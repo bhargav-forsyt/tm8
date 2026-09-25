@@ -256,6 +256,18 @@ const UNBLOCKED_PREDICATE = `not exists (
      and not internal.is_resolved(dep.dst_id)
 )`;
 
+/**
+ * The searchable title text. `entities` has no title column — each kind keeps
+ * its own on its detail row, and `titleOf` (entity-read.ts) picks the arm in
+ * JS. Every join in `ENTITY_FROM` is `entity_id`-unique, so at most one of
+ * these is non-null per row and `coalesce` selects exactly the kind's arm.
+ * A memory's title is derived from its statement, so the statement is what
+ * is searched. Kinds without an arm here never match a title search.
+ */
+const TITLE_TEXT = `coalesce(t.title, d.title, ws.title, drw.title, sk.name, sp.name,
+  tm.name, mem.display_name, col.name, ch.name, vc.name, f.name, memo.statement,
+  art.name, lp.title, gr.title, cht.title, ctr.title, pr.title, ppd.name, '')`;
+
 function buildWhere(query: CollectionQuery, p: Params): string[] {
   const where: string[] = [`e.space_id = ${p.add(assertUuid(query.spaceId, 'spaceId'))}`];
   const f = query.filters ?? {};
@@ -329,6 +341,34 @@ function buildWhere(query: CollectionQuery, p: Params): string[] {
     where.push(`ws.status = any(${p.add(f.sessionStatus)}::text[])`);
   }
 
+  // Memory text (the MCP `memory_search` tool): rows whose statement,
+  // mechanism, subject scope or does-not-establish text contains ANY of the
+  // terms, case-insensitively. Kind-narrowing like `status` — the four
+  // columns live on the memory arm — said explicitly as `memo.entity_id is
+  // not null` so the planner discards every other kind before it lowercases
+  // anything. `position`, not LIKE: raw substring semantics with nothing to
+  // escape, the same `includes` the tool used to run over a 200-char
+  // title/excerpt prefix, moved to the columns that prefix could not reach.
+  if (f.terms && f.terms.length > 0) {
+    where.push('memo.entity_id is not null');
+    where.push(`exists (
+      select 1 from unnest(${p.add(f.terms)}::text[]) term
+       where position(lower(term) in lower(concat_ws(' ',
+               memo.statement, memo.mechanism, memo.subject_scope, memo.does_not_establish))) > 0
+    )`);
+  }
+
+  // Title substring, any kind (the entity pickers: the task attach palette
+  // pairs it with `kinds`). `position`, not LIKE, for the reason `terms`
+  // gives above: raw substring semantics with no wildcard to escape — a `%`
+  // typed into a picker is a percent sign, not a pattern.
+  if (f.titleContains !== undefined) {
+    const needle = f.titleContains.trim();
+    if (needle.length > 0) {
+      where.push(`position(lower(${p.add(needle)}::text) in lower(${TITLE_TEXT})) > 0`);
+    }
+  }
+
   // A CREDENTIAL LOGIN TERMINAL IS NOT WORK (082, architect Ruling 16) and the
   // rule belongs HERE, not only in the client.
   //
@@ -395,6 +435,15 @@ function buildWhere(query: CollectionQuery, p: Params): string[] {
     where.push(`e.activity_at >= ${p.add(f.activeSince)}::timestamptz`);
   }
 
+  for (const [key, column] of [['skillProvider', 'provider'], ['skillLevel', 'level'], ['skillRoot', 'root_ref'], ['skillMissing', 'missing']] as const) {
+    if (f[key] !== undefined) where.push(`exists(select 1 from public.skills sf where sf.entity_id = e.id and sf.${column} = ${p.add(f[key])})`);
+  }
+  if (f.skillEquipped !== undefined) {
+    // The same predicate the read projections compute `state.equipped` from
+    // (entity-read.ts), so the Equipped tab and the row's equipped badge
+    // cannot disagree about which skills are equipped.
+    where.push(`${f.skillEquipped ? '' : 'not '}exists (select 1 from public.edges eq where eq.dst_id = e.id and eq.type = 'equips')`);
+  }
   if (f.readyToPull) {
     // Phase 5 (152): the category, not the two literals it used to enumerate.
     // `open` and `pulled` were exactly the `to_do` literals, so this is the same

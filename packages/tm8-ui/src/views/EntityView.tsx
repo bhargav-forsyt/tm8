@@ -88,7 +88,9 @@ import './entity-view.css';
 import { attentionSectionFor } from './attentionSurface';
 import { debugSurfaceFor } from './debugSurface';
 import { sessionStatsSurfaceFor } from './sessionStatsSurface';
+import { sessionContextSurfaceFor } from './sessionContextSurface';
 import { gitSurfaceFor } from './gitSurface';
+import { changesSurfaceFor } from './changesSurface';
 import { taskGitSectionFor } from './taskGitSection';
 import { graphSurfaceFor } from './graphSurface';
 import { AuxEntityPanel } from './auxPanel';
@@ -462,8 +464,10 @@ export function EntityView(props: EntityViewProps) {
       /* The live projection, not `detail.connections`: the ✓ marks must move
          with the write the menu just made. */
       connectionsOf: data.connectionsOf,
+      /* The row's sharing slot, and the detail panel's copy of it. */
+      onShareSession: primaries.shareSession,
     }),
-    [config.kind, ctx, data, rowLifecycle],
+    [config.kind, ctx, data, rowLifecycle, primaries.shareSession],
   );
 
   /* Authoring mount 7a, EntityView host: +New in the list head creates for
@@ -840,7 +844,9 @@ export function EntityView(props: EntityViewProps) {
       attentionSection={detail ? attentionSectionFor(data.seam, data.spaceId, selectedId, () => data.pull?.(selectedId)) : undefined}
       debugSurface={detail ? debugSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
       sessionStatsSurface={detail ? sessionStatsSurfaceFor(data.seam, selectedId) : undefined}
+      sessionContextSurface={detail ? sessionContextSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
       gitSurface={detail ? gitSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
+      changesSurface={detail ? changesSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
       taskGitSection={taskGitSectionFor(data.seam, detail, (id) => setAux({ sort: 'entity', id: id as EntityId }))}
       graphSurface={
         detail
@@ -956,8 +962,13 @@ export function EntityView(props: EntityViewProps) {
           projects={data.launch.projects}
           profiles={data.launch.profiles}
           memories={data.launch.memories}
+          loadSkillPreview={data.launch.loadSkillPreview}
+          jev={data.launch.jev}
+          spaceId={data.spaceId}
           capacity={data.launch.capacity}
           loadCredentialStatus={data.seam.credentials.status}
+          loadSpaceCredentials={data.seam.credentials.space.list}
+          loadSpacePolicy={data.seam.credentials.space.policy}
           onCancel={() => props.onLaunchCancel?.()}
           onLaunch={(config) => props.onLaunchSubmit?.(config)}
           onDispatch={props.onLaunchDispatch}
@@ -1090,6 +1101,7 @@ export function EntityView(props: EntityViewProps) {
              WorkspaceView passed one. A verb with a dedicated prop is dead on
              every host that forgets it, so all three pass it now. */
           onTerminate={primaries.terminate}
+          onShareSession={primaries.shareSession}
           onResume={primaries.resume}
           onSetValue={rowLifecycle.setValue}
           onSetAxis={rowLifecycle.setAxis}

@@ -33,11 +33,12 @@ import type { CredentialProviderName, OperationName } from '@tm8/contract';
 import {
   CredentialsDeleteResultSchema,
   CredentialsLoginSessionFinishResultSchema,
+  CredentialsLoginSessionStartInputSchema,
   CredentialsLoginSessionStartResultSchema,
   CredentialsStatusViewSchema,
   OPERATIONS,
 } from '@tm8/contract';
-import { CREDENTIAL_LOGIN_COMMANDS } from '@tm8/execution';
+import { CREDENTIAL_LOGIN_COMMANDS, type CredentialContainmentCause } from '@tm8/execution';
 
 import type { Db, DbClaims, Querier } from '../../src/db/types.js';
 import type { FacadeDeps } from '../../src/facade/deps.js';
@@ -49,11 +50,13 @@ import {
 } from '../../src/facade/handlers/w2/credentials.js';
 import { W2CredentialCatalogService } from '../../src/facade/services/w2/credential-catalog.js';
 import { W2CredentialSessionsService } from '../../src/facade/services/w2/credential-sessions.js';
+import { spaceCredentialViewOf } from '../../src/facade/services/w2/space-credential-catalog.js';
 import type { RequestContext } from '../../src/http/types.js';
 
 const SPACE_ID = '00000000-0000-7000-8000-000000000001';
 const SESSION_ID = '00000000-0000-7000-8000-0000000000a1';
 const AGENT_SESSION_ID = '00000000-0000-7000-8000-0000000000b1';
+const SPACE_CREDENTIAL_ID = '00000000-0000-7000-8000-0000000000c1';
 
 // Handler composition intentionally uses the process environment, just like
 // production. Give every existing status/start positive control an executable
@@ -148,6 +151,18 @@ class FakeTerminals {
   hasLiveTerminal(): boolean {
     return true;
   }
+  /**
+   * An agent session goes through the containment port
+   * (`SpawnService.containCredentialSession` in production), which kills and
+   * records the ending. Same order sink, so the revoke-first property still
+   * reads off `sink`.
+   */
+  readonly causes: string[] = [];
+  async containCredentialSession(sessionId: string, cause: CredentialContainmentCause) {
+    this.causes.push(`${sessionId}:${cause}`);
+    const outcome = this.terminate(sessionId) as 'killed' | 'not_found' | 'error';
+    return { outcome, recorded: outcome === 'killed' };
+  }
   // `launch` is never reached in this suite: nothing here calls
   // `loginSessions.start` through to the PTY without stubbing the RPC first.
   launch(): never {
@@ -213,7 +228,10 @@ function registryFor(
   registerCredentialHandlers(registry, deps(db), {
     // Structurally a launcher for the two seams that use it here.
     launcher: terminals as never,
+    agentSessions: terminals,
     dataDir: '/tmp/tm8-credentials-test',
+    // SC-3: never reach a real vendor from a unit suite.
+    probeSpaceCredential: async () => ({ ok: true, displayLogin: null }),
   });
   return registry;
 }
@@ -234,12 +252,28 @@ function bodyFor(opName: OperationName): unknown {
   if (opName === 'credentials.loginSessions.start') {
     return { spaceId: SPACE_ID, provider: 'anthropic' };
   }
+  // SC-3: the space-credential commands re-parse their bodies, so each gets
+  // one that its schema accepts — the positive control must reach the service.
+  if (opName === 'credentials.space.create') {
+    return { provider: 'anthropic', shape: 'api_key', label: 'Team key', secret: 'sk-test-positive-control' };
+  }
+  if (opName === 'credentials.space.rekey') return { secret: 'sk-test-positive-control' };
+  if (opName === 'credentials.space.rename') return { label: 'Renamed' };
+  if (opName === 'credentials.space.policy.set') return { allowedSources: ['space'] };
+  if (opName === 'node.credentials.policy.set') return { allowNode: false };
   return {};
 }
 
 function paramsFor(opName: OperationName): Record<string, string> {
   if (opName === 'credentials.delete') return { provider: 'anthropic' };
   if (opName === 'credentials.loginSessions.finish') return { id: SESSION_ID };
+  if (opName.startsWith('credentials.serviceKeys.')) return { provider: 'anthropic' };
+  if (opName === 'credentials.space.policy.set' || opName === 'node.credentials.policy.set') {
+    return { spaceId: SPACE_ID, provider: 'anthropic' };
+  }
+  if (opName.startsWith('credentials.space.')) {
+    return { spaceId: SPACE_ID, credentialId: SPACE_CREDENTIAL_ID };
+  }
   return {};
 }
 
@@ -256,6 +290,20 @@ describe('the four credential operations exist in the contract', () => {
       'DELETE /v2/identity/credentials/:provider',
       'POST /v2/identity/credentials/login-sessions',
       'POST /v2/identity/credentials/login-sessions/:id/finish',
+      // Jev lane K: the TypeSafe service key — its own resource, never a provider above.
+      'GET /v2/identity/credentials/service-keys',
+      'PUT /v2/identity/credentials/service-keys/:provider',
+      'DELETE /v2/identity/credentials/service-keys/:provider',
+      // SC-3: space credentials — keyed by space for list/create/policy, by
+      // credential id for the per-credential commands.
+      'GET /v2/spaces/:spaceId/credentials',
+      'POST /v2/spaces/:spaceId/credentials',
+      'PUT /v2/space-credentials/:credentialId/secret',
+      'POST /v2/space-credentials/:credentialId/default',
+      'PATCH /v2/space-credentials/:credentialId',
+      'DELETE /v2/space-credentials/:credentialId',
+      'GET /v2/spaces/:spaceId/credential-policy',
+      'PUT /v2/spaces/:spaceId/credential-policy/:provider',
     ]);
   });
 
@@ -275,7 +323,9 @@ describe('the four credential operations exist in the contract', () => {
    */
   it('EVERY credentials.* operation in the catalog is mounted — no row left behind', () => {
     const registry = registryFor(new FakeDb());
-    const inCatalog = OPERATIONS.map((op) => op.name).filter((n) => n.startsWith('credentials.'));
+    // SC-3: `node.credentials.*` (node admin) mounts in the same guarded seam.
+    const inCatalog = OPERATIONS.map((op) => op.name)
+      .filter((n) => n.startsWith('credentials.') || n.startsWith('node.credentials.'));
 
     expect(CREDENTIAL_OPERATIONS).toEqual(inCatalog);
     for (const name of inCatalog) {
@@ -467,7 +517,7 @@ const serviceRpcs: RpcHandler = async (fn) => {
 // ---------------------------------------------------------------------------
 
 describe('credentials.status merges two stores and degrades honestly', () => {
-  it('answers all six providers in display order even when nothing is connected', async () => {
+  it('answers every provider in display order even when nothing is connected', async () => {
     const db = new FakeDb(serviceQueries);
     const registry = registryFor(db);
     const view = await invoke(registry, 'credentials.status', context('credentials.status', 'browser'));
@@ -480,14 +530,98 @@ describe('credentials.status merges two stores and degrades honestly', () => {
       'gemini',
       'hermes',
       'cursor',
+      'kimi',
+      'groq',
     ]);
     expect(parsed.providers.every((p) => p.connected === false)).toBe(true);
+
+    // ROUTING IS REPORTED BEFORE IT HAPPENS, AND ONLY IN ONE DIRECTION.
+    //
+    // Nothing is connected here, so no displacement is in effect — and the
+    // anthropic and openai cards say nothing, because there is nothing yet to
+    // warn them about. The kimi and groq cards still describe themselves, with
+    // `active: false`, because "what would connecting this do" is precisely the
+    // question a member has in front of the Connect button. A surface that only
+    // emitted routing for connected providers would answer it only after it was
+    // too late to matter.
+    const routingOf = new Map(parsed.providers.map((p) => [p.provider, p.routing]));
+    expect(routingOf.get('anthropic')).toBeNull();
+    expect(routingOf.get('openai')).toBeNull();
+    expect(routingOf.get('github')).toBeNull();
+    expect(routingOf.get('kimi')).toEqual({
+      agentTool: 'claude-code',
+      role: 'backend',
+      counterpart: 'anthropic',
+      active: false,
+    });
+    expect(routingOf.get('groq')).toEqual({
+      agentTool: 'codex',
+      role: 'backend',
+      counterpart: 'openai',
+      active: false,
+    });
+  });
+
+  it('says on the Kimi card which models it serves, and leaves the Anthropic card alone', async () => {
+    // The member has connected Kimi AND still has a working Anthropic login —
+    // the state that used to read as Kimi taking over. Each now serves its own
+    // models, and only the backend's card needs a routing line to say so.
+    const db = new FakeDb(async (sql) => {
+      if (sql.includes('to_regclass')) return [{ present: false }];
+      if (sql.includes('account_agent_credentials')) {
+        return [
+          {
+            provider: 'anthropic',
+            login: null,
+            auth_method: 'oauth',
+            status: 'active',
+            connected_at: new Date('2026-09-01T00:00:00.000Z'),
+            last_verified_at: new Date('2026-09-01T00:00:00.000Z'),
+          },
+          {
+            provider: 'kimi',
+            login: null,
+            auth_method: 'api_key',
+            status: 'active',
+            connected_at: new Date('2026-09-02T00:00:00.000Z'),
+            last_verified_at: new Date('2026-09-02T00:00:00.000Z'),
+          },
+        ];
+      }
+      return [];
+    });
+    const registry = registryFor(db);
+    const parsed = CredentialsStatusViewSchema.parse(
+      await invoke(registry, 'credentials.status', context('credentials.status', 'browser')),
+    );
+    const routingOf = new Map(parsed.providers.map((p) => [p.provider, p.routing]));
+
+    // The backend says what it is doing.
+    expect(routingOf.get('kimi')).toEqual({
+      agentTool: 'claude-code',
+      role: 'backend',
+      counterpart: 'anthropic',
+      active: true,
+    });
+
+    // And the native provider is NOT displaced. Routing is per model: Claude
+    // models keep running on the Anthropic login while Kimi is connected, so
+    // the Anthropic card carries no routing line and says nothing about Kimi.
+    // (Before per-model routing it read "Not currently used for claude-code
+    // sessions — Moonshot AI is connected and takes over".)
+    expect(parsed.providers.find((p) => p.provider === 'anthropic')?.connected).toBe(true);
+    expect(routingOf.get('anthropic')).toBeNull();
+
+    // Groq is not connected, so codex is untouched and openai stays silent.
+    expect(routingOf.get('openai')).toBeNull();
+    expect(routingOf.get('groq')?.active).toBe(false);
   });
 
   it('reports an absent CLI as unavailable, never as a measured disconnection', async () => {
     const catalog = new W2CredentialCatalogService({
       db: new FakeDb(serviceQueries),
       terminals: new FakeTerminals([]),
+      agentSessions: new FakeTerminals([]),
       dataDir: '/tmp/tm8-credentials-test',
       env: { HOME: '/server-home', PATH: '/server-path' },
       binaryResolver: ({ binary }) =>
@@ -608,6 +742,7 @@ describe('R3 — credentials.delete revokes first, then terminates', () => {
     const catalog = new W2CredentialCatalogService({
       db,
       terminals,
+      agentSessions: terminals,
       dataDir: '/tmp/tm8-credentials-test',
       removeCredentialFiles: async () => undefined,
     });
@@ -683,6 +818,7 @@ describe('R3 — credentials.delete revokes first, then terminates', () => {
     const agentQuery = db.queryCalls.find((call) => call.sql.includes('work_sessions'));
     expect(agentQuery?.params[2]).toEqual(expected);
     expect(terminals.terminated).toContain(AGENT_SESSION_ID);
+    expect(terminals.causes).toEqual([`${AGENT_SESSION_ID}:member_credential_disconnected`]);
     expect(result.terminatedAgentSessionIds).toEqual([AGENT_SESSION_ID]);
   });
 
@@ -707,6 +843,7 @@ describe('R3 — credentials.delete revokes first, then terminates', () => {
     const catalog = new W2CredentialCatalogService({
       db,
       terminals: new FakeTerminals([]),
+      agentSessions: new FakeTerminals([]),
       dataDir: '/tmp/tm8-credentials-test',
       revokeGitCredential: async () => undefined,
       removeCredentialFiles: async () => {
@@ -851,6 +988,7 @@ describe('the login session operations answer their contract shapes', () => {
     const registry = new HandlerRegistry();
     registerCredentialHandlers(registry, deps(db), {
       launcher: launcher as never,
+      agentSessions: new FakeTerminals([]),
       dataDir: '/tmp/tm8-credentials-test',
     });
 
@@ -894,6 +1032,7 @@ describe('the login session operations answer their contract shapes', () => {
     const registry = new HandlerRegistry();
     registerCredentialHandlers(registry, deps(db), {
       launcher: launcher as never,
+      agentSessions: new FakeTerminals([]),
       dataDir: '/tmp/tm8-credentials-test',
     });
 
@@ -923,5 +1062,43 @@ describe('the login session operations answer their contract shapes', () => {
     expect(typeof finished.stored).toBe('boolean');
     // No verified GitHub login means the persistence path must not run.
     expect(finished.stored).toBe(false);
+  });
+});
+
+describe('SC-4 — a space login is the same start, with a spaceCredential target', () => {
+  const SPACE = '00000000-0000-4000-8000-000000000001';
+  const CREDENTIAL = '00000000-0000-4000-8000-000000000002';
+  const parse = (body: unknown) => CredentialsLoginSessionStartInputSchema.safeParse(body);
+
+  it('takes exactly one of a label (a new credential) or a credentialId (log in again)', () => {
+    expect(parse({ spaceId: SPACE, provider: 'anthropic', spaceCredential: { label: 'Team Claude' } }).success).toBe(true);
+    expect(parse({ spaceId: SPACE, provider: 'openai', spaceCredential: { credentialId: CREDENTIAL } }).success).toBe(true);
+    expect(parse({ spaceId: SPACE, provider: 'anthropic', spaceCredential: { label: 'x', credentialId: CREDENTIAL } }).success).toBe(false);
+    expect(parse({ spaceId: SPACE, provider: 'anthropic', spaceCredential: {} }).success).toBe(false);
+    expect(parse({ spaceId: SPACE, provider: 'anthropic', spaceCredential: { credentialId: 'not-a-uuid' } }).success).toBe(false);
+    // An account id is never a field here (I1).
+    expect(parse({ spaceId: SPACE, provider: 'anthropic', spaceCredential: { label: 'x', accountId: CREDENTIAL } }).success).toBe(false);
+  });
+
+  it('refuses a space login for a provider no login terminal exists for', () => {
+    expect(parse({ spaceId: SPACE, provider: 'github', spaceCredential: { label: 'x' } }).success).toBe(false);
+    // Control: the member's own github login is untouched.
+    expect(parse({ spaceId: SPACE, provider: 'github' }).success).toBe(true);
+  });
+
+  it('returns the credential as the metadata-only view: the store row does not fit it, its view does', () => {
+    const stored = {
+      id: CREDENTIAL, spaceId: SPACE, provider: 'anthropic' as const, shape: 'login' as const,
+      label: 'Team Claude', isDefault: false, status: 'pending' as const, createdByAccountId: null,
+      displayLogin: null, keyHint: null, pendingExpiresAt: '2026-09-24T00:00:00.000Z',
+      createdAt: '2026-09-24T00:00:00.000Z', updatedAt: '2026-09-24T00:00:00.000Z',
+      lastUsedAt: null, lastProbeAt: null,
+    };
+    const base = {
+      workSessionId: CREDENTIAL, spaceId: SPACE, provider: 'anthropic', expiresAt: '2026-09-24T00:00:00.000Z',
+      command: 'claude auth login',
+    };
+    expect(CredentialsLoginSessionStartResultSchema.safeParse({ ...base, spaceCredential: stored }).success).toBe(false);
+    expect(CredentialsLoginSessionStartResultSchema.safeParse({ ...base, spaceCredential: spaceCredentialViewOf(stored) }).success).toBe(true);
   });
 });

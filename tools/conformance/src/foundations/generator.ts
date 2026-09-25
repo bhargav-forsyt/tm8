@@ -224,6 +224,7 @@ function nounForOperation(operation: OperationName): string {
     case 'handoffs': return 'handoff';
     case 'interactionProfiles': return 'interaction-profile';
     case 'teamMembers': return 'teammate';
+    case 'skills': return 'skill';
     case 'voice': return 'voice';
     case 'artifacts': return 'artifact';
     // A noun is required even though all four `credentials.*` rows are
@@ -231,11 +232,17 @@ function nounForOperation(operation: OperationName): string {
     // whether the noun has any invocable command today, and that is the right
     // shape: the operations are discoverable rather than hidden.
     case 'credentials': return 'credential';
+    // `node.credentials.*` (SC-3) groups with the credential rows it bounds;
+    // NOUN_BY_FAMILY in the CLI projection says the same.
+    case 'node': return 'credential';
     // `chat`, not `chat-thread`: 176 made a chat an entity kind whose slug
     // is `chat`, and the CLI projection's NOUN_BY_FAMILY moved with it. The
     // two maps must agree or the cross-check in
     // `packages/cli/test/discovery-operations.test.ts` reds.
     case 'chat': return 'chat';
+    // `launch.suggest` (Jev, UI-only, `cmd: null`) groups under the session
+    // noun it advises; NOUN_BY_FAMILY in the CLI projection says the same.
+    case 'launch': return 'session';
 
     // 177: the CLI noun is `container` (`NOUN_BY_FAMILY.containers`), singular
     // like every other row here.
@@ -367,14 +374,36 @@ export async function buildW1ConformanceManifest(): Promise<W1ConformanceManifes
   // incremented.
   // 172 -> 197 (2026-09-03, TM8-CONTAINERS-DESIGN §4.1): the 25 `containers.*`
   // rows. MEASURED, never carried.
-  assertEqual(names.length, 197, 'catalog total');
+  // 197 -> 198 (187, session sharing): execution.sessions.share — one POST
+  // command on the work-session entity. MEASURED.
+  // 197 -> 198 (2026-09-19, Changes surface phase 1): execution.gitStage, one
+  // POST command — stage|unstage on a session worktree's index. MEASURED.
+  // 198 -> 199 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): main's execution.sessions.share and this branch's
+  // execution.gitStage BOTH land. Each branch wrote 198 for its own row, so the
+  // merge kept 198 silently and only the comments conflicted. MEASURED on the
+  // merged tree from this generator's own drift report.
+  // 208 -> 209 (2026-09-23, Jev lane F): launch.suggest, one POST command. MEASURED.
+  // 209 -> 212 (2026-09-23, Jev lane K): credentials.serviceKeys.{status,put,delete}. MEASURED.
+  // 212 -> 222 (2026-09-23, SC-3): credentials.space.{list,create,rekey,setDefault,rename,delete,policy.get,policy.set}
+  // and node.credentials.{status,policy.set}. MEASURED.
+  // 222 -> 223 (change feed step 3): events.changes, one GET read. MEASURED.
+  // 223 -> 224 (bug 01a0d2f1): entities.commands.tick, one POST command. MEASURED.
+  assertEqual(names.length, 224, 'catalog total');
   // 157 -> 159 (114): spaces.members.updateRole (PATCH command) and
   // auth.invite.resolve (POST read — the code rides in the body, never a URL).
   // 161 -> 164 (W4/132): the three taskWorkflows rows are v1.
   // 164 -> 167 (141): the three account-lifecycle ops are v1.
   // 167 -> 170 (148): the three workflows rows are v1.
   // 170 -> 195 (177): all 25 container rows are v1. MEASURED.
-  assertEqual(V1_OPERATIONS.length, 195, 'v1 total');
+  // 195 -> 196 (187): execution.sessions.share ships as v1.
+  // 195 -> 196: execution.gitStage is v1. MEASURED.
+  // 196 -> 197 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): both new rows ship v1. MEASURED.
+  // 206 -> 207 (Jev lane F): launch.suggest ships v1. MEASURED.
+  // 207 -> 210 (Jev lane K): the three service-key rows ship v1. MEASURED.
+  // 210 -> 220 (SC-3): the ten space/node credential rows ship v1. MEASURED.
+  // 220 -> 221 (change feed step 3): events.changes ships v1. MEASURED.
+  // 221 -> 222 (bug 01a0d2f1): entities.commands.tick ships v1. MEASURED.
+  assertEqual(V1_OPERATIONS.length, 222, 'v1 total');
   assertEqual(RESERVED_OPERATIONS.map(({ name }) => name), ['search.query', 'bridge.fetchBlob'], 'reserved operations');
   assertEqual(additive.map(({ name }) => name), [...ADDITIVE_OPERATION_NAMES], 'A01-A21 order');
   assertEqual(new Set(names).size, names.length, 'unique operation names');
@@ -400,17 +429,42 @@ export async function buildW1ConformanceManifest(): Promise<W1ConformanceManifes
   // 148: GET 60->61, POST 79->80, DELETE 11->12.
   // 177: GET 61->65, POST 80->98, PATCH 11->12, PUT 7->8, WS 1->2. MEASURED.
   // WS is 2 ROWS and still 1 MOUNT — see `router.ws` below.
-  assertEqual(methods, { GET: 65, POST: 98, PATCH: 12, DELETE: 12, PUT: 8, WS: 2 }, 'method accounting');
+  // 187: POST 98->99.
+  // POST 98 -> 99 (2026-09-19): execution.gitStage. MEASURED.
+  // POST 99 -> 100 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): sharing AND gitStage are both POST
+  // commands, so this moves twice from 98. MEASURED.
+  // POST 104 -> 105 (Jev lane F): launch.suggest. MEASURED.
+  // GET 69 -> 70, DELETE 12 -> 13, PUT 8 -> 9 (Jev lane K): the service-key status/delete/put. MEASURED.
+  // GET 70 -> 73, POST 105 -> 107, PATCH 13 -> 14, DELETE 13 -> 14, PUT 9 -> 12 (SC-3): the ten space/node
+  // credential rows. MEASURED.
+  // GET 73 -> 74 (change feed step 3): events.changes. MEASURED.
+  // POST 107 -> 108 (bug 01a0d2f1): entities.commands.tick. MEASURED.
+  assertEqual(methods, { GET: 74, POST: 108, PATCH: 14, DELETE: 14, PUT: 12, WS: 2 }, 'method accounting');
   // 141: command 101->104 — the three account-lifecycle ops are all commands.
   // 148: read 64->65, command 104->106.
   // 177: read 65->69, command 106->126, stream 1->2. MEASURED.
-  assertEqual(kinds, { read: 69, command: 126, stream: 2 }, 'kind accounting');
+  // 187: command 126->127.
+  // command 127 -> 128 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): both new rows are commands. MEASURED.
+  // command 133 -> 134 (Jev lane F): launch.suggest. MEASURED.
+  // read 73 -> 74, command 134 -> 136 (Jev lane K): service-key status is a read, put/delete commands. MEASURED.
+  // read 74 -> 77, command 136 -> 143 (SC-3): list, policy.get and node status read; seven commands. MEASURED.
+  // read 77 -> 78 (change feed step 3): events.changes. MEASURED.
+  // command 143 -> 144 (bug 01a0d2f1): entities.commands.tick. MEASURED.
+  assertEqual(kinds, { read: 78, command: 144, stream: 2 }, 'kind accounting');
   // W4/132: 162 -> 165, the three taskWorkflows routes.
   // 141: 165 -> 168, the three account-lifecycle routes.
   // 148: 168 -> 171, the three workflows routes.
   // 171 -> 195 (177): 24 of the 25 container rows are HTTP; the 25th is the
   // WS alias, which mounts nothing. MEASURED.
-  assertEqual(router.http.length, 195, 'server router HTTP total');
+  // 195 -> 196 (187): the sharing command mounts one POST route.
+  // 195 -> 196 (2026-09-19): execution.gitStage mounts one POST route.
+  // 196 -> 197 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): each new command mounts one POST route. MEASURED.
+  // 206 -> 207 (Jev lane F): launch.suggest mounts one POST route (an honest 501 until its handler lands). MEASURED.
+  // 207 -> 210 (Jev lane K): the three service-key routes. MEASURED.
+  // 210 -> 220 (SC-3): the ten space/node credential routes. MEASURED.
+  // 220 -> 221 (change feed step 3): events.changes mounts one GET route. MEASURED.
+  // 221 -> 222 (bug 01a0d2f1): entities.commands.tick is mounted. MEASURED.
+  assertEqual(router.http.length, 222, 'server router HTTP total');
   // STILL 1, and that is the whole point of `aliasOf`: `containers.stream`
   // adds a discoverable NAME for the existing socket, not a second socket.
   assertEqual(router.ws.length, 1, 'server router WS total');

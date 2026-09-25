@@ -67,7 +67,17 @@ import { createOutput } from '../src/output.js';
 // containers.stream and containers.proxy — are deliberately commandless, which
 // is why the commandless subtraction below moves 25 -> 27. MEASURED on this
 // tree, not carried from the design.
-const EXPECTED_ROWS = 197;
+// 197 -> 198 (187, session sharing): execution.sessions.share — public, with a
+// `session share` command, so the commandless set is UNCHANGED and the derived
+// command-path count moves with this constant on its own. MEASURED.
+// 198 -> 199 (Changes screen Phase 1, INTEGRATED WITH main): execution.gitStage,
+// public and deliberately commandless like the rest of its family, so the
+// commandless subtraction below moves 26 -> 27 while 187's `session share`
+// leaves it alone. Both rows land, so this constant moves twice from 197.
+// MEASURED from this file's own failing run on the MERGED tree.
+// F2 adds skills.scan/list/show.
+// 203 -> 208: skills.roots/create/edit/equip/unequip (F4, #648). MEASURED on the merged tree.
+const EXPECTED_ROWS = 224; /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ // +1 events.changes (change feed step 3). MEASURED. // +10 credentials.space.* + node.credentials.* (SC-3). MEASURED. // +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // // +1 launch.suggest (Jev lane F, 2026-09-23). MEASURED.
 
 const MANIFEST_PATH = fileURLToPath(
   new URL('../../../tools/conformance/generated/w1-conformance-manifest.json', import.meta.url),
@@ -133,7 +143,7 @@ describe('the projection is TOTAL over the catalog', () => {
 });
 
 describe('cross-check: the projection agrees with the W1 conformance manifest', () => {
-  it('sweeps all 197 manifest help rows and agrees on noun and exposure', () => {
+  it('sweeps all 198 manifest help rows and agrees on noun and exposure', () => {
     expect(manifest.help.operations).toHaveLength(EXPECTED_ROWS);
     const checked = new Set<string>();
     for (const row of manifest.help.operations) {
@@ -172,7 +182,7 @@ describe('cross-check: the projection agrees with the W1 conformance manifest', 
 });
 
 describe('the exposure histogram is the one the catalog freeze specifies', () => {
-  it('193 public, 1 composite, 1 internal, 2 reserved', () => {
+  it('194 public, 1 composite, 1 internal, 2 reserved', () => {
     const histogram = { public: 0, composite: 0, internal: 0, reserved: 0 };
     for (const d of DISCOVERY) histogram[d.exposure]++;
     // +4 public from the `credentials.*` family. They are PUBLIC despite having
@@ -181,7 +191,15 @@ describe('the exposure histogram is the one the catalog freeze specifies', () =>
     // refusal — a human `cli` session is admitted by the R2 guard.
     // +3 (W4/132): the taskWorkflows three, all public. MEASURED from the run.
     // 165 -> 168 (148): all three spaces.workflows ops are public.
-    expect(histogram).toEqual({ public: 193, composite: 1, internal: 1, reserved: 2 });
+    // +1 (187): execution.sessions.share is public. It takes the sharing
+    // decision to anyone the RPC will accept — the owner, an actor who may act
+    // as the owner, a space admin — and refuses everyone else with 42501, so
+    // the gate lives in the database, not in the exposure.
+    // 193 -> 194 (Changes screen Phase 1): execution.gitStage is public, like
+    // every other row in the session git rail. MEASURED from the failing run.
+    // 194 -> 195 (2026-09-19, Changes screen Phase 1 INTEGRATED WITH main): execution.gitStage is public, like every other row in the
+    // session git rail. 187's row moved this to 194; gitStage takes it to 195. MEASURED.
+    expect(histogram).toEqual({ public: 220, composite: 1, internal: 1, reserved: 2 }); /* +1 events.changes (change feed step 3). MEASURED. */ // +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // // +1 launch.suggest (Jev lane F, 2026-09-23). MEASURED.
   });
 });
 
@@ -213,10 +231,25 @@ const COMMANDLESS_OPERATIONS = [
       'credentials.delete',
       'credentials.loginSessions.finish',
       'credentials.loginSessions.start',
+      // Jev lane K: the TypeSafe service key, human settings only like its neighbours.
+      'credentials.serviceKeys.delete',
+      'credentials.serviceKeys.put',
+      'credentials.serviceKeys.status',
+      // SC-3: the space credential rows are settings-screen operations too.
+      'credentials.space.create',
+      'credentials.space.delete',
+      'credentials.space.list',
+      'credentials.space.policy.get',
+      'credentials.space.policy.set',
+      'credentials.space.rekey',
+      'credentials.space.rename',
+      'credentials.space.setDefault',
       'credentials.status',
-      // The nine execution.git* rows are deliberately commandless (see the
+      // The TEN execution.git* rows are deliberately commandless (see the
       // EXPECTED_ROWS note): the CLI runs the same verbs locally as
       // `tm8 session git-*`, and one action must not have two names.
+      // 9 -> 10 (Changes screen Phase 1): `execution.gitStage` joins them for
+      // the same reason — it is the index half of a verb the CLI already has.
       'execution.gitBranch',
       'execution.gitCheckpoint',
       'execution.gitCherryPick',
@@ -224,11 +257,17 @@ const COMMANDLESS_OPERATIONS = [
       'execution.gitDiff',
       'execution.gitMerge',
       'execution.gitRollback',
+      'execution.gitStage',
       'execution.gitStash',
       'execution.gitStatus',
       'execution.prompt',
       // 2026-08-13 (merge): execution.terminal.start is UI-only on main.
       'execution.terminal.start',
+      // Jev lane F: the launch-sheet API. Jev is UI-only (design 01a0cb80).
+      'launch.suggest',
+      // SC-3: node admin settings, commandless for the same reason.
+      'node.credentials.policy.set',
+      'node.credentials.status',
       'projects.directories.list',
       'projects.files.archive',
       'projects.files.attach',
@@ -237,6 +276,11 @@ const COMMANDLESS_OPERATIONS = [
       'projects.folderUploads.abort',
       'projects.folderUploads.complete',
       'projects.folderUploads.init',
+      // #646: the launch-sheet preview is a read the composer calls; its row
+      // records "effective CLI is deferred", so it is commandless by decision.
+      'skills.preview',
+      // F4: authoring roots are a composer read with no CLI verb.
+      'skills.roots',
 ];
 
 describe('the CLI command projection', () => {
@@ -302,6 +346,7 @@ describe('the CLI command projection', () => {
       'task import-issue',
       'task link-commit',
       'task link-pr',
+      'task tick',
       'task transition',
     ]);
   });
@@ -565,6 +610,7 @@ const DTO_BY_OPERATION: Partial<Record<OperationName, string>> = {
   'entities.move': 'MoveEntityInputSchema',
   'entities.commands.complete': 'CompleteTaskInputSchema',
   'entities.commands.gate': 'GateTaskInputSchema',
+  'entities.commands.tick': 'TickCriteriaInputSchema',
   'messages.edit': 'PatchMessageInputSchema',
   'messages.delete': 'DeleteMessageInputSchema',
   'messages.attachments.add': 'AddMessageAttachmentsInputSchema',
@@ -586,6 +632,10 @@ const DTO_BY_OPERATION: Partial<Record<OperationName, string>> = {
   'spaces.interactionProfile.setDefault': 'SetSpaceProfileDefaultInputSchema',
   'artifacts.publish': 'ArtifactsPublishInputSchema',
   'artifacts.restore': 'ArtifactsRestoreInputSchema',
+  // 187: the session sharing dials. `expectedVersion` is OPTIONAL on this DTO
+  // — the guard is offered, not demanded — which is why the row advertises
+  // `--expect-version` rather than requiring it.
+  'execution.sessions.share': 'ExecutionSessionsShareInputSchema',
   // Containers (§14). The four lifecycle verbs SHARE one input schema, which is
   // why eleven operations map to eight DTOs.
   'containers.start': 'ContainersLifecycleInputSchema',
@@ -608,6 +658,17 @@ const DTO_BY_OPERATION: Partial<Record<OperationName, string>> = {
  * quietly tolerated.
  */
 const GUARD_DTOS_BOUND_TO_NO_OPERATION = ['PatchTaskInputSchema'];
+
+/**
+ * Guard-bearing rows whose DTO lives on the SERVER, not in the contract, so
+ * this sweep cannot introspect it. Named exactly, each with the schema that
+ * does carry the guard: `skills.edit` binds `SkillEditInputSchema`
+ * (packages/server/src/skills/mutations.ts), whose `expectedVersion` is
+ * REQUIRED and is compared to the entity's version before any write.
+ */
+const GUARD_BACKED_BY_SERVER_LOCAL_SCHEMA: Partial<Record<OperationName, string>> = {
+  'skills.edit': 'SkillEditInputSchema',
+};
 
 /**
  * Direction-B rows still awaiting an amendment. **Currently EMPTY — the class
@@ -682,6 +743,7 @@ describe('version guards: the projection and the frozen DTOs agree, both directi
       const flags = guardFlagsIn(d.syntax);
       if (flags.length === 0) continue;
       swept++;
+      if (GUARD_BACKED_BY_SERVER_LOCAL_SCHEMA[d.operation] !== undefined) continue;
       const dto = DTO_BY_OPERATION[d.operation];
       const fields = dto === undefined ? [] : guardFieldsOf(dto);
       if (fields.length === 0) {
@@ -708,7 +770,7 @@ describe('version guards: the projection and the frozen DTOs agree, both directi
     // Every mapped guard DTO is required.
     // 20 -> 31 (2026-09-03, containers): the eleven guard-bearing containers.*
     // rows. MEASURED on this tree.
-    expect(swept).toBe(31);
+    expect(swept).toBe(32); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(missing.sort()).toEqual([...PENDING_AMENDMENT].sort());
   });
 
@@ -760,6 +822,7 @@ describe('version guards: the projection and the frozen DTOs agree, both directi
     ['entities.move', '--expect-version', 'expectedVersion'],
     ['entities.commands.complete', '--expect-version', 'expectedVersion'],
     ['entities.commands.gate', '--expect-version', 'expectedVersion'],
+    ['entities.commands.tick', '--expect-version', 'expectedVersion'],
     ['messages.edit', '--expect-version', 'expectedVersion'],
     ['messages.delete', '--expect-version', 'expectedVersion'],
     ['messages.attachments.add', '--expect-version', 'expectedVersion'],
@@ -809,6 +872,13 @@ describe('version guards: the projection and the frozen DTOs agree, both directi
     // deliberately absent — its shared `artifact publish` syntax omits the flag.
     ['artifacts.publish', '--expect-version', 'expectedVersion'],
     ['artifacts.restore', '--expect-version', 'expectedVersion'],
+
+    // ── 187: the session sharing dials ──────────────────────────────────────
+    // The guard is OPTIONAL on this row — the DTO marks `expectedVersion`
+    // `.optional()` — which is why the syntax brackets it. The pairing is
+    // pinned all the same: optional is not unspecified, and a row that
+    // advertises a flag it cannot send is exactly what this table catches.
+    ['execution.sessions.share', '--expect-version', 'expectedVersion'],
   ];
 
   it('every guard row pins its flag to its frozen field — transposition-proof', () => {
@@ -830,7 +900,8 @@ describe('version guards: the projection and the frozen DTOs agree, both directi
       rows.map((r) => r.join(' -> ')).sort();
     // Non-vacuity: an empty derivation would equal an empty table.
     expect(actual.length).toBe(GUARD_PIN.length);
-    expect(actual.length).toBe(31);
+    // 31 -> 32 (187): execution.sessions.share.
+    expect(actual.length).toBe(33); /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(norm(actual)).toEqual(norm(GUARD_PIN));
   });
 

@@ -17,9 +17,11 @@
  * the mechanism named, and never renders an enabled control over a refusal.
  */
 import type {
+  CredentialProviderName,
   EntityId,
   ExecutionSpawnInput,
   InteractionProfileStatus,
+  LaunchModelEffort,
   ProjectId,
   SpawnWorkdir,
 } from '@tm8/contract';
@@ -510,6 +512,8 @@ export interface LaunchConfig {
   accessMode: 'safe' | 'acceptEdits' | 'auto' | 'plan' | 'fullAccess' | null;
   /** Independent source selection per provider. An absent key means auto. */
   credentialSources?: NonNullable<ExecutionSpawnInput['credentialSources']> | null;
+  /** A pinned space credential per provider whose source is `space`; absent means its default. */
+  spaceCredentialIds?: NonNullable<ExecutionSpawnInput['spaceCredentialIds']> | null;
   /** Compatibility for cached configs created before provider splitting. */
   credentialSource?: NonNullable<ExecutionSpawnInput['credentialSource']> | null;
   mode: LaunchMode;
@@ -566,6 +570,15 @@ export interface LaunchConfig {
    * viewer had already committed.
    */
   memoryIds?: readonly EntityId[];
+  /**
+   * ✦ Ask Jev's EXACT memory and skill sets (design 01a0cb80 §5.2) — what was
+   * ticked, replacing the teammate's own. Present only when a surface is in Jev
+   * mode with both sets known; `buildSpawnInput` then drops `memoryIds`, since
+   * the contract refuses the pair.
+   */
+  selection?: { readonly memoryIds: readonly EntityId[]; readonly skillIds: readonly EntityId[] };
+  /** The Ask Jev run that informed this launch, linked for cost. Never interpreted. */
+  jevRunId?: EntityId;
 }
 
 /**
@@ -644,6 +657,75 @@ export function describeAccessMode(mode: LaunchAccessMode | null): string {
 export function nextAccessMode(mode: LaunchAccessMode | null): LaunchAccessMode | null {
   const at = ACCESS_MODE_CYCLE.indexOf(mode ?? null);
   return ACCESS_MODE_CYCLE[(at + 1) % ACCESS_MODE_CYCLE.length] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Credential sources and reasoning effort — shared launch-surface vocabulary
+// ---------------------------------------------------------------------------
+
+/** `CredentialSourceSchema` verbatim: whose credential the session injects. */
+export type LaunchCredentialSource = 'member' | 'space' | 'node';
+
+/**
+ * The FILE-shaped providers an agent tool can consume. `github` is excluded
+ * because its credential injects universally rather than being chosen per tool.
+ *
+ * Moved here from `views/LaunchSheet.tsx` when the New Session composer became
+ * its second consumer — two private copies of a tool→provider map is exactly
+ * the copy-drift D34 names.
+ */
+// Kimi and Groq are DELIBERATELY ABSENT. This map answers "which provider's
+// credential does this tool consume", and the launch picker uses it to offer a
+// per-session choice. Those two are not a choice at this seam: they are
+// backends chosen by the session's MODEL (a Kimi model uses the Kimi key),
+// resolved on the server at spawn time. Listing them here would
+// either overwrite `claude-code`'s entry — silently pointing every member's
+// picker at a provider most of them have never connected — or add a second
+// entry to a map that is one-to-one by construction. The card's routing line is
+// where that relationship is shown; see `CredentialRoutingView`.
+export const AGENT_CREDENTIAL_PROVIDER: Readonly<Partial<Record<string, CredentialProviderName>>> = {
+  'claude-code': 'anthropic',
+  codex: 'openai',
+  gemini: 'gemini',
+  hermes: 'hermes',
+  cursor: 'cursor',
+};
+
+/**
+ * Vendor names, not product names: a credential picker is choosing WHOSE
+ * credential to inject. The home and settings tiles name the product instead.
+ */
+export const CREDENTIAL_PROVIDER_LABEL: Record<CredentialProviderName, string> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  github: 'GitHub',
+  gemini: 'Google',
+  hermes: 'Nous',
+  cursor: 'Cursor',
+  kimi: 'Moonshot AI',
+  groq: 'Groq',
+};
+
+/**
+ * The effort words, spelled once. `xhigh` renders as prose rather than as the
+ * wire token — a picker that says "xhigh" is showing the reader its plumbing.
+ */
+export const EFFORT_LABELS: Record<LaunchModelEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+  ultra: 'Ultra',
+};
+
+/**
+ * Chip text for an effort stop. `null` follows `accessModeLabel`'s rule: an
+ * unpinned effort is the teammate/node default, and naming a stop it is not
+ * would pin a posture the viewer never chose.
+ */
+export function effortLabel(effort: LaunchModelEffort | null): string {
+  return effort ? EFFORT_LABELS[effort] : 'Default';
 }
 
 /** The launch defaults for a teammate — its recorded tool and model win. */
@@ -793,6 +875,9 @@ export function buildSpawnInput(args: {
   if (config.accessMode) input.accessMode = config.accessMode;
   if (config.credentialSources && Object.keys(config.credentialSources).length > 0) {
     input.credentialSources = { ...config.credentialSources };
+    if (config.spaceCredentialIds && Object.keys(config.spaceCredentialIds).length > 0) {
+      input.spaceCredentialIds = { ...config.spaceCredentialIds };
+    }
   } else if (config.credentialSource) {
     input.credentialSource = config.credentialSource;
   }
@@ -804,7 +889,19 @@ export function buildSpawnInput(args: {
      same statement, and the contract types the field optional for that reason.
      Sliced at the contract's own ceiling so a caller that ignored the picker's
      cap earns a truncation here rather than a refusal at the node. */
-  if (config.memoryIds?.length) input.memoryIds = config.memoryIds.slice(0, MEMORY_IDS_MAX);
+  if (config.selection) {
+    /* EXACT, and alone: `selection` IS the working set and `memoryIds` ADDS to
+       it, so the node refuses both together. Copied, never sliced — a
+       truncated exact set would be a different set than the one ticked, and
+       the node's own limit refusal is the honest answer to an oversized one. */
+    input.selection = {
+      memoryIds: [...config.selection.memoryIds],
+      skillIds: [...config.selection.skillIds],
+    };
+  } else if (config.memoryIds?.length) {
+    input.memoryIds = config.memoryIds.slice(0, MEMORY_IDS_MAX);
+  }
+  if (config.jevRunId) input.jevRunId = config.jevRunId;
   // Only carried when consent was actually given — the contract types it as
   // `true`, so an absent field and a false one are not the same statement.
   if (config.confirmUntrusted) input.confirmUntrusted = true;
@@ -817,6 +914,30 @@ export function buildSpawnInput(args: {
     input.rows = args.geometry.rows;
   }
   return input;
+}
+
+/**
+ * Is launching on this subject a CONTINUATION rather than work on it?
+ *
+ * True for a `work_session` (migration 200): ▶ on a session spawns a NEW
+ * session anchored on a derived "Continue: <title>" task that tells the agent
+ * to read the source session's transcript and wait. That changes what the
+ * launch popup's two fields mean:
+ *
+ *   · the TITLE names the new session, and is never written back — renaming
+ *     the session you are continuing FROM is not what a launch asked for;
+ *   · the TEXTAREA is the viewer's instructions for the new agent, sent as
+ *     `promptExtra` — a session has no description to edit.
+ *
+ * Every other kind keeps the ruled behaviour: both fields edit the subject.
+ */
+export function continuesSubject(subject: { kind?: string } | null | undefined): boolean {
+  return subject?.kind === 'work_session';
+}
+
+/** The title a launch on `subject` gives the new session by default. */
+export function launchTitleFor(subject: { kind?: string; title: string }): string {
+  return continuesSubject(subject) ? `Continue: ${subject.title}` : subject.title;
 }
 
 let launchMutationSequence = 0;
@@ -857,6 +978,69 @@ export interface ManifestDescription {
 }
 
 /**
+ * The credential facts (D8/D9): which source each provider ACTUALLY ran on,
+ * and — for a space source — which credential, by label.
+ *
+ * Reads `launch.effectiveCredentialSources` (what resolution chose) first and
+ * falls back to `launch.credentialSources` (what was asked) for a manifest
+ * written before resolution was recorded, saying "requested" so a request is
+ * never presented as an outcome. The manifest carries a space credential's ID
+ * only; the label comes from `spaceCredentialLabels` (the space's list), and a
+ * credential that is no longer listed — deleted, or never visible — says so
+ * rather than showing a bare id as if it were a name.
+ */
+export const LAUNCH_SOURCE_WORD: Record<LaunchCredentialSource, string> = {
+  member: 'yours',
+  space: 'space',
+  node: 'node',
+};
+
+const CREDENTIAL_FACT_PROVIDERS = ['anthropic', 'openai', 'github'] as const;
+const CREDENTIAL_FACT_NAME: Record<(typeof CREDENTIAL_FACT_PROVIDERS)[number], string> = {
+  anthropic: 'Claude',
+  openai: 'Codex',
+  github: 'GitHub',
+};
+
+export function launchCredentialFacts(
+  launch: Record<string, unknown> | null,
+  spaceCredentialLabels: ReadonlyMap<string, string> | null = null,
+): ManifestFact[] {
+  const effective = readObject(launch, 'effectiveCredentialSources');
+  const requested = readObject(launch, 'credentialSources');
+  const pinned = readObject(launch, 'spaceCredentialIds');
+  const facts: ManifestFact[] = [];
+  for (const provider of CREDENTIAL_FACT_PROVIDERS) {
+    const ran = readText(effective, provider);
+    const asked = readText(requested, provider);
+    const source = ran ?? asked;
+    if (source !== 'member' && source !== 'space' && source !== 'node') continue;
+    let value = LAUNCH_SOURCE_WORD[source];
+    if (source === 'space') {
+      const id = readText(pinned, provider);
+      if (id === null) {
+        value += ' ▸ credential not recorded';
+      } else if (spaceCredentialLabels === null) {
+        value += ` ▸ ${id}`;
+      } else {
+        const label = spaceCredentialLabels.get(id);
+        value += label !== undefined ? ` ▸ ${label}` : ` ▸ ${id} (no longer listed: deleted, or not visible to you)`;
+      }
+    }
+    if (ran === null) value += ' (requested; the resolved source was not recorded)';
+    facts.push({ label: `${CREDENTIAL_FACT_NAME[provider]} credential`, value, mono: false });
+  }
+  return facts;
+}
+
+/** The space credential ids a manifest names, so a host can look up their labels. */
+export function launchSpaceCredentialIds(manifest: Record<string, unknown> | null): string[] {
+  const pinned = readObject(readObject(manifest, 'launch'), 'spaceCredentialIds');
+  if (pinned === null) return [];
+  return Object.values(pinned).filter((v): v is string => typeof v === 'string' && v.length > 0);
+}
+
+/**
  * Describe a STORED manifest — the document a session was actually launched
  * with, read back out of the graph.
  *
@@ -875,6 +1059,7 @@ export interface ManifestDescription {
  */
 export function describeLaunchManifest(
   manifest: Record<string, unknown> | null,
+  spaceCredentialLabels: ReadonlyMap<string, string> | null = null,
 ): ManifestDescription {
   const agent = readObject(manifest, 'agent');
   const launch = readObject(manifest, 'launch');
@@ -891,6 +1076,7 @@ export function describeLaunchManifest(
     { label: 'Permission mode', value: readText(launch, 'permissionMode'), mono: true },
     { label: 'Access mode', value: readText(launch, 'accessMode'), mono: true },
     { label: 'Reasoning effort', value: readText(launch, 'reasoningEffort'), mono: true },
+    ...launchCredentialFacts(launch, spaceCredentialLabels),
     {
       label: 'Command network',
       value: joinParts([readText(network, 'mode'), joinStrings(readArray(network, 'allowedHosts'))], ' · '),
@@ -911,6 +1097,7 @@ export function describeLaunchManifest(
     { label: 'Session title', value: readText(session, 'title'), mono: false },
     { label: 'Space', value: readText(manifest, 'spaceId'), mono: true },
     { label: 'Manifest version', value: readText(manifest, 'manifestVersion'), mono: true },
+    { label: 'Prompt version', value: readText(manifest, 'promptVersion'), mono: true },
     { label: 'Composed at', value: readText(manifest, 'generatedAt'), mono: true },
   ];
 

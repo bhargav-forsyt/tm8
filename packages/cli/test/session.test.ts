@@ -162,9 +162,12 @@ const body = (): Record<string, unknown> => (seen[0]?.body ?? {}) as Record<stri
 // ── registration and the anti-drift binding ─────────────────────────────────
 
 describe('registration', () => {
-  it('registers exactly the nine caller-facing execution rows', async () => {
+  it('registers exactly the ten caller-facing execution rows', async () => {
     const paths = (await sessionCommands()).map((m) => m.path.join(' ')).sort();
-    expect(paths).toEqual(['session attach', 'session dispatch', 'session journal', 'session launch', 'session liveness', 'session resume', 'session spawn', 'session terminate', 'session transcript']);
+    // 187 adds `session share` — the WATCH and DRIVE dials on one session.
+    // Sorted position matters here: the list is the assertion, so a row that
+    // arrives has to be placed, not appended.
+    expect(paths).toEqual(['session attach', 'session dispatch', 'session journal', 'session launch', 'session liveness', 'session resume', 'session share', 'session spawn', 'session terminate', 'session transcript']);
   });
 
   it('every registered path is in the frozen projection', async () => {
@@ -330,6 +333,53 @@ describe('session spawn', () => {
     expect(seen).toEqual([]);
   });
 
+  it('carries --credential-source provider=space and provider=space:<id> (SC-2 t2-5)', async () => {
+    const PIN = 'cccccccc-0000-4000-8000-000000000001';
+    const r = await drive([
+      'session', 'spawn', '--space', SPACE, '--teammate', TEAMMATE,
+      '--credential-source', 'anthropic=space',
+      '--credential-source', `github=space:${PIN}`,
+      '--credential-source', 'openai=node',
+    ]);
+    expect(r.code).toBe(0);
+    const b = body();
+    expect(b.credentialSources).toEqual({ anthropic: 'space', github: 'space', openai: 'node' });
+    expect(b.spaceCredentialIds).toEqual({ github: PIN });
+    expect(b.credentialSource).toBeUndefined();
+  });
+
+  it('carries a bare --credential-source space as the all-provider scalar', async () => {
+    const r = await drive([
+      'session', 'spawn', '--space', SPACE, '--teammate', TEAMMATE, '--credential-source', 'space',
+    ]);
+    expect(r.code).toBe(0);
+    expect(body().credentialSource).toBe('space');
+    expect(body().spaceCredentialIds).toBeUndefined();
+  });
+
+  it('refuses a malformed --credential-source before any request', async () => {
+    const ACCOUNT = 'dddddddd-0000-4000-8000-000000000001';
+    for (const [raw, says] of [
+      [`anthropic=member:${ACCOUNT}`, 'only a space credential can be pinned'],
+      [`anthropic=node:${ACCOUNT}`, 'only a space credential can be pinned'],
+      ['anthropic=space:not-an-id', 'not a space credential id'],
+      [`gemini=space:${ACCOUNT}`, 'unknown provider'],
+      [ACCOUNT, 'got'],
+      ['anthropic=another-member', 'got'],
+    ] as const) {
+      const r = await drive(['session', 'spawn', '--space', SPACE, '--teammate', TEAMMATE, '--credential-source', raw]);
+      expect(r.code, raw).toBe(2);
+      expect(r.stderr, raw).toContain(says);
+    }
+    const twice = await drive([
+      'session', 'spawn', '--space', SPACE, '--teammate', TEAMMATE,
+      '--credential-source', 'anthropic=space', '--credential-source', 'anthropic=node',
+    ]);
+    expect(twice.code).toBe(2);
+    expect(twice.stderr).toContain('names anthropic twice');
+    expect(seen).toEqual([]);
+  });
+
   it('refuses an access mode outside the closed set', async () => {
     const r = await drive([
       'session', 'spawn', '--space', SPACE, '--teammate', TEAMMATE, '--access-mode', 'yolo',
@@ -442,6 +492,46 @@ describe('session spawn', () => {
     expect(r.code).toBe(0);
     // The id a follow-up `session attach`/`terminate` needs is never dropped.
     expect(r.stdout).toContain(SESSION);
+  });
+});
+
+// ── session share ───────────────────────────────────────────────────────────
+
+describe('session share', () => {
+  const shared = () => {
+    reply = {
+      status: 200,
+      body: { data: { entity: { id: SESSION, kind: 'work_session' }, patches: [] }, requestId: 'req_t' },
+    };
+  };
+
+  it('sends only the dial it was given — the server coalesces the other', async () => {
+    shared();
+    const r = await drive(['session', 'share', SESSION, '--drive', 'space']);
+    expect(r.code).toBe(0);
+    expect(seen[0]?.pathname).toBe(bindPath('execution.sessions.share', { id: SESSION }));
+    expect(Object.keys(body()).sort()).toEqual(['clientMutationId', 'driveMode']);
+    expect(r.stdout).toContain('type: everyone in the space');
+    expect(r.stdout).not.toContain('watch:');
+  });
+
+  // Since 202 a narrowing HOLDS on an agent-launched session, and closes it to
+  // the caller too (no launcher column). The note says so; before 202 it said
+  // the opposite — that 075 kept the session open to every member.
+  it('says a narrowing binds the caller too on an agent-launched session', async () => {
+    shared();
+    const r = await drive(['session', 'share', SESSION, '--share', 'none']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('watch: not shared');
+    expect(r.stdout).toContain('on an agent-launched session there is no owner to exempt');
+    expect(r.stdout).not.toContain('may still attach');
+  });
+
+  it('prints no note when nothing was narrowed', async () => {
+    shared();
+    const r = await drive(['session', 'share', SESSION, '--share', 'space', '--drive', 'space']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain('note:');
   });
 });
 

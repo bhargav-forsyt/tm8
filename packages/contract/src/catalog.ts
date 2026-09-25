@@ -47,6 +47,19 @@ export interface OperationBinding {
 export const BASE_PATH = '/v2';
 
 export const OPERATIONS = [
+  { name: 'skills.roots', method: 'GET', path: '/v2/spaces/:spaceId/skills/roots', kind: 'read', status: 'v1' },
+  { name: 'skills.create', method: 'POST', path: '/v2/spaces/:spaceId/skills', kind: 'command', status: 'v1' },
+  { name: 'skills.edit', method: 'PATCH', path: '/v2/skills/:id', kind: 'command', status: 'v1' },
+  { name: 'skills.equip', method: 'POST', path: '/v2/skills/:id/equip', kind: 'command', status: 'v1' },
+  { name: 'skills.unequip', method: 'POST', path: '/v2/skills/:id/unequip', kind: 'command', status: 'v1' },
+  { name: 'skills.scan', method: 'POST', path: '/v2/spaces/:spaceId/skills/scan', kind: 'command', status: 'v1' },
+  { name: 'skills.list', method: 'GET', path: '/v2/spaces/:spaceId/skills', kind: 'read', status: 'v1' },
+  { name: 'skills.preview', method: 'GET', path: '/v2/spaces/:spaceId/skills/preview', kind: 'read', status: 'v1' },
+  { name: 'skills.show', method: 'GET', path: '/v2/skills/:id', kind: 'read', status: 'v1' },
+  // launch.suggest — Jev's launch-sheet advice (design 01a0cb80 §5.1). UI only:
+  // no CLI, no dispatch, no spawn-time call. A command because it writes the
+  // jev_runs / jev_calls cost rows; `requestId` in the body is its idempotency key.
+  { name: 'launch.suggest', method: 'POST', path: '/v2/spaces/:spaceId/launch/suggest', kind: 'command', status: 'v1' },
   // identity & spaces
   { name: 'identity.get',            method: 'GET',    path: '/v2/identity',                                kind: 'read',    status: 'v1' },
   { name: 'serverConnections.list',  method: 'GET',    path: '/v2/server-connections',                      kind: 'read',    status: 'v1' },
@@ -114,6 +127,10 @@ export const OPERATIONS = [
   { name: 'entities.commands.linkPr',     method: 'POST', path: '/v2/entities/:id/commands/link-pr',        kind: 'command', status: 'v1' },
   { name: 'entities.commands.linkCommit', method: 'POST', path: '/v2/entities/:id/commands/link-commit',    kind: 'command', status: 'v1' },
   { name: 'entities.commands.gate',       method: 'POST', path: '/v2/entities/:id/commands/gate',           kind: 'command', status: 'v1' },
+  // Tick (or untick) acceptance criteria BY ID — a merge the Server does, so a
+  // caller never restates the whole `acceptanceCriteria` array to change one
+  // `done`. The write `task complete`'s criteria gate asks for.
+  { name: 'entities.commands.tick',       method: 'POST', path: '/v2/entities/:id/commands/tick',           kind: 'command', status: 'v1' },
   { name: 'tracking.refresh',        method: 'POST',   path: '/v2/tracking/refresh',                        kind: 'command', status: 'v1' },
   // The forge WRITE door — one verb, guarded server-side (open + mergeable per
   // observed facts, CI not red, head unchanged), acting-member credential only.
@@ -217,6 +234,9 @@ export const OPERATIONS = [
   // events — one socket (T-L10/04 §2.3) + polling catch-up fallback
   { name: 'events.subscribe',        method: 'WS',     path: '/v2/ws',                                      kind: 'stream',  status: 'v1' },
   { name: 'events.poll',             method: 'GET',    path: '/v2/spaces/:spaceId/events',                  kind: 'read',    status: 'v1' },
+  // The scoped change feed (spec doc 01a0cf35): "did anything I care about
+  // change since seq N?" answered as a per-entity digest, not a replay.
+  { name: 'events.changes',          method: 'GET',    path: '/v2/spaces/:spaceId/events/changes',          kind: 'read',    status: 'v1' },
   { name: 'presence.get',            method: 'GET',    path: '/v2/entities/:id/presence',                   kind: 'read',    status: 'v1' },
 
   // execution.* family (R16) — server-hosted PTY is the only spawn path (AM-1)
@@ -230,6 +250,11 @@ export const OPERATIONS = [
   { name: 'execution.terminate',      method: 'POST',  path: '/v2/entities/:id/commands/terminate',         kind: 'command', status: 'v1' },
   { name: 'execution.streams.attach', method: 'POST',  path: '/v2/entities/:id/commands/streams-attach',    kind: 'command', status: 'v1' },
   { name: 'execution.resume',         method: 'POST',  path: '/v2/entities/:id/commands/resume',            kind: 'command', status: 'v1' },
+  // 187 — the session's own sharing dials. A command on the session entity
+  // rather than a field on `entities.patch`, because the guard is not "may you
+  // edit this row" but "may you widen who sees its BYTES", and only the owner
+  // or a space admin may answer that.
+  { name: 'execution.sessions.share', method: 'POST',  path: '/v2/entities/:id/commands/sharing',           kind: 'command', status: 'v1' },
   // The session's CLI command journal. The bytes live on the node's disk at
   // `<dataDir>/journals/<sessionId>.jsonl`, written by the teammate's own `tm8`
   // invocations — NOT in the database. This op is the ONLY way they reach a
@@ -258,6 +283,9 @@ export const OPERATIONS = [
   { name: 'execution.gitCheckpoint',  method: 'POST',  path: '/v2/work-sessions/:workSessionId/git/checkpoint',  kind: 'command', status: 'v1' },
   { name: 'execution.gitRollback',    method: 'POST',  path: '/v2/work-sessions/:workSessionId/git/rollback',    kind: 'command', status: 'v1' },
   { name: 'execution.gitCommit',      method: 'POST',  path: '/v2/work-sessions/:workSessionId/git/commit',      kind: 'command', status: 'v1' },
+  // Stage/UNSTAGE without committing — the review half of the commit verb.
+  // Unstage is a path-scoped MIXED reset; no working-tree bytes move.
+  { name: 'execution.gitStage',       method: 'POST',  path: '/v2/work-sessions/:workSessionId/git/stage',       kind: 'command', status: 'v1' },
   { name: 'execution.gitMerge',       method: 'POST',  path: '/v2/work-sessions/:workSessionId/git/merge',       kind: 'command', status: 'v1' },
   // Tier 2 completion (same laws as the six above): cherry-pick and stash
   // obey merge's abort-verify-surface contract — a conflict is DATA with the
@@ -412,6 +440,29 @@ export const OPERATIONS = [
   { name: 'credentials.delete',                          method: 'DELETE', path: '/v2/identity/credentials/:provider',                                 kind: 'command', status: 'v1' },
   { name: 'credentials.loginSessions.start',             method: 'POST',   path: '/v2/identity/credentials/login-sessions',                            kind: 'command', status: 'v1' },
   { name: 'credentials.loginSessions.finish',            method: 'POST',   path: '/v2/identity/credentials/login-sessions/:id/finish',                 kind: 'command', status: 'v1' },
+  // Service keys — keys tm8 uses SERVER-SIDE for this member (today only
+  // `typesafe`, Jev's key for ✦ Ask Jev). Encrypted at rest (203), never shown
+  // back beyond the last four characters, and never injected into a spawned
+  // session: they are not agent credentials, so they are not providers above.
+  { name: 'credentials.serviceKeys.status',              method: 'GET',    path: '/v2/identity/credentials/service-keys',                              kind: 'read',    status: 'v1' },
+  { name: 'credentials.serviceKeys.put',                 method: 'PUT',    path: '/v2/identity/credentials/service-keys/:provider',                    kind: 'command', status: 'v1' },
+  { name: 'credentials.serviceKeys.delete',              method: 'DELETE', path: '/v2/identity/credentials/service-keys/:provider',                    kind: 'command', status: 'v1' },
+  // Space credentials (206, design 01a0cfa8) — agent credentials a SPACE owns.
+  // Any member adds one (D1) and every member launches with it (D3); only its
+  // creator or a space admin changes it (D11). Every row is human-only (I2)
+  // and answers metadata, never the secret (I5). The spawn reader is not a
+  // catalog operation (A1). A login-shaped create/finish is SC-4's.
+  { name: 'credentials.space.list',                      method: 'GET',    path: '/v2/spaces/:spaceId/credentials',                                    kind: 'read',    status: 'v1' },
+  { name: 'credentials.space.create',                    method: 'POST',   path: '/v2/spaces/:spaceId/credentials',                                    kind: 'command', status: 'v1' },
+  { name: 'credentials.space.rekey',                     method: 'PUT',    path: '/v2/space-credentials/:credentialId/secret',                         kind: 'command', status: 'v1' },
+  { name: 'credentials.space.setDefault',                method: 'POST',   path: '/v2/space-credentials/:credentialId/default',                        kind: 'command', status: 'v1' },
+  { name: 'credentials.space.rename',                    method: 'PATCH',  path: '/v2/space-credentials/:credentialId',                                kind: 'command', status: 'v1' },
+  { name: 'credentials.space.delete',                    method: 'DELETE', path: '/v2/space-credentials/:credentialId',                                kind: 'command', status: 'v1' },
+  { name: 'credentials.space.policy.get',                method: 'GET',    path: '/v2/spaces/:spaceId/credential-policy',                              kind: 'read',    status: 'v1' },
+  { name: 'credentials.space.policy.set',                method: 'PUT',    path: '/v2/spaces/:spaceId/credential-policy/:provider',                    kind: 'command', status: 'v1' },
+  // The node's own fallback credentials (D5/D9): node admin, and human-only.
+  { name: 'node.credentials.status',                     method: 'GET',    path: '/v2/node/credentials',                                               kind: 'read',    status: 'v1' },
+  { name: 'node.credentials.policy.set',                 method: 'PUT',    path: '/v2/node/credential-policy/:provider',                               kind: 'command', status: 'v1' },
 
   // What the agent SAID — the third face of a session, after `execution.launch`
   // (told) and `execution.journal` (did). The bytes are the agent's OWN native

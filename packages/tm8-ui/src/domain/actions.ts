@@ -306,6 +306,78 @@ export function processControlFor(
   return ref === PROCESS_CONTROL.running && hasEnded(ctx) ? PROCESS_CONTROL.ended : ref;
 }
 
+/**
+ * THE SHARING CONTROL (187) — the watch dial's two halves, one slot.
+ *
+ * Same shape as `PROCESS_CONTROL` above and for the same structural reason:
+ * `rowActions` is STATIC per-kind data, so the registry can only declare ONE
+ * of these, and which one a given row should offer is a fact about that row.
+ */
+export const SHARING_CONTROL = {
+  /** While the session is private to its owner. */
+  private: 'share-session',
+  /** Once the space can watch it. */
+  shared: 'unshare-session',
+} as const satisfies { private: ActionRef; shared: ActionRef };
+
+/**
+ * Resolve the sharing control's slot for one row from that row's OWN
+ * `shareMode`. Any other verb passes through untouched, so a surface can map
+ * its whole declared list through this the way it already maps through
+ * `processControlFor`.
+ *
+ * `undefined` — a server too old to project the column, or a summary that
+ * never carried it — resolves to the DECLARED ref, which is
+ * `share-session`. That is the honest fallback in both directions: offering
+ * "Share" on an already-shared session is a no-op the server absorbs
+ * idempotently, while offering "Make private" on a session we have no
+ * evidence is shared would claim a state we never read.
+ */
+export function sharingControlFor(ref: ActionRef, shareMode: string | undefined): ActionRef {
+  if (ref !== SHARING_CONTROL.private) return ref;
+  return shareMode === 'space' || shareMode === 'explicit' ? SHARING_CONTROL.shared : ref;
+}
+
+/**
+ * One session's sharing, read off its row for the sharing popover (187, 202).
+ *
+ * `watch` is the stored `shareMode` verbatim — `explicit` included, which is
+ * readable but not writable from here. `type` defaults an ABSENT `driveMode`
+ * to `owner`, because that is what the server's attach gate does with a row
+ * that predates the column.
+ *
+ * `launchedByTeammate` is decided HERE, in `domain/`, because it names a kind
+ * (`team_member`) and components may not. It matters because such a session
+ * has no human owner to exempt: until someone sets its sharing, every member
+ * who may act as that teammate reaches it as its owner (`setAt` null), and
+ * once set, the setting binds every member, including whoever launched it.
+ * `setAt` is `undefined` when the node does not report the column (pre-202).
+ *
+ * Returns `null` for a row with no watch dial at all — a kind without sharing.
+ */
+export interface SessionSharing {
+  watch: string;
+  type: 'owner' | 'space';
+  launchedByTeammate: boolean;
+  setAt: string | null | undefined;
+}
+
+export function sessionSharingOf(
+  state: unknown,
+  createdBy: { kind: string } | undefined,
+): SessionSharing | null {
+  const fields = state as Record<string, unknown> | null | undefined;
+  const watch = fields?.shareMode;
+  if (typeof watch !== 'string') return null;
+  const setAt = fields?.sharingSetAt;
+  return {
+    watch,
+    type: fields?.driveMode === 'space' ? 'space' : 'owner',
+    launchedByTeammate: createdBy?.kind === 'team_member',
+    setAt: typeof setAt === 'string' || setAt === null ? setAt : undefined,
+  };
+}
+
 /** A verdict-gated session verb: only a `live` seam verdict permits it. */
 function livenessGate(ctx: ActionContext): ActionAvailability | null {
   if (!ctx.entityId) return disabled(REASONS.noEntity);
@@ -587,6 +659,39 @@ const ACTIONS: Readonly<Record<ActionRef, ActionDef>> = {
     'Prompt session',
     '›',
     (ctx) => opGate(ctx, 'execution.prompt') ?? livenessGate(ctx) ?? AVAILABLE,
+  ),
+
+  /**
+   * OPEN THIS SESSION TO THE SPACE (187) — `execution.sessions.share`, with
+   * `shareMode: 'space'`.
+   *
+   * Gated on the OPERATION and nothing else, deliberately. The RPC refuses a
+   * non-owner with 42501, and there is no capability flag that carries
+   * ownership: `canEdit` on a work_session means "the row is live" (it is the
+   * rename door, entity-read.ts), so gating on it would tell every viewer of
+   * a shared session that they may re-close it. `terminate` sits in exactly
+   * this position — owner-restricted at the RPC, offered on every row, and
+   * the server's refusal is what the user sees. Inventing a second, weaker
+   * answer here would be the lie, not the honesty.
+   *
+   * NOT liveness-gated. Sharing is a property of the RECORD, not of the
+   * process: an owner can open an idle session so a teammate can resume it,
+   * and refusing that because nothing is currently answering would refuse the
+   * case the dial exists for.
+   */
+  'share-session': define(
+    'share-session',
+    'Share with space',
+    '◌',
+    (ctx) => opGate(ctx, 'execution.sessions.share') ?? AVAILABLE,
+  ),
+
+  /** The other half of the sharing slot — `shareMode: 'none'`. */
+  'unshare-session': define(
+    'unshare-session',
+    'Make private',
+    '●',
+    (ctx) => opGate(ctx, 'execution.sessions.share') ?? AVAILABLE,
   ),
 
   // §10.7 register — the seam does not carry these commands yet.

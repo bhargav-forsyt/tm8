@@ -43,6 +43,8 @@ import { plainExcerpt } from '@tm8/contract';
 import { readTextSource } from '../args.js';
 import { UnsettledDeliveryError } from '../errors.js';
 import { CliError, EXIT_OK, EXIT_USAGE, type ExitCode } from '../exit.js';
+import { callerMutationId, successReceipt, type ReceiptOp } from '../receipt.js';
+import { errorInput, withErrorReceipt } from '../receipt-error.js';
 import { refuseMutationId, resolveMutationId } from '../mutation.js';
 import { clientFor, observedInvoke } from '../discovery/observe.js';
 import type { Tm8Client } from '../client.js';
@@ -357,7 +359,7 @@ async function messageSend(cmd: CommandContext): Promise<ExitCode> {
   if (cmd.ctx.actor) request.actorId = cmd.ctx.actor.value;
   if (cmd.ctx.sessionId) request.workSessionId = cmd.ctx.sessionId;
 
-  return postMessage(cmd, request, wait);
+  return postMessage(cmd, request, wait, 'message.send');
 }
 
 async function messageReply(cmd: CommandContext): Promise<ExitCode> {
@@ -380,23 +382,32 @@ async function messageReply(cmd: CommandContext): Promise<ExitCode> {
   if (mentionIds.length > 0) request.mentionIds = mentionIds;
   if (attachmentIds.length > 0) request.attachmentIds = attachmentIds;
   if (cmd.ctx.actor) request.actorId = cmd.ctx.actor.value;
-  return postMessage(cmd, request, wait);
+  return postMessage(cmd, request, wait, 'message.reply');
 }
 
+/**
+ * `op` names the receipt command (`message send|reply`); a caller outside the
+ * receipt scope (`chat post`) omits it and keeps printing the full batch.
+ */
 export async function postMessage(
   cmd: CommandContext,
   request: Record<string, unknown>,
   wait: WaitMode,
+  op?: Extract<ReceiptOp, 'message.send' | 'message.reply'>,
 ): Promise<ExitCode> {
   const client = clientFor(cmd.ctx);
-  const batch = await observedInvoke<{ messages?: unknown }>(client, 'messages.post', {
-    body: request,
-  });
+  const post = () => observedInvoke<{ messages?: unknown }>(client, 'messages.post', { body: request });
+  const mutationId = typeof request.clientMutationId === 'string' ? request.clientMutationId : undefined;
+  const replyTo = typeof request.replyToMessageId === 'string' ? request.replyToMessageId : undefined;
+  const batch = op === undefined
+    ? await post()
+    : await withErrorReceipt(cmd, errorInput(cmd, op, { mutationId, ...(replyTo ? { id: replyTo } : {}) }), post);
 
   // The batch is the command's DATA and is written BEFORE any settle
   // observation, so a caller who reads stdout gets the stored result whatever
   // the delivery outcome turns out to be.
-  cmd.out.data(batch, renderBatch);
+  if (op === undefined) cmd.out.data(batch, renderBatch);
+  else cmd.out.mutation(op, batch, renderBatch, () => successReceipt(op, batch, callerMutationId(cmd.options)));
   if (wait === 'stored') return EXIT_OK;
 
   const messageIds = (Array.isArray(batch?.messages) ? batch.messages : [])

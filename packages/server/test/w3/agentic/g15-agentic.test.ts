@@ -38,7 +38,15 @@ import {
 // neither branch's value survives the merge, because each saw only its own
 // half of the catalog. The CLI's CATALOG_DIGEST and the generated conformance
 // manifest carry the same value and all three must agree.
-const CATALOG_DIGEST = 'sha256:3b2b97fc54418ed191f5bd2dbaf48f5176d0fa404b4d6ee397546cf3a1eedafa';
+// 2026-09-19 (Changes screen Phase 1, INTEGRATED WITH main): the merged tree
+// carries BOTH execution.sessions.share (187) and execution.gitStage, so the
+// digest is a THIRD value — neither 186723c6.. nor 10d20505.. is correct here.
+// READ OUT OF THE FAILING RUN: this assertion compares the LIVE server digest
+// against this literal, so the run printed the live value on its `Received:`
+// line and this is that string, copied.
+// Re-measured 2026-09-23: the catalog with the nine skills.* rows (#647 + #649).
+// Re-measured 2026-09-23 (Jev lane F): + launch.suggest; the live Received value, copied.
+const CATALOG_DIGEST = 'sha256:1b1faa046bec1bba7a64797f80759ae65fb0f5d9d42313e237c80019287f1760'; /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */ // SC-3: +10 space/node credential rows; /* +1 events.changes (change feed step 3). MEASURED. */ Jev lane K: +3 service-key rows
 const FILLER_ID = '00000000-0000-4000-8000-000000000001';
 
 interface DiscoveredOperation {
@@ -111,7 +119,10 @@ describe('G15 reserved and residual honesty, via generated discovery only', () =
     // onboarding read landed without moving it); 128 adds execution.transcript.
     // 129 adds projects.branches.list.
     // 144 -> 150 (2026-08-12, Git UI landing): the six execution.git* rows.
-    expect(root.catalog.total).toBe(197); // +3 141, +3 148, +25 177 containers
+    // 197 -> 198 (187): execution.sessions.share. MEASURED.
+    // 198 -> 199 (2026-09-19, Changes screen Phase 1): execution.gitStage.
+    // MEASURED on the merged tree.
+    expect(root.catalog.total).toBe(224); /* +1 events.changes (change feed step 3). MEASURED. */ // SC-3: +10 credentials.space.* / node.credentials.* rows. MEASURED.  +3 credentials.serviceKeys.* (Jev lane K). MEASURED. // +1 launch.suggest (Jev lane F) // +3 141, +3 148, +25 177 containers, +1 187, +1 gitStage, +9 skills (2026-09-23) /* +1 entities.commands.tick (bug 01a0d2f1). MEASURED. */
     expect(root.catalog.reserved).toBe(2);
     expect(root.nouns.length).toBeGreaterThan(0);
 

@@ -1,5 +1,10 @@
 // @tm8/execution — the spawn block's public surface.
-export { SpawnService, type SpawnServiceOptions } from './SpawnService.js';
+export {
+  SpawnService,
+  type CredentialContainmentCause,
+  type CredentialContainmentResult,
+  type SpawnServiceOptions,
+} from './SpawnService.js';
 export {
   DEFAULT_AGENT_TOOL,
   DEFAULT_MODEL,
@@ -23,6 +28,13 @@ export {
   type ResolvedLaunchConfig,
 } from './manifest.js';
 export {
+  HARNESS_SURFACES,
+  harnessSurfaceEnv,
+  readInstalledClaudePlugins,
+  readHintHookPath,
+  type HarnessSurface,
+} from './harness-surface.js';
+export {
   assertCodexNetworkFeatureList,
   assertCodexNetworkRuntimeVersion,
   MINIMUM_CODEX_LOOPBACK_PROXY_VERSION,
@@ -30,12 +42,11 @@ export {
   type CodexNetworkPreflight,
 } from './codex-network-preflight.js';
 export {
-  DEFAULT_MAX_SKILLS,
   resolveSkills,
-  type ManifestSkill,
+  skillIdentityKey,
+  splitTaskSkillCollisions,
   type ResolvedSkillRow,
   type SkillResolution,
-  type SkillResolutionOptions,
 } from './skills.js';
 export {
   extractCodexRolloutIdentity,
@@ -56,6 +67,19 @@ export {
   type AgentCredentialProvider,
 } from './agent-credentials.js';
 export { SpawnError } from './types.js';
+export {
+  materializeSpaceApiKeyHome,
+  scrubSpaceSessionSecrets,
+  spaceSessionHomeDir,
+  spaceSessionsRoot,
+  sweepSpaceSessionSecrets,
+} from './space-credential-session-home.js';
+export {
+  resolveSessionCredentials,
+  type CredentialResolutionDeps,
+  type CredentialResolutionInput,
+  type ResolvedSessionCredentials,
+} from './credential-resolution.js';
 export {
   branchNameFor,
   provisionWorktree,
@@ -78,6 +102,13 @@ export type {
   GraphPort,
   GitHubCredential,
   GitHubCredentialPort,
+  SpaceCredentialGrant,
+  SpaceCredentialPolicies,
+  SpaceCredentialPort,
+  SpaceCredentialProvider,
+  SpaceCredentialRead,
+  SpaceCredentialRefusalReason,
+  SpaceCredentialRepoint,
   LoadSpawnContextInput,
   ManifestSkillContext,
   PermissionMode,
@@ -105,4 +136,7 @@ export type {
   WorktreeAllocationRow,
   WorktreeAllocationState,
   GhostReconcileReport,
+  AutoResumeReport,
 } from './types.js';
+
+export { computeEffectiveSkills, type EffectiveSkillsInput } from './effective-skills.js';

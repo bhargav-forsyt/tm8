@@ -10,7 +10,10 @@
  * as a hidden mutation seam.
  */
 import {
+  ACTION_ROW_COLUMNS,
   EntityContextViewSchema,
+  expandActionRows,
+  type ActionRows,
   EntityFeedPageSchema,
   decodeCursor,
   encodeCursor,
@@ -20,7 +23,7 @@ import {
   type OperationName,
   type PaletteAction,
 } from '@tm8/contract';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { Db, DbClaims, Querier } from '../../src/db/types.js';
 import type { EntityRow } from '../../src/facade/entity-read.js';
@@ -32,7 +35,9 @@ import {
   type W2FeedContextServiceOptions,
 } from '../../src/facade/services/w2/feed-context.js';
 import { HandlerRegistry } from '../../src/facade/registry.js';
+import type { ActionDiscovery } from '../../src/facade/services/w2/saved-views-actions.js';
 import type { OperationHandler, RequestContext } from '../../src/http/types.js';
+import { UNTAGGED, countStatements } from './context-statement-counter.js';
 
 const IDS = {
   space: '00000000-0000-7000-8000-000000000d01',
@@ -313,8 +318,30 @@ interface Stub {
   eventSeq?: number;
 }
 
+/**
+ * Each `entities.context` section's OWN statement, told apart from the helper
+ * statements (`assembleSummaries`, `loadActors`, …) that the service also tags
+ * with the section: only the own statement is answered from the section stub.
+ */
+const CONTEXT_PRIMARY: Record<string, (sql: string) => boolean> = {
+  root: () => true,
+  children: (sql) => sql.includes('e.parent_id = $1'),
+  edges: (sql) => sql.includes('from public.edges g'),
+  messages: (sql) => sql.includes('where m.anchor_id = $1'),
+  activity: () => true,
+  seq: () => true,
+};
+
+/** A helper statement minus the section tag the service led it with. */
+function untagged(sql: string): string {
+  const tag = /^\/\* entities\.context:([a-z]+) \*\/\n/.exec(sql);
+  if (!tag || CONTEXT_PRIMARY[tag[1]!]?.(sql)) return sql;
+  return sql.slice(tag[0].length);
+}
+
 function router(stub: Stub): <R>(sql: string, params: readonly unknown[]) => Promise<R[]> {
-  return async <R>(sql: string): Promise<R[]> => {
+  return async <R>(tagged: string): Promise<R[]> => {
+    const sql = untagged(tagged);
     const marker = /\/\* (entities\.[a-z]+:[a-z]+) \*\//.exec(sql)?.[1];
     switch (marker) {
       case 'entities.feed:anchor':
@@ -348,6 +375,12 @@ function router(stub: Stub): <R>(sql: string, params: readonly unknown[]) => Pro
       default:
         break;
     }
+    if (sql.includes('internal.current_member_id(e.space_id)::text actor_id')) {
+      return [{
+        id: IDS.task, space_id: IDS.space, kind: 'task', version: 3, deleted_at: null,
+        work_status: 'open', message_author_id: null, actor_id: IDS.member, is_space_admin: true,
+      }] as R[];
+    }
     if (sql.includes('left join public.user_profiles up')) return ACTOR_ROWS as R[];
     if (sql.includes('root_message_id = any(')) return [] as R[];
     if (sql.includes("and e.kind = 'message'")) {
@@ -379,7 +412,7 @@ function request(
 
 const PALETTE: PaletteAction[] = [
   {
-    id: 'action:entities.get:g13',
+    id: `action:entities.get:${IDS.task}`,
     label: 'entities get',
     kind: 'navigate',
     operation: 'entities.get',
@@ -392,12 +425,26 @@ const PALETTE: PaletteAction[] = [
   },
 ];
 
+/** The discovery `PALETTE` is the v1 expansion of — one row, factored. */
+const DISCOVERY: ActionDiscovery = {
+  compact: {
+    schema: 'tm8.actions.v2',
+    actorId: IDS.member,
+    target: { id: IDS.task, kind: 'task', version: 3 },
+    capabilityEpoch: 'cap:g13',
+    columns: ACTION_ROW_COLUMNS,
+    rows: [['entities.get', 'navigate', 'entity', 'public']],
+    total: 1,
+  },
+  fingerprint: 'g13',
+};
+
 function registryFor(db: Db, options: W2FeedContextServiceOptions = {}): HandlerRegistry {
   const registry = new HandlerRegistry();
   registerW2FeedContextHandlers(
     registry,
     { db, config: {} as never, owner: async () => OWNER },
-    { actions: async () => PALETTE, ...options },
+    { actions: async () => DISCOVERY, ...options },
   );
   return registry;
 }
@@ -1111,6 +1158,57 @@ describe('W2.G13 entities.context bounded focus', () => {
     expect(view.byteSize).toBeGreaterThan(0);
   });
 
+  it('serves the actions section as tm8.actions.v2 rows on request, with a cursor actions.list continues', async () => {
+    const ops = [
+      'entities.commands.complete', 'messages.post', 'entities.commands.linkPr', 'entities.commands.linkCommit',
+      'entities.patch', 'edges.create', 'tracking.refresh', 'entities.context', 'messages.list', 'entities.get',
+      'entities.children', 'entities.hierarchy', 'entities.connections', 'edges.list', 'entities.activity',
+    ] as const;
+    const many: ActionDiscovery = {
+      compact: {
+        ...DISCOVERY.compact,
+        rows: ops.map((op) => [op, 'navigate', 'entity', 'public']),
+        total: ops.length,
+      },
+      fingerprint: 'g13',
+    };
+    const { run } = contextOn(CONTEXT_STUB, { actions: async () => many });
+
+    const whole = await run('sections=summary,actions&actionsSchema=v2');
+    expect(EntityContextViewSchema.parse(whole)).toBeTruthy();
+    expect(whole.actions).toEqual(many.compact);
+    expect(whole.cursors['actions']).toBeNull();
+
+    // A section cap that holds only some rows keeps the header once, the
+    // leading rows, and a cursor naming the last row kept.
+    const capped = await run('sections=summary,actions&actionsSchema=v2&sectionBytes=512');
+    const section = capped.actions as ActionRows;
+    expect(section.rows.length).toBeGreaterThan(0);
+    expect(section.rows.length).toBeLessThan(ops.length);
+    expect(section.rows).toEqual(many.compact.rows.slice(0, section.rows.length));
+    expect(section.total).toBe(ops.length);
+    expect(Buffer.byteLength(JSON.stringify(section), 'utf8')).toBeLessThanOrEqual(512);
+    expect(capped.truncated).toBe(true);
+    expect(decodeCursor(capped.cursors['actions']!).k).toEqual(['g13', section.rows.at(-1)![0]]);
+
+    // v1 is untouched: the same discovery, expanded and capped at the
+    // section's bytes (fewer rows fit as objects), and no actions cursor.
+    const legacy = await run('sections=summary,actions');
+    const objects = legacy.actions as PaletteAction[];
+    expect(objects.length).toBeLessThan(ops.length);
+    expect(objects).toEqual(expandActionRows(many.compact).actions.slice(0, objects.length));
+    expect(legacy.cursors).not.toHaveProperty('actions');
+  });
+
+  it('collapses a v2 actions section the byte budget emptied to [], exactly like v1', async () => {
+    const { run } = contextOn(CONTEXT_STUB);
+    const view = await run('sections=summary,hierarchy,connections,messages,actions&actionsSchema=v2&totalBytes=1024');
+    expect(EntityContextViewSchema.parse(view)).toBeTruthy();
+    expect(view.actions).toEqual([]);
+    expect(view.truncated).toBe(true);
+    expect(view.cursors['actions']).toBeNull();
+  });
+
   it('refuses an unknown key or an out-of-range cap before any database work', async () => {
     for (const query of [
       'sections=summary,rubbish',
@@ -1442,5 +1540,149 @@ describe('W2.G13 entities.context on a chat (176)', () => {
     const taskRootSql = taskDb.sql.find((sql) => sql.includes('entities.context:root'));
 
     expect(chatRootSql).toBe(taskRootSql);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// entities.context select-before-load (M2/S2; c904 §2.6 and §5 test 8, c761 §7)
+// ---------------------------------------------------------------------------
+
+const TEN_CHILD_IDS = Array.from({ length: 10 }, (_, index) =>
+  `00000000-0000-7000-8000-0000000014${index.toString(16).padStart(2, '0')}`,
+);
+
+/** c761 §10's "a task with 10 children of ~4 KB and a message". */
+const TEN_CHILDREN_STUB: Stub = {
+  ...CONTEXT_STUB,
+  children: TEN_CHILD_IDS.map((id) => longRow(id, 4000)),
+  entities: [
+    taskRow(IDS.task),
+    ...TEN_CHILD_IDS.map((id) => longRow(id, 4000)),
+    messageRow(IDS.rootMessage),
+  ],
+};
+
+/** A session with no pinned interaction profile, which `sessionRow` leaves undefined. */
+const PINLESS_SESSION: EntityRow = {
+  ...sessionRow(IDS.session),
+  ws_pin_revision: null,
+  ws_pin_template_key: null,
+  ws_pin_template_version: null,
+  ws_pin_resolved_snapshot: null,
+};
+
+const SESSION_STUB: Stub = {
+  root: [PINLESS_SESSION],
+  children: [],
+  edges: [],
+  messages: [
+    { entity_id: IDS.rootMessage, cursor_created_at: '2026-07-26T09:20:00.123456Z' },
+  ],
+  activity: [activityRow(IDS.activity, { entity_id: IDS.session })],
+  entities: [
+    PINLESS_SESSION,
+    messageRow(IDS.rootMessage, { anchorId: IDS.session, body: 'coordinator: go' }),
+  ],
+  eventSeq: 6120,
+};
+
+/**
+ * v1 is a public read contract, and S2 changes only WHAT is loaded. So every
+ * v1 read below is pinned byte-for-byte against a golden recorded from the
+ * pre-S2 service. The clock is frozen because `provenance.fetchedAt` is a wall
+ * clock, and freezing it is what makes "byte-identical" literal rather than
+ * "identical apart from one field".
+ */
+describe('W2.G13 entities.context v1 output is byte-identical (M2/S2 goldens)', () => {
+  const cases: Array<{ name: string; stub: Stub; query: string; params?: Record<string, string> }> = [
+    { name: 'task-default', stub: CONTEXT_STUB, query: '' },
+    { name: 'task-ten-children-default', stub: TEN_CHILDREN_STUB, query: '' },
+    { name: 'session-default', stub: SESSION_STUB, query: '', params: { id: IDS.session } },
+    { name: 'task-summary', stub: CONTEXT_STUB, query: 'sections=summary' },
+    { name: 'task-hierarchy', stub: TEN_CHILDREN_STUB, query: 'sections=hierarchy&sectionBytes=8192' },
+    { name: 'task-messages-activity', stub: CONTEXT_STUB, query: 'sections=messages,activity' },
+    { name: 'task-tight-budget', stub: TEN_CHILDREN_STUB, query: 'totalBytes=2048' },
+  ];
+
+  for (const { name, stub, query, params } of cases) {
+    it(`${name} matches its pre-S2 golden`, async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-07-26T12:00:00.000Z'));
+      try {
+        const view = await contextOn(stub).run(query, params);
+        await expect(`${JSON.stringify(view, null, 2)}\n`).toMatchFileSnapshot(
+          `./__goldens__/entity-context-v1/${name}.json`,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+});
+
+describe('W2.G13 entities.context loads only the selected sections (M2/S2)', () => {
+  /** The real registration seam, so `actions` goes through G09 and its tagged db. */
+  function counted(stub: Stub) {
+    const { db, run } = contextOn(stub, { actions: undefined });
+    const counter = countStatements(db);
+    return { counter, run };
+  }
+
+  const OPTIONAL = ['parents', 'children', 'edges', 'messages', 'activity', 'actions'] as const;
+
+  it('tags every statement a context read issues, including helpers and the palette', async () => {
+    const { counter, run } = counted(CONTEXT_STUB);
+    await run();
+    expect(counter.total()).toBeGreaterThan(0);
+    expect(counter.byTag()[UNTAGGED], counter.statements.join('\n---\n')).toBeUndefined();
+  });
+
+  it('--sections summary runs no children, edges, messages, actions or activity query', async () => {
+    const { counter, run } = counted(CONTEXT_STUB);
+    const view = await run('sections=summary');
+    const tags = counter.byTag();
+    expect(Object.keys(tags).sort()).toEqual(['root', 'seq', 'summary']);
+    expect(tags['root']).toBe(1);
+    expect(tags['seq']).toBe(1);
+    expect(view.content).toBeDefined();
+  });
+
+  it('the v1 default runs exactly the loaders v1 renders, each read-once where it is one row', async () => {
+    const { counter, run } = counted(CONTEXT_STUB);
+    const view = await run();
+    const tags = counter.byTag();
+    // v1's default selects every section, and every one of them is rendered:
+    // lists as lists, activity as `cursors.activity`.
+    expect(Object.keys(tags).sort()).toEqual(
+      ['actions', 'activity', 'children', 'edges', 'messages', 'parents', 'root', 'seq', 'summary'],
+    );
+    expect(view.cursors['activity']).toEqual(expect.any(String));
+    expect(tags['root']).toBe(1);
+    expect(tags['seq']).toBe(1);
+    // Activity is only ever a cursor in v1, so it is one `limit 1` keyset read.
+    expect(tags['activity']).toBe(1);
+    const activitySql = counter.statements.find((sql) => sql.includes('entities.context:activity'))!;
+    expect(activitySql).toContain('limit 1');
+    expect(activitySql).not.toMatch(/select a\.id, a\.created_at/);
+  });
+
+  it('a single selected section loads only itself beside the root', async () => {
+    const own: Record<string, readonly string[]> = {
+      hierarchy: ['parents', 'children'],
+      connections: ['edges'],
+      messages: ['messages'],
+      activity: ['activity'],
+      actions: ['actions'],
+    };
+    for (const [section, loaders] of Object.entries(own)) {
+      const { counter, run } = counted(CONTEXT_STUB);
+      await run(`sections=${section}`);
+      const loaded = Object.keys(counter.byTag()).filter((tag) =>
+        (OPTIONAL as readonly string[]).includes(tag));
+      // `parents` issues no statement when the ancestor walk finds none, so
+      // assert containment for the section's own loaders and absence for the rest.
+      for (const tag of loaded) expect(loaders, `${section} loaded ${tag}`).toContain(tag);
+      expect(loaded.length, section).toBeGreaterThan(0);
+    }
   });
 });

@@ -70,7 +70,7 @@
  * The host wiring is held by `views/`, not here.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render } from '@testing-library/react';
+import { fireEvent, render, within } from '@testing-library/react';
 import type { ActorSummary, EntityDetail, EntityId } from '@tm8/contract';
 import { REASONS as DOMAIN_REASONS, getKind, type ActionContext } from '../../domain';
 import {
@@ -133,6 +133,36 @@ function panel(detail: EntityDetail, controls: ControlHost | null, onRestore?: (
   );
 }
 
+/**
+ * THE PANEL'S PICKERS ARE CLICK-TO-EDIT — owner decision, 2026-09-07.
+ *
+ * The detail panel opts into `inlineEditors`, so status and priority show
+ * their VALUE and open a menu on click instead of being native `<select>`s.
+ * The LIST's expanded row still uses the select and its tests are unchanged;
+ * this helper exists so the difference lives in one place rather than being
+ * spelled at each call.
+ *
+ * The trigger keeps its testid, so "is this control mounted at all" is still
+ * asked the same way everywhere — only "choose a value" changed.
+ */
+type Get = (id: string) => HTMLElement;
+const openPicker = (get: Get, testId: string): HTMLElement => {
+  fireEvent.click(get(testId));
+  return get(`${testId}-menu`);
+};
+/* BY THE REGISTRY'S ID, not the rendered label: `priority` renders `LOW`
+   today and the casing is a presentation choice this suite must not pin. */
+const pick = (get: Get, testId: string, optionId: string): void => {
+  /* IDEMPOTENT: the trigger TOGGLES, so a caller that already opened the menu
+     to inspect its options would otherwise close it here. */
+  const menu =
+    document.querySelector<HTMLElement>(`[data-testid="${testId}-menu"]`) ??
+    openPicker(get, testId);
+  const item = menu.querySelector(`[data-option-id="${optionId}"]`);
+  if (!item) throw new Error(`no option "${optionId}" in ${testId}`);
+  fireEvent.click(item);
+};
+
 /** A task in whatever work status the case needs. */
 function taskAt(status: string, extra: Partial<EntityDetail> = {}): EntityDetail {
   return {
@@ -147,11 +177,10 @@ describe('the panel mounts the real control strip', () => {
     const h = host();
     const { getByTestId } = panel(TASK, h);
 
-    const select = getByTestId('row-value-select') as HTMLSelectElement;
     // The registry names the field; the panel must not spell it.
-    expect(select.dataset.source).toBe('priority');
+    expect(getByTestId('row-value-select').dataset.source).toBe('priority');
 
-    fireEvent.change(select, { target: { value: 'low' } });
+    pick(getByTestId, 'row-value-select', 'low');
     // The fourth argument is the control's LABEL, and it is not decoration: a
     // failure notice is user copy, and titling one with `source` produced
     // "priority could not be changed" — lowercase mid-sentence. Both values
@@ -267,13 +296,19 @@ describe('the way back — done and archived both reopen', () => {
     const h = host();
     const { getByTestId } = panel(taskAt('done'), h);
 
-    const select = getByTestId('row-state-select') as HTMLSelectElement;
-    expect(select.value).toBe('done');
+    /* The closed chip reads the CURRENT value — what a value-first control
+       must do before it is opened. The WORD is the registry's (`wordFor`), the
+       same one the status pill has always shown, so this surface introduces no
+       second vocabulary for the same state. */
+    expect(getByTestId('row-state-select').textContent).toContain('done');
     // `open` must be OFFERED from done — the registry lists it and nothing
     // filters the list by the current value.
-    expect([...select.options].map((o) => o.value)).toContain('open');
+    const menu = openPicker(getByTestId, 'row-state-select');
+    expect(
+      [...menu.querySelectorAll('[data-option-id]')].map((b) => b.getAttribute('data-option-id')),
+    ).toContain('open');
 
-    fireEvent.change(select, { target: { value: 'open' } });
+    pick(getByTestId, 'row-state-select', 'open');
     expect(h.onSetState).toHaveBeenCalledWith(TASK.id, 'open', 'set-state');
   });
 
@@ -287,7 +322,7 @@ describe('the way back — done and archived both reopen', () => {
      */
     const h = host();
     const { getByTestId } = panel(taskAt('done'), h);
-    fireEvent.change(getByTestId('row-state-select'), { target: { value: 'working' } });
+    pick(getByTestId, 'row-state-select', 'working');
 
     expect(h.onSetState).toHaveBeenCalledWith(TASK.id, 'working', 'set-state');
     expect(h.onSetState).not.toHaveBeenCalledWith(TASK.id, 'working', 'complete');
@@ -296,7 +331,7 @@ describe('the way back — done and archived both reopen', () => {
   it('completing still routes through the gated completion verb', () => {
     const h = host();
     const { getByTestId } = panel(taskAt('working'), h);
-    fireEvent.change(getByTestId('row-state-select'), { target: { value: 'done' } });
+    pick(getByTestId, 'row-state-select', 'done');
 
     // `done` is the ONE value the database refuses on both write doors.
     expect(h.onSetState).toHaveBeenCalledWith(TASK.id, 'done', 'complete');
@@ -438,5 +473,67 @@ describe('the strip does not duplicate what it replaced', () => {
 
     expect(queryByTestId('row-state-select')).toBeNull();
     expect(queryByTestId('panel-tombstone')).not.toBeNull();
+  });
+});
+
+describe('the session sharing slot rides the detail panel too', () => {
+  /**
+   * The row cluster's two-dial picker, mounted in the panel header. A session
+   * opened from its row must keep the control it had there — the panel is
+   * where a user lands after clicking the row, so a slot that vanished on open
+   * was the gap reported against 187's UI.
+   */
+  const SESSION = (() => {
+    const found = Object.values(fixtureDetails).find((d) => d.kind === 'work_session');
+    if (!found) throw new Error('the fixtures must carry a work_session');
+    return found;
+  })();
+  const sessionAt = (state: Record<string, unknown>, createdBy?: ActorSummary): EntityDetail => ({
+    ...SESSION,
+    state: { ...SESSION.state, ...state } as EntityDetail['state'],
+    ...(createdBy ? { createdBy } : {}),
+  });
+  const sessionHost = (onShareSession?: ControlHost['onShareSession']) =>
+    host({
+      kind: 'work_session',
+      capabilitiesOf: () => SESSION.capabilities,
+      ...(onShareSession ? { onShareSession } : {}),
+    });
+
+  it('opens the same picker from the panel, and one click sends exactly its own dial', () => {
+    const onShareSession = vi.fn();
+    const detail = sessionAt({ shareMode: 'space', driveMode: 'owner' });
+    const { getByTestId } = panel(detail, sessionHost(onShareSession));
+
+    const trigger = getByTestId('row-sharing-trigger');
+    /* Beside the primaries, in the bar the panel's verbs live in. */
+    expect(getByTestId('panel-action-bar').parentElement?.contains(trigger)).toBe(true);
+    fireEvent.click(trigger);
+    const menu = getByTestId('row-sharing-menu');
+    const typeSpace = within(menu).getByTestId('row-sharing-type').querySelector('[data-value="space"]');
+    if (!typeSpace) throw new Error('the typing dial must offer "space"');
+    fireEvent.click(typeSpace);
+
+    expect(onShareSession).toHaveBeenCalledTimes(1);
+    expect(onShareSession).toHaveBeenCalledWith(detail.id, { driveMode: 'space' });
+  });
+
+  it("carries the launcher, so a teammate's session shows the teammate note", () => {
+    const teammate: ActorSummary = { ...ADA, id: 'tm-1' as EntityId, kind: 'team_member', isAgent: true };
+    const detail = sessionAt({ shareMode: 'space', driveMode: 'owner', sharingSetAt: null }, teammate);
+    const { getByTestId } = panel(detail, sessionHost(vi.fn()));
+
+    fireEvent.click(getByTestId('row-sharing-trigger'));
+    expect(getByTestId('row-sharing-teammate').textContent).toMatch(/until someone sets its sharing/);
+  });
+
+  it('draws no sharing slot where the host wired no sharing', () => {
+    const { queryByTestId } = panel(sessionAt({ shareMode: 'none' }), sessionHost());
+    expect(queryByTestId('row-sharing-trigger')).toBeNull();
+  });
+
+  it('draws no sharing slot on a kind that does not declare one', () => {
+    const { queryByTestId } = panel(TASK, host({ onShareSession: vi.fn() }));
+    expect(queryByTestId('row-sharing-trigger')).toBeNull();
   });
 });

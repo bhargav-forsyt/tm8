@@ -58,6 +58,8 @@ import {
   type SessionTranscriptPage,
 } from '@tm8/contract';
 import type { CommandContext, CommandModule } from '../run.js';
+import { callerMutationId, spawnedWorktreeId, successReceipt } from '../receipt.js';
+import { errorInput, withErrorReceipt } from '../receipt-error.js';
 
 /** §4.13's closed workdir set. Kept as a tuple so the diagnostic renders it. */
 const WORKDIRS = ['project', 'scratch', 'worktree'] as const;
@@ -80,9 +82,84 @@ type AccessMode = (typeof ACCESS_MODES)[number];
 const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
+/**
+ * `--credential-source` (design 01a0cfa8 §4). Repeatable, one provider each:
+ * `anthropic=member`, `openai=node`, `github=space`, or `anthropic=space:<id>`
+ * to pin one space credential over the space default. A bare source with no
+ * provider is the deprecated scalar every provider falls back to.
+ *
+ * Only a SPACE credential can be named, and only by its own id: there is no
+ * spelling that names an account (I1). Whether the caller may use that id is
+ * the server's question — it re-checks membership at spawn and at resume.
+ */
+const CREDENTIAL_SOURCES = ['member', 'space', 'node'] as const;
+type CredentialSourceFlag = (typeof CREDENTIAL_SOURCES)[number];
+const CREDENTIAL_SOURCE_PROVIDERS = ['anthropic', 'openai', 'github'] as const;
+type CredentialSourceProvider = (typeof CREDENTIAL_SOURCE_PROVIDERS)[number];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface ParsedCredentialSources {
+  credentialSource?: CredentialSourceFlag;
+  credentialSources?: Partial<Record<CredentialSourceProvider, CredentialSourceFlag>>;
+  spaceCredentialIds?: Partial<Record<CredentialSourceProvider, string>>;
+}
+
+export function parseCredentialSourceFlags(raws: readonly string[]): ParsedCredentialSources {
+  const usage = (detail: string): CliError =>
+    new CliError(`--credential-source ${detail}`, EXIT_USAGE, {
+      hint: `expects <provider>=member|space|node or <provider>=space:<space-credential-id> (provider ${CREDENTIAL_SOURCE_PROVIDERS.join('|')}), or a bare member|space|node for every provider`,
+    });
+  const out: ParsedCredentialSources = {};
+  for (const raw of raws) {
+    const eq = raw.indexOf('=');
+    if (eq < 0) {
+      const scalar = CREDENTIAL_SOURCES.find((s) => s === raw);
+      if (scalar === undefined) throw usage(`got ${JSON.stringify(raw)}`);
+      if (out.credentialSource !== undefined) throw usage('names the all-provider source twice');
+      out.credentialSource = scalar;
+      continue;
+    }
+    const providerRaw = raw.slice(0, eq);
+    const provider = CREDENTIAL_SOURCE_PROVIDERS.find((p) => p === providerRaw);
+    if (provider === undefined) throw usage(`names unknown provider ${JSON.stringify(providerRaw)}`);
+    const value = raw.slice(eq + 1);
+    const colon = value.indexOf(':');
+    const sourceRaw = colon < 0 ? value : value.slice(0, colon);
+    const source = CREDENTIAL_SOURCES.find((s) => s === sourceRaw);
+    if (source === undefined) throw usage(`got ${JSON.stringify(raw)}`);
+    if (out.credentialSources?.[provider] !== undefined) throw usage(`names ${provider} twice`);
+    (out.credentialSources ??= {})[provider] = source;
+    if (colon >= 0) {
+      const id = value.slice(colon + 1);
+      if (source !== 'space') throw usage(`pins an id on ${provider}=${source}; only a space credential can be pinned`);
+      if (!UUID_RE.test(id)) throw usage(`pins ${JSON.stringify(id)}, which is not a space credential id`);
+      (out.spaceCredentialIds ??= {})[provider] = id;
+    }
+  }
+  return out;
+}
+
 /** §4.13's closed attach-mode set. `view` observes; `drive` owns the terminal. */
 const ATTACH_MODES = ['view', 'drive'] as const;
 type AttachMode = (typeof ATTACH_MODES)[number];
+
+/**
+ * The two sharing dials (187), spelled exactly as `set_work_session_sharing`
+ * accepts them. They are SEPARATE on purpose: watching and typing are
+ * different grants, so opening a session to the space never implies handing
+ * anyone the keyboard.
+ *
+ * `explicit` is accepted by the server and is deliberately NOT offered here.
+ * The attach gate tests `share_mode = 'none'`, so `explicit` behaves exactly
+ * like `space` today — a per-person list is a schema that does not exist yet.
+ * Offering the word would let a caller believe they had narrowed a session
+ * they had in fact opened to everyone, which is the worst direction for a
+ * sharing control to be wrong in.
+ */
+const SHARE_MODES = ['none', 'space'] as const;
+type ShareMode = (typeof SHARE_MODES)[number];
+const DRIVE_MODES = ['owner', 'space'] as const;
+type DriveMode = (typeof DRIVE_MODES)[number];
 
 /**
  * A closed-set option. The diagnostic names the WHOLE set rather than just
@@ -395,8 +472,9 @@ async function sessionSpawn(cmd: CommandContext): Promise<ExitCode> {
   const title = cmd.options.value('title');
   const contextSource = cmd.options.value('context');
 
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
   const body: Record<string, unknown> = {
-    clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
+    clientMutationId: mutationId,
     spaceId,
     teamMemberId,
   };
@@ -443,6 +521,12 @@ async function sessionSpawn(cmd: CommandContext): Promise<ExitCode> {
   // child LESS than it holds, which is the only direction worth spelling out.
   if (accessMode !== undefined) body.accessMode = accessMode;
   if (reasoningEffort !== undefined) body.reasoningEffort = reasoningEffort;
+  // Sent ONLY when named, like `accessMode`: an absent source is what lets a
+  // child inherit its spawner's exact credential rather than re-resolving.
+  const credentials = parseCredentialSourceFlags(cmd.options.values('credential-source'));
+  if (credentials.credentialSource !== undefined) body.credentialSource = credentials.credentialSource;
+  if (credentials.credentialSources !== undefined) body.credentialSources = credentials.credentialSources;
+  if (credentials.spaceCredentialIds !== undefined) body.spaceCredentialIds = credentials.spaceCredentialIds;
   if (model !== undefined) body.model = model;
   if (agentTool !== undefined) body.agentTool = agentTool;
   if (title !== undefined) body.title = title;
@@ -456,9 +540,38 @@ async function sessionSpawn(cmd: CommandContext): Promise<ExitCode> {
   if (memoryIds.length > 0) body.memoryIds = memoryIds;
   if (cmd.ctx.actor) body.actorId = cmd.ctx.actor.value;
 
-  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'execution.spawn', { body });
-  cmd.out.data(data, renderSpawned);
+  const data = await withErrorReceipt(cmd, errorInput(cmd, 'session.spawn', { mutationId }), () =>
+    observedInvoke<unknown>(clientFor(cmd.ctx), 'execution.spawn', { body }));
+  const workdirPath =
+    cmd.out.receipts === 'receipt' ? await spawnedWorktreePath(cmd, data) : undefined;
+  cmd.out.mutation('session.spawn', data, renderSpawned, () =>
+    successReceipt('session.spawn', data, {
+      ...callerMutationId(cmd.options),
+      ...(workdirPath === undefined ? {} : { workdirPath }),
+    }));
   return EXIT_OK;
+}
+
+/**
+ * The checkout path a spawned worktree session works in — the one receipt
+ * fact the spawn result does not carry (the worktree rides it as a SUMMARY,
+ * which has its branch but not its path). One bounded read, receipt mode only,
+ * and best effort: the spawn has already landed, so a failed read drops
+ * `workdir.path` rather than failing the command. Phase 2's server receipt
+ * supplies the path directly and retires this read.
+ */
+async function spawnedWorktreePath(cmd: CommandContext, data: unknown): Promise<string | undefined> {
+  const worktreeId = spawnedWorktreeId(data);
+  if (worktreeId === undefined) return undefined;
+  try {
+    const worktree = await clientFor(cmd.ctx).invoke<{ content?: { path?: unknown } }>('entities.get', {
+      params: { id: worktreeId },
+    });
+    const path = worktree?.content?.path;
+    return typeof path === 'string' && path !== '' ? path : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -522,19 +635,74 @@ async function sessionTerminate(cmd: CommandContext): Promise<ExitCode> {
   const id = requireSessionId('session terminate', cmd.args[0]);
   requireConfirmation('session terminate', cmd);
 
-  const body: Record<string, unknown> = {
-    clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
-  };
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
+  const body: Record<string, unknown> = { clientMutationId: mutationId };
   // Sent only when asked: `ExecutionTerminateInput` is strict and a `false`
   // here would be a caller asserting something they did not ask for.
   if (cmd.options.bool('force')) body.force = true;
   if (cmd.ctx.actor) body.actorId = cmd.ctx.actor.value;
 
-  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'execution.terminate', {
+  const data = await withErrorReceipt(cmd, errorInput(cmd, 'session.terminate', { id, mutationId }), () =>
+    observedInvoke<unknown>(clientFor(cmd.ctx), 'execution.terminate', {
+      params: { id },
+      body,
+    }));
+  cmd.out.mutation('session.terminate', data, renderTerminated, () =>
+    successReceipt('session.terminate', data, callerMutationId(cmd.options)));
+  return EXIT_OK;
+}
+
+/**
+ * `tm8 session share` — who may watch this terminal, and who may type into it.
+ *
+ * Two independent flags, and NEITHER is defaulted here. The server merges on
+ * null (`coalesce`), so sending only `--drive` leaves watching exactly as it
+ * was. Filling in the other dial locally would mean a caller who asked to stop
+ * remote typing also silently re-closed, or re-opened, the session to viewers.
+ *
+ * Narrowing REVOKES capabilities that have already been handed out — a share
+ * grant is a bearer token with a 30s life, so un-sharing that left live grants
+ * alone would be a close button that does not close anything for half a
+ * minute. That happens server-side; it is named here because it is the part a
+ * caller cannot see from the flags.
+ */
+async function sessionShare(cmd: CommandContext): Promise<ExitCode> {
+  const id = requireSessionId('session share', cmd.args[0]);
+  const shareMode = closed<ShareMode>('share', cmd.options.value('share'), SHARE_MODES);
+  const driveMode = closed<DriveMode>('drive', cmd.options.value('drive'), DRIVE_MODES);
+  if (shareMode === undefined && driveMode === undefined) {
+    throw new CliError(
+      'tm8 session share requires --share none|space, --drive owner|space, or both',
+      EXIT_USAGE,
+      { hint: '`--share` decides who may WATCH; `--drive` decides who may TYPE' },
+    );
+  }
+
+  const body: Record<string, unknown> = {
+    clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
+  };
+  // Strict input: an omitted dial is an absent key, never an explicit null.
+  if (shareMode !== undefined) body.shareMode = shareMode;
+  if (driveMode !== undefined) body.driveMode = driveMode;
+  // `--expect-version`, not `--expected-version`: every one of the 31 guard
+  // rows in the CLI spells the flag this way, and a lone variant here would be
+  // a second name for one thing. The DTO FIELD stays `expectedVersion` — the
+  // flag surface is the CLI's, the field is the frozen contract's.
+  const expected = cmd.options.value('expect-version');
+  if (expected !== undefined) {
+    const parsed = Number(expected);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      throw new CliError('--expect-version must be a non-negative integer', EXIT_USAGE);
+    }
+    body.expectedVersion = parsed;
+  }
+  if (cmd.ctx.actor) body.actorId = cmd.ctx.actor.value;
+
+  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'execution.sessions.share', {
     params: { id },
     body,
   });
-  cmd.out.data(data, renderTerminated);
+  cmd.out.data(data, (dto) => renderShared(dto, shareMode, driveMode));
   return EXIT_OK;
 }
 
@@ -743,6 +911,49 @@ function renderTerminated(dto: unknown): string {
   return `${String(entity.id)} ${String(entity.status ?? 'terminated')}`;
 }
 
+/**
+ * Echoes back only what was ASKED for. The command result carries the entity,
+ * not the two columns, and reading a posture out of a field that is not there
+ * would be an invention — so an omitted dial prints nothing about itself
+ * rather than printing a guess at its unchanged value.
+ *
+ * IT NAMES THE SETTING, NOT THE OUTCOME — and on an agent-launched session the
+ * outcome has one surprise worth saying out loud. `grant_stream_attach` opens on
+ * `internal.can_act_as(created_by, space)`, and 075 makes that true for EVERY
+ * active member whenever `created_by` is a team_member entity. Until 202 that
+ * arm outranked both dials, and this note used to warn that narrowing did not
+ * close it. Since 202 a dial set here holds (`work_sessions.sharing_set_at`
+ * retires the arm for that session), so the warning inverted: `created_by` is
+ * the persona, no column records which human pressed launch, and so there is
+ * no owner to exempt — `none` closes watching, and `owner` closes typing, to
+ * every member, the one who ran this command included.
+ *
+ * The note is printed on any narrowing rather than only when it bites, because
+ * this result does not carry `createdBy` and guessing would be worse than a
+ * condition. It is phrased as one ("on an agent-launched session") so it is
+ * true either way.
+ */
+function renderShared(
+  dto: unknown,
+  shareMode: ShareMode | undefined,
+  driveMode: DriveMode | undefined,
+): string {
+  const entity = (dto as CommandResultish)?.entity;
+  const parts: string[] = [];
+  if (shareMode !== undefined) {
+    parts.push(shareMode === 'none' ? 'watch: not shared' : 'watch: everyone in the space');
+  }
+  if (driveMode !== undefined) {
+    parts.push(driveMode === 'owner' ? 'type: not shared' : 'type: everyone in the space');
+  }
+  const head = entity?.id === undefined ? 'shared' : String(entity.id);
+  const narrowed = shareMode === 'none' || driveMode === 'owner';
+  const note = narrowed
+    ? '\nnote: on an agent-launched session there is no owner to exempt, so this narrows it for you too.'
+    : '';
+  return `${head}  ${parts.join('  ')}${note}`;
+}
+
 function renderGrant(dto: StreamAttachGrantDto): string {
   const parts = [String(dto.workSessionId ?? ''), String(dto.mode ?? ''), String(dto.url ?? '')];
   const expires = dto.expiresAt === undefined ? '' : `  expires ${String(dto.expiresAt)}`;
@@ -775,4 +986,5 @@ export const SESSION_COMMANDS: CommandModule[] = [
   { path: ['session', 'resume'], run: sessionResume },
   { path: ['session', 'terminate'], run: sessionTerminate },
   { path: ['session', 'attach'], run: sessionAttach },
+  { path: ['session', 'share'], run: sessionShare },
 ];

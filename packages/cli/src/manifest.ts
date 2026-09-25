@@ -91,11 +91,21 @@ export interface ManifestDirective {
 /** A skill rendered into the prompt from the graph via `equips` edges (R19). */
 export interface ManifestSkill {
   name?: string;
-  body?: string;
+  entityId?: string;
+  description?: string;
+  provider?: string;
+  level?: string;
+  sourcePath?: string;
+  loadPointer?: string;
+  native?: boolean;
+  hash?: string;
+  allowImplicitInvocation?: boolean;
 }
 
 export interface Tm8Manifest {
   manifestVersion?: string;
+  /** The prompt frame this launch was stamped with (spec ca8d §6.3). */
+  promptVersion?: string;
   /**
    * The §5.1 bootstrap projection, present only for `manifestVersion: "2"`.
    *
@@ -114,6 +124,8 @@ export interface Tm8Manifest {
   mode?: AgentMode;
   agent?: ManifestAgent;
   project?: ManifestProject | null;
+  /** The directory the PTY actually runs in (worktree, project or scratch). */
+  session?: { workingDirectory?: string };
   launch?: ManifestLaunch;
   tasks?: ManifestTask[];
   coordinator?: ManifestCoordinator | null;
@@ -185,6 +197,7 @@ function projectBootstrap(bootstrap: BootstrapManifestV2): Tm8Manifest {
 
   return defined<Tm8Manifest>({
     manifestVersion: bootstrap.manifestVersion,
+    promptVersion: bootstrap.promptVersion,
     bootstrap,
     sessionId: session.id,
     spaceId: session.spaceId,
@@ -220,6 +233,8 @@ export function parseManifest(raw: unknown): Tm8Manifest {
   const agentRaw = isRecord(raw.agent) ? raw.agent : undefined;
   const projectRaw = isRecord(raw.project) ? raw.project : undefined;
   const launchRaw = isRecord(raw.launch) ? raw.launch : undefined;
+  const sessionRaw = isRecord(raw.session) ? raw.session : undefined;
+  const sessionWorkingDirectory = sessionRaw ? str(sessionRaw.workingDirectory) : undefined;
   const coordRaw = isRecord(raw.coordinator) ? raw.coordinator : undefined;
   const directiveRaw = isRecord(raw.directive) ? raw.directive : undefined;
 
@@ -248,11 +263,18 @@ export function parseManifest(raw: unknown): Tm8Manifest {
     : undefined;
 
   const skills = Array.isArray(raw.skills)
-    ? raw.skills.filter(isRecord).map((s) => defined<ManifestSkill>({ name: str(s.name), body: str(s.body) }))
+    ? raw.skills.filter(isRecord).map((s) => defined<ManifestSkill>({
+        name: str(s.name), entityId: str(s.entityId), description: str(s.description),
+        provider: str(s.provider), level: str(s.level), sourcePath: str(s.sourcePath),
+        loadPointer: str(s.loadPointer), hash: str(s.hash),
+        native: typeof s.native === 'boolean' ? s.native : undefined,
+        allowImplicitInvocation: typeof s.allowImplicitInvocation === 'boolean' ? s.allowImplicitInvocation : undefined,
+      }))
     : undefined;
 
   return defined<Tm8Manifest>({
     manifestVersion: str(raw.manifestVersion),
+    promptVersion: str(raw.promptVersion),
     sessionId: str(raw.sessionId),
     spaceId: str(raw.spaceId),
     mode: mode(raw.mode),
@@ -273,6 +295,7 @@ export function parseManifest(raw: unknown): Tm8Manifest {
           workingDir: str(projectRaw.workingDir),
         })
       : undefined,
+    session: sessionWorkingDirectory ? { workingDirectory: sessionWorkingDirectory } : undefined,
     launch: launchRaw
       ? defined<ManifestLaunch>({
           tool: str(launchRaw.tool),

@@ -36,6 +36,7 @@ import {
   type Workflow,
   type TaskWorkflowInput,
   type UpdateMemberRoleInput,
+  type UpdateSpaceInput,
   bindPath,
   CollabError,
   FILE_MAX_SIZE_BYTES_DEFAULT,
@@ -73,6 +74,7 @@ import {
   type ExecutionSpawnInput,
   type ExecutionTerminalStartInput,
   type ExecutionResumeInput,
+  type ExecutionSessionsShareInput,
   type ExecutionTerminateInput,
   type FeedItem,
   type FileUploadGrant,
@@ -96,6 +98,10 @@ import {
   type PatchTaskInput,
   type PostMessageInput,
   type CredentialsStatusView,
+  type CredentialsServiceKeysStatusView,
+  type CredentialsSpacePolicyView,
+  type NodeCredentialsStatusView,
+  type SpaceCredentialView,
   type ContentionReport,
   type ProjectBranchTopology,
   type ProjectFileBlame,
@@ -107,15 +113,19 @@ import {
   type ExecutionGitMergeInput,
   type ExecutionGitCherryPickInput,
   type ExecutionGitBranchInput,
+  type ExecutionGitStageInput,
   type ExecutionGitStashInput,
   type ExecutionGitRollbackInput,
   type SessionGitCheckpointResult,
   type SessionGitCommitResult,
   type SessionGitDiff,
+  type SessionGitDiffHunk,
+  type SessionGitDiffScope,
   type SessionGitFile,
   type SessionGitMergeResult,
   type SessionGitCherryPickResult,
   type SessionGitBranchResult,
+  type SessionGitStageResult,
   type SessionGitStashResult,
   type SessionGitStashEntry,
   type SessionGitRollbackResult,
@@ -144,6 +154,7 @@ import type {
   SessionLiveness,
   Unsubscribe,
 } from '../seam';
+import { createJevFixture } from './jev-fixture';
 import {
   FIXTURE_BRANCH_TOPOLOGY,
   FIXTURE_NOW,
@@ -179,6 +190,10 @@ const FIXTURE_FILE_CHANGES = {
         { tool: 'edit' as const, linesAdded: 5, linesRemoved: 1, oldText: 'const RETRY = 1;', newText: 'const RETRY = 3; // measured' },
       ],
       hunksTruncated: false,
+      // The agent's most recent turn touched the source but not the test —
+      // the fixture carries BOTH values so a surface that ignores the flag
+      // renders identically to one that reads it, and only a test can tell.
+      lastTurn: true,
     },
     {
       path: 'packages/execution/test/spawn-loop.test.ts',
@@ -189,12 +204,14 @@ const FIXTURE_FILE_CHANGES = {
         { tool: 'write' as const, linesAdded: 22, linesRemoved: 0, oldText: null, newText: null },
       ],
       hunksTruncated: true,
+      lastTurn: false,
     },
   ],
   totalAdded: 36,
   totalRemoved: 3,
   filesTruncated: false,
   source: 'transcript' as const,
+  turns: 4,
 };
 
 /**
@@ -523,6 +540,7 @@ function fixtureLaunchRecord(sessionId: EntityId): SessionLaunchRecord {
     unavailableReason: null,
     manifest: {
       manifestVersion: '1',
+      promptVersion: '1',
       sessionId,
       spaceId: FIXTURE_SPACE_ID,
       generatedAt: new Date(FIXTURE_BASE_MS - 60_000).toISOString(),
@@ -709,6 +727,32 @@ function synthesizeContent(s: EntitySummary): EntityContent {
         error: state.status === 'failed' ? 'the provider refused: no image for profile' : null,
         usage: state.status === 'running' ? { cpuPct: 12, memMiB: 812, diskMiB: 2048 } : null,
         exposed: [],
+      };
+    case 'drawing':
+      // A small, real scene: two rectangles and nothing else. The fixture
+      // carries actual Excalidraw members rather than `[]` so a panel that
+      // mounts the canvas has something to draw, and so a fixture-backed test
+      // exercises the same shape the server returns.
+      return {
+        kind: 'drawing',
+        format: 'excalidraw',
+        elements: [
+          {
+            id: 'fixture-rect-a', type: 'rectangle', x: 40, y: 40, width: 160, height: 90,
+            angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent',
+            fillStyle: 'solid', strokeWidth: 2, roughness: 1, opacity: 100,
+            seed: 1, version: 1, versionNonce: 1, isDeleted: false,
+          },
+          {
+            id: 'fixture-rect-b', type: 'rectangle', x: 260, y: 40, width: 160, height: 90,
+            angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent',
+            fillStyle: 'solid', strokeWidth: 2, roughness: 1, opacity: 100,
+            seed: 2, version: 1, versionNonce: 2, isDeleted: false,
+          },
+        ],
+        appState: { viewBackgroundColor: '#ffffff' },
+        // Always empty in phase 1: the doors refuse a non-empty files map.
+        files: {},
       };
     default:
       // pull_request | commit | file | spell | skill — the open content variant
@@ -1105,10 +1149,79 @@ export function createFixtureSeam(): FixtureSeam {
   const nextId = (kind: string): string => `fx-${kind.replace(/^c:/, 'c-')}-${++idN}`;
 
   /**
-   * All six declared providers, drawn so that every honest-degradation state
-   * is on screen and a surface cannot pass by collapsing two of them. Mutable,
+   * Every declared provider, drawn so that each honest-degradation state is on
+   * screen and a surface cannot pass by collapsing two of them. Mutable,
    * because `disconnect` writes to it.
+   *
+   * The routing is scripted too: kimi CONNECTED alongside a connected
+   * anthropic (which carries no routing — a Kimi key never takes Claude
+   * sessions away from it) and groq NOT connected (so its card must still
+   * describe what connecting it would do). A surface that only renders
+   * routing when `connected` is true fails on the second one.
    */
+  const serviceKeysState: CredentialsServiceKeysStatusView = {
+    keys: [{ provider: 'typesafe', connected: false, keyHint: null, updatedAt: null, nodeFallback: false }],
+    store: 'present',
+  };
+  /**
+   * SPACE credentials (SC-3). Scripted so every state a screen must say is
+   * reachable without a node: an anthropic group WITH a default (one the
+   * viewer created, one another member did); an openai group with a key but
+   * NO default — the D6a state a delete of the default leaves behind; and a
+   * github token whose `displayLogin` is the commit author (D10). The fixture
+   * viewer is `acct-ada`, the space owner, so every control is live here.
+   */
+  const spaceCredentialsState: SpaceCredentialView[] = [
+    {
+      id: '0f1e2d3c-0000-4000-8000-000000000a01', spaceId: FIXTURE_SPACE_ID, provider: 'anthropic',
+      shape: 'api_key', label: 'Team Claude', isDefault: true, status: 'active',
+      createdByAccountId: 'acct-ada', displayLogin: null, keyHint: 'x9Qa',
+      createdAt: FIXTURE_NOW, updatedAt: FIXTURE_NOW, lastUsedAt: FIXTURE_NOW, lastProbeAt: FIXTURE_NOW,
+    },
+    {
+      id: '0f1e2d3c-0000-4000-8000-000000000a02', spaceId: FIXTURE_SPACE_ID, provider: 'anthropic',
+      shape: 'api_key', label: 'Research budget', isDefault: false, status: 'stale',
+      createdByAccountId: 'acct-other', displayLogin: null, keyHint: '7fPk',
+      createdAt: FIXTURE_NOW, updatedAt: FIXTURE_NOW, lastUsedAt: null, lastProbeAt: FIXTURE_NOW,
+    },
+    {
+      id: '0f1e2d3c-0000-4000-8000-000000000b01', spaceId: FIXTURE_SPACE_ID, provider: 'openai',
+      shape: 'api_key', label: 'Codex shared', isDefault: false, status: 'active',
+      createdByAccountId: null, displayLogin: null, keyHint: 'Zt2m',
+      createdAt: FIXTURE_NOW, updatedAt: FIXTURE_NOW, lastUsedAt: null, lastProbeAt: FIXTURE_NOW,
+    },
+    {
+      id: '0f1e2d3c-0000-4000-8000-000000000c01', spaceId: FIXTURE_SPACE_ID, provider: 'github',
+      shape: 'token', label: 'tm8-bot', isDefault: true, status: 'active',
+      createdByAccountId: 'acct-ada', displayLogin: 'tm8-bot', keyHint: 'k3Jd',
+      createdAt: FIXTURE_NOW, updatedAt: FIXTURE_NOW, lastUsedAt: FIXTURE_NOW, lastProbeAt: FIXTURE_NOW,
+    },
+  ];
+  const spacePolicyState: CredentialsSpacePolicyView = {
+    spaceId: FIXTURE_SPACE_ID,
+    providers: [
+      { provider: 'anthropic', allowedSources: null },
+      { provider: 'openai', allowedSources: ['space'] },
+      { provider: 'github', allowedSources: null },
+    ],
+    node: [
+      { provider: 'anthropic', allowNode: null },
+      { provider: 'openai', allowNode: null },
+      { provider: 'github', allowNode: false },
+    ],
+  };
+  const nodeCredentialsState: NodeCredentialsStatusView = {
+    providers: [
+      { provider: 'anthropic', allowNode: null, envKeyPresent: true },
+      { provider: 'openai', allowNode: null, envKeyPresent: false },
+      { provider: 'github', allowNode: false, envKeyPresent: true },
+    ],
+  };
+  const spaceCredentialById = (id: string): SpaceCredentialView => {
+    const row = spaceCredentialsState.find((c) => c.id === id);
+    if (!row) throw new CollabError('not_found', `space credential ${id} not found`);
+    return row;
+  };
   const credentialsState: CredentialsStatusView = {
     providers: [
       // Connected, and its login is null FOREVER — not pending, not unknown.
@@ -1120,6 +1233,7 @@ export function createFixtureSeam(): FixtureSeam {
         status: 'active',
         connectedAt: FIXTURE_NOW,
         lastVerifiedAt: FIXTURE_NOW,
+        routing: null,
       },
       // The one true negative — so "not connected" has something real to mean.
       {
@@ -1130,6 +1244,7 @@ export function createFixtureSeam(): FixtureSeam {
         status: null,
         connectedAt: null,
         lastVerifiedAt: null,
+        routing: null,
       },
       // `connected: false` here is UNKNOWN, not measured — see gitCredentialStore.
       {
@@ -1140,6 +1255,7 @@ export function createFixtureSeam(): FixtureSeam {
         status: null,
         connectedAt: null,
         lastVerifiedAt: null,
+        routing: null,
       },
       // Binary present, but no connection result could be established.
       {
@@ -1150,6 +1266,7 @@ export function createFixtureSeam(): FixtureSeam {
         status: 'stale',
         connectedAt: null,
         lastVerifiedAt: null,
+        routing: null,
       },
       // A successful node-level measurement: this binary is absent.
       {
@@ -1160,6 +1277,7 @@ export function createFixtureSeam(): FixtureSeam {
         status: 'unavailable',
         connectedAt: null,
         lastVerifiedAt: null,
+        routing: null,
       },
       // Cursor has a real status verb: this is a positive probe, not a guess
       // from the presence of files or the login terminal's exit code.
@@ -1171,6 +1289,41 @@ export function createFixtureSeam(): FixtureSeam {
         status: 'active',
         connectedAt: FIXTURE_NOW,
         lastVerifiedAt: FIXTURE_NOW,
+        routing: null,
+      },
+      // An API-key backend that IS in effect. Its `login` is null like every
+      // other file-shaped provider: a pasted key carries no account name.
+      {
+        provider: 'kimi',
+        connected: true,
+        login: null,
+        authMethod: 'api_key',
+        status: 'active',
+        connectedAt: FIXTURE_NOW,
+        lastVerifiedAt: FIXTURE_NOW,
+        routing: {
+          agentTool: 'claude-code',
+          role: 'backend',
+          counterpart: 'anthropic',
+          active: true,
+        },
+      },
+      // Not connected, and still routing-bearing: `active: false` is the
+      // "here is what Connect would do" case.
+      {
+        provider: 'groq',
+        connected: false,
+        login: null,
+        authMethod: null,
+        status: null,
+        connectedAt: null,
+        lastVerifiedAt: null,
+        routing: {
+          agentTool: 'codex',
+          role: 'backend',
+          counterpart: 'openai',
+          active: false,
+        },
       },
     ],
     // 'absent' is the fixture's default deliberately: it is the state of the
@@ -1258,8 +1411,97 @@ export function createFixtureSeam(): FixtureSeam {
           filesTruncated: false,
           diff: '',
           diffTruncated: false,
+          scope: 'session' as const,
+          path: null,
+          hunks: null,
+          hunkDigest: null,
+          untracked: false,
         };
   };
+  /**
+   * The fixture's model of the INDEX, and the only thing that makes stage and
+   * unstage provable without a git process: the XY status IS the state, so
+   * moving a file between staged and unstaged is a character swap. `??` ⇄ `A `
+   * because staging an untracked file is what makes git start tracking it.
+   */
+  const fxStagePath = (status: string): string =>
+    status === '??' ? 'A ' : `${status[1] === ' ' ? (status[0] ?? 'M') : (status[1] ?? 'M')} `;
+  const fxUnstagePath = (status: string): string =>
+    status[0] === 'A' ? '??' : ` ${status[0] === ' ' ? (status[1] ?? 'M') : (status[0] ?? 'M')}`;
+  const fxIsStaged = (f: SessionGitFile): boolean =>
+    f.status !== '??' && f.status[0] !== ' ' && f.status[0] !== '?';
+  // Untracked is NOT unstaged: `git diff` (the unstaged comparison) does not
+  // see a file git has never been told about. The counts and the scope filter
+  // both have to agree with git or the surface teaches the wrong model.
+  const fxIsUnstaged = (f: SessionGitFile): boolean =>
+    f.status !== '??' && f.status[1] !== ' ' && f.status[1] !== '?';
+  /** SAMPLE_DIFF sliced to ONE file, the way a path-scoped server diff answers. */
+  const fxFileDiff = (path: string): string => {
+    const blocks = SAMPLE_DIFF.split(/^diff --git /m).filter((b) => b.trim() !== '');
+    const hit = blocks.find((b) => b.split('\n')[0]?.endsWith(`b/${path}`));
+    if (hit !== undefined) return `diff --git ${hit}`;
+    // Untracked: no recorded state to compare against, so the whole file reads
+    // as an addition — exactly what `git diff --no-index -- /dev/null <path>`
+    // emits, and what the server answers for this case.
+    return [
+      `diff --git a/${path} b/${path}`,
+      'new file mode 100644',
+      'index 0000000..1111111',
+      '--- /dev/null',
+      `+++ b/${path}`,
+      '@@ -0,0 +1,2 @@',
+      '+scratch notes',
+      '+not yet tracked',
+      '',
+    ].join('\n');
+  };
+  /**
+   * The fixture's hunk listing, obeying the SAME four refusals the server
+   * does — no `path`, the `session` scope, a truncated diff, and an untracked
+   * file all answer null.
+   *
+   * Mirroring the refusals is the point, not the parsing. A fixture that
+   * cheerfully offered hunks for the session scope would let the Changes
+   * surface wire a selection the real server rejects, and every test would
+   * pass on the way to a feature that fails the first time it runs.
+   *
+   * The digest is a cheap deterministic hash, not sha256: the fixture never
+   * has to AGREE with the server's digest, only to change when the hunks do.
+   */
+  const fxHunks = (
+    diff: string,
+    scope: SessionGitDiffScope,
+    wantPath: string | null,
+    truncated: boolean,
+    untracked: boolean,
+  ): { hunks: SessionGitDiffHunk[] | null; hunkDigest: string | null } => {
+    if (wantPath === null || truncated || untracked) return { hunks: null, hunkDigest: null };
+    if (scope !== 'staged' && scope !== 'unstaged') return { hunks: null, hunkDigest: null };
+    const lines = diff.split('\n');
+    const hunks: SessionGitDiffHunk[] = [];
+    for (const line of lines) {
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(line);
+      if (m !== null) {
+        hunks.push({
+          index: hunks.length + 1,
+          heading: (m[3] ?? '').trim(),
+          oldStart: Number(m[1]),
+          newStart: Number(m[2]),
+          text: line,
+        });
+      } else if (hunks.length > 0) {
+        const last = hunks[hunks.length - 1]!;
+        last.text = `${last.text}\n${line}`;
+      }
+    }
+    if (hunks.length === 0) return { hunks: null, hunkDigest: null };
+    let h = 0;
+    for (const hunk of hunks) {
+      for (const ch of hunk.text) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
+    }
+    return { hunks, hunkDigest: `sha256:fixture-${(h >>> 0).toString(16)}` };
+  };
+
   const requireGitLane = (sessionId: EntityId): void => {
     requireSummary(sessionId);
     if (sessionId !== sessionLive.id) {
@@ -1819,6 +2061,14 @@ export function createFixtureSeam(): FixtureSeam {
         return { kind: 'voice_channel', participantCount: 0 };
       case 'doc':
         return { kind: 'doc', format: (c.format as 'markdown') ?? 'markdown', childCount: 0 };
+      // A new drawing is genuinely blank, so the count is 0 rather than a
+      // read of the input — "New drawing" creates an empty canvas.
+      case 'drawing':
+        return {
+          kind: 'drawing',
+          format: (c.format as string) ?? 'excalidraw',
+          elementCount: Array.isArray(c.elements) ? (c.elements as unknown[]).length : 0,
+        };
       case 'team_member':
         // `defaultProfileId: null` — a freshly created teammate has no
         // `defaults_to_profile` edge yet, and the field's contract is that
@@ -1835,8 +2085,10 @@ export function createFixtureSeam(): FixtureSeam {
           sizeBytes: (c.sizeBytes as number) ?? 0,
         };
       case 'spell':
-      case 'skill':
         return { kind, description: c.description as string | undefined, equipped: false };
+      case 'skill':
+        return { kind, description: c.description as string | undefined, equipped: false,
+          provider: 'tm8', level: 'space', frontmatter: {}, missing: false, changedOnDisk: false };
       case 'pull_request':
         return {
           kind: 'pull_request', repository: (c.repository as string) ?? '',
@@ -1925,9 +2177,16 @@ export function createFixtureSeam(): FixtureSeam {
     unreadTotal: 12,
     githubRepo: 'subhang/tm8',
     createdAt: '2026-07-20T09:00:00.000Z',
+    // 187's shipped defaults: watch shared, typing owner-only.
+    sessionShareDefault: 'space',
+    sessionDriveDefault: 'owner',
   };
 
   // -- the seam --------------------------------------------------------------
+
+  /* Ask Jev (`launch.suggest`), scripted over THIS seam's live rows so a
+     memory created through a command becomes a candidate on the next ask. */
+  const jevFixture = createJevFixture(() => [...summaries.values()]);
 
   const seam: FixtureSeam = {
     async openSpace(spaceId) {
@@ -2071,16 +2330,36 @@ export function createFixtureSeam(): FixtureSeam {
       return [globalDefault, ...migrated];
     },
     /**
-     * Amendment 11 mirror. Answers WITHOUT consulting the viewer, exactly like
-     * the node's claim-free RPC, and reproduces its disclosure rule rather
-     * than a friendlier one: an unresolvable code returns `{status:'unknown'}`
-     * and nothing else, and a dead code names the space but never the inviter.
-     * A fixture that leaked more than the node would let a join screen look
+     * Amendment 11 mirror. Reproduces the node's disclosure rule rather than a
+     * friendlier one: an unresolvable code returns `{status:'unknown'}` and
+     * nothing else, and a dead code names the space but never the inviter. A
+     * fixture that leaked more than the node would let a join screen look
      * correct here and refuse to render against a real server.
+     *
+     * IT CONSULTS THE VIEWER NOW (195), because the RPC does. `preview_invite`
+     * used to answer without knowing who was asking, which is how it came to
+     * tell somebody their own spent code was "used up" while `redeem_invite`
+     * — which CAN see them — answered `joined: false` for the same code in the
+     * same second. The membership rung sits ABOVE every dead one here for the
+     * same reason it does there: a membership outlives the link that granted
+     * it, so a spent, revoked or expired code is not news to somebody already
+     * inside.
+     *
+     * The predicate is a real lookup in this world's own state, not a constant,
+     * and in this world it is always true — the fixture viewer owns the one
+     * fixture space, which is the same fact `redeemInvite` leans on when it
+     * always answers `joined: false`. A fixture cannot mint a second human to
+     * be a stranger with. The rungs below are therefore written for the reader
+     * and for the day this world gains a second viewer; the statuses they
+     * return are exercised against the screen in `join/join.test.tsx`, which
+     * supplies the preview directly.
      */
     async previewInvite(code: string): Promise<InvitePreview> {
       const invite = invites.find((i) => i.code === code);
       if (!invite) return { status: 'unknown' };
+      if (identityView.memberships.some((m) => m.spaceId === FIXTURE_SPACE_ID)) {
+        return { status: 'member', spaceId: FIXTURE_SPACE_ID, spaceName: spaceSummary.name };
+      }
       if (invite.revoked) return { status: 'revoked', spaceName: spaceSummary.name };
       if (invite.expiresAt !== null && invite.expiresAt < tick()) {
         return { status: 'expired', spaceName: spaceSummary.name };
@@ -2630,6 +2909,19 @@ export function createFixtureSeam(): FixtureSeam {
           // Non-zero: the "some lines did not parse" marker has a story, and it
           // is the honest explanation for why a count looks low.
           malformed: 3,
+          // Hollow cache parts make the occupancy unknown, not 12,400: a
+          // count missing its cached prefix would understate it by most of it.
+          context: {
+            usedTokens: null,
+            capacityTokens: null,
+            cacheReadTokens: null,
+            requestInputTokens: null,
+            model: 'claude-fable-5',
+            observedAt: '2026-01-02T11:41:00.000Z',
+            source: 'claude_request_usage' as const,
+            capacitySource: null,
+            unavailableReason: 'incomplete_usage' as const,
+          },
           // A SHORT transcript read whole: the window reaches byte 0, so the
           // top of this one is the real beginning of the session. This is the
           // arm that proves the earned `hasOlder: false` claim renders.
@@ -2713,6 +3005,22 @@ export function createFixtureSeam(): FixtureSeam {
         stuck: null,
         lastActivityAt: liveTurns[liveTurns.length - 1]?.at ?? null,
         malformed: 0,
+        // The panel bar's context number: the newest request of THIS window,
+        // sized against the live session's 1M launch model. Only the tail
+        // carries one — a historical window has no standing to say "now".
+        context: opts?.before === undefined
+          ? {
+              usedTokens: 48_000,
+              capacityTokens: 1_000_000,
+              cacheReadTokens: 38_400,
+              requestInputTokens: 48_000,
+              model: 'claude-opus-4-6',
+              observedAt: liveTurns[liveTurns.length - 1]?.at ?? null,
+              source: 'claude_request_usage' as const,
+              capacitySource: 'runtime' as const,
+              unavailableReason: null,
+            }
+          : null,
         // The transcript-derived file accounting — attached only when asked,
         // like the real server's `files=1`. Observed tool calls, not git.
         ...(opts?.files ? { fileChanges: clone(FIXTURE_FILE_CHANGES) } : {}),
@@ -2761,8 +3069,28 @@ export function createFixtureSeam(): FixtureSeam {
       if (workSessionId !== sessionLive.id) {
         return clone(gitUnavailable(workSessionId, 'diff') as SessionGitDiff);
       }
+      const scope = opts?.scope ?? 'session';
+      const wantPath = opts?.path ?? null;
       const hasWork = gitLane.dirty.length > 0 || gitLane.history.length > 1;
-      let diff = hasWork ? SAMPLE_DIFF : '';
+
+      // SCOPE IS A REAL FILTER HERE TOO. A fixture that answered the same
+      // bytes for `staged` and `unstaged` would let a caller wire the wrong
+      // scope and still pass — the projectBranches rule, applied to the
+      // narrowing params.
+      const inScope = gitLane.dirty.filter((f) =>
+        scope === 'staged' ? fxIsStaged(f) : scope === 'unstaged' ? fxIsUnstaged(f) : true,
+      );
+      const rows = (wantPath === null ? inScope : inScope.filter((f) => f.path === wantPath)).map((f) => ({
+        path: f.path,
+        additions: f.path.endsWith('.md') ? 2 : 7,
+        deletions: f.path.endsWith('.md') ? 0 : 2,
+      }));
+      const untracked = wantPath !== null && gitLane.dirty.some((f) => f.path === wantPath && f.status === '??');
+
+      let diff = '';
+      if (hasWork && rows.length > 0) {
+        diff = wantPath === null ? SAMPLE_DIFF : fxFileDiff(wantPath);
+      }
       let diffTruncated = false;
       if (opts?.maxBytes !== undefined && diff.length > opts.maxBytes) {
         diff = diff.slice(0, opts.maxBytes);
@@ -2778,17 +3106,20 @@ export function createFixtureSeam(): FixtureSeam {
         mergeBaseOid: gitLane.baseOid,
         headOid: gitHead(),
         stat: hasWork
-          ? { filesChanged: 2, additions: 9, deletions: 2 }
+          ? {
+              filesChanged: rows.length,
+              additions: rows.reduce((t, r) => t + r.additions, 0),
+              deletions: rows.reduce((t, r) => t + r.deletions, 0),
+            }
           : { filesChanged: 0, additions: 0, deletions: 0 },
-        files: hasWork
-          ? [
-              { path: 'packages/server/src/facade/handlers/projects.ts', additions: 7, deletions: 2 },
-              { path: 'notes/scratch.md', additions: 2, deletions: 0 },
-            ]
-          : [],
+        files: hasWork ? rows : [],
         filesTruncated: false,
+        ...fxHunks(diff, scope, wantPath, diffTruncated, untracked),
         diff,
         diffTruncated,
+        scope,
+        path: wantPath,
+        untracked,
         checkedAt: FIXTURE_NOW,
       });
     },
@@ -2937,6 +3268,7 @@ export function createFixtureSeam(): FixtureSeam {
     },
 
     commands: {
+      jev: jevFixture.port,
       async createEntity(input) {
         if (input.parentId) requireSummary(input.parentId);
         /*
@@ -2975,6 +3307,25 @@ export function createFixtureSeam(): FixtureSeam {
               edges: Array.isArray(c.edges) ? (c.edges as never[]) : [],
               layout: (c.layout as Record<string, { x: number; y: number }>) ?? {},
               source: (c.source as string | null) ?? null,
+            },
+            connections: clone(NO_CONNECTIONS),
+            capabilities: { ...CAPS_FULL },
+          });
+        }
+        if (input.kind === 'drawing') {
+          /* Same reason as `graph`: the row IS the scene, so a created
+             drawing must carry a real content arm or the panel would mount
+             the canvas over `undefined` and look empty for the wrong reason.
+             A new drawing is genuinely blank — that is what "New drawing"
+             makes — so the arm is empty, not absent. */
+          const c = (input.content ?? {}) as Record<string, unknown>;
+          extras.set(s.id, {
+            content: {
+              kind: 'drawing',
+              format: (c.format as string) ?? 'excalidraw',
+              elements: Array.isArray(c.elements) ? (c.elements as never[]) : [],
+              appState: (c.appState as Record<string, unknown>) ?? {},
+              files: (c.files as Record<string, unknown>) ?? {},
             },
             connections: clone(NO_CONNECTIONS),
             capabilities: { ...CAPS_FULL },
@@ -3192,6 +3543,35 @@ export function createFixtureSeam(): FixtureSeam {
        * it will meet on a node, or the refusal states are drawn from
        * imagination and are wrong in exactly the places that matter.
        */
+      /**
+       * `spaces.update` mirror — `w2_update_space`'s rules: a space admin, a
+       * closed vocabulary per sharing key (22023 on the node), and absent keys
+       * left alone. Only the space summary moves; no session is touched,
+       * because a default applies at spawn and never reaches backwards.
+       */
+      async updateSpace(spaceId: SpaceId, input: UpdateSpaceInput): Promise<SpaceSummary> {
+        if (spaceId !== FIXTURE_SPACE_ID) throw new CollabError('not_found', `space ${spaceId} not found`);
+        const viewer = membersOfSpace(spaceId).find((m) => m.id === viewerActor.id)
+          ?? membersOfSpace(spaceId).find((m) => roleOfSummary(m) === 'owner');
+        const viewerRole = viewer ? roleOfSummary(viewer) : null;
+        if (viewerRole !== 'owner' && viewerRole !== 'admin') {
+          throw new CollabError('forbidden', 'space admin required');
+        }
+        if (input.sessionShareDefault !== undefined
+          && input.sessionShareDefault !== 'none' && input.sessionShareDefault !== 'space') {
+          throw new CollabError('invalid_input', 'sessionShareDefault must be none or space');
+        }
+        if (input.sessionDriveDefault !== undefined
+          && input.sessionDriveDefault !== 'owner' && input.sessionDriveDefault !== 'space') {
+          throw new CollabError('invalid_input', 'sessionDriveDefault must be owner or space');
+        }
+        if (input.name !== undefined) spaceSummary.name = input.name;
+        if (input.description !== undefined) spaceSummary.description = input.description;
+        if (input.githubRepo !== undefined) spaceSummary.githubRepo = input.githubRepo;
+        if (input.sessionShareDefault !== undefined) spaceSummary.sessionShareDefault = input.sessionShareDefault;
+        if (input.sessionDriveDefault !== undefined) spaceSummary.sessionDriveDefault = input.sessionDriveDefault;
+        return clone(spaceSummary);
+      },
       async setMemberRole(
         spaceId: SpaceId,
         memberId: EntityId,
@@ -4095,6 +4475,35 @@ export function createFixtureSeam(): FixtureSeam {
         return commandResult(s);
       },
       /**
+       * THE TWO SHARING DIALS (187).
+       *
+       * MERGE, NEVER REPLACE — the same rule `set_work_session_sharing`
+       * follows. A patch naming only `shareMode` must leave `driveMode`
+       * exactly where it was; a fixture that defaulted the absent dial would
+       * let a test pass against a merge the server does not perform.
+       *
+       * It does NOT model the grant revocation that narrowing a dial
+       * performs server-side, and that absence is deliberate: the fixture
+       * holds no stream grants to revoke, and inventing a revocation here
+       * would be asserting an effect this layer cannot observe.
+       */
+      async shareSession(id, input: ExecutionSessionsShareInput) {
+        const s = requireSummary(id);
+        if (s.state.kind !== 'work_session') {
+          throw new CollabError('invariant_violation', `${id} is not a work_session`);
+        }
+        if (input.expectedVersion !== undefined) requireVersion(s, input.expectedVersion);
+        if (input.shareMode !== undefined) s.state.shareMode = input.shareMode;
+        if (input.driveMode !== undefined) s.state.driveMode = input.driveMode;
+        /* 202: every write through the sharing RPC stamps provenance — the
+           one writer of the column, mirrored so the row's teammate note moves
+           from "open until set" to "applies to everyone" as it does live. */
+        s.state.sharingSetAt = new Date().toISOString();
+        touch(s);
+        emit(s.spaceId, { type: 'entity.upsert', entity: clone(s) }, input);
+        return commandResult(s);
+      },
+      /**
        * The inverse of terminate, and it refuses on the same terms: only a
        * TERMINAL session can be resumed. The server refuses a live one with
        * `conflict`, so the fixture must too — a fixture that cheerfully
@@ -4169,14 +4578,91 @@ export function createFixtureSeam(): FixtureSeam {
           oid: gitHead(), branch: gitLane.branch, previousOid, deletedUntracked: untracked,
         });
       },
+      /**
+       * STAGE / UNSTAGE — the index moves, the working tree does not. The
+       * fixture proves the second half by never touching anything but
+       * `status`: the path stays in `dirty` with the same name, which is
+       * exactly what a mixed reset leaves behind.
+       */
+      async gitStage(id, input: ExecutionGitStageInput): Promise<SessionGitStageResult> {
+        requireGitLane(id);
+        const paths = input.paths ?? [];
+        if (input.all !== true && paths.length === 0) {
+          throw new CollabError('invalid_input', `${input.action} needs pathspecs or all: true`, {
+            details: { reason: input.action === 'stage' ? 'nothing_to_stage' : 'nothing_to_unstage' },
+          });
+        }
+        const touched = (f: SessionGitFile): boolean => input.all === true || paths.includes(f.path);
+        gitLane.dirty = gitLane.dirty.map((f) =>
+          touched(f)
+            ? { ...f, status: input.action === 'stage' ? fxStagePath(f.status) : fxUnstagePath(f.status) }
+            : f,
+        );
+        const staged = gitLane.dirty.filter(fxIsStaged);
+        return clone({
+          sessionId: id,
+          worktreeId: 'fx-worktree-1' as EntityId,
+          action: input.action,
+          branch: gitLane.branch,
+          // EMPTY FOR `all: true`, because `paths` reports ARGV and `git add
+          // -A` / `git reset HEAD` are handed no pathspecs at all. The server
+          // does exactly this (`execution-git.ts`, pinned by
+          // `execution-git-changes.test.ts`), and a fixture that echoed the
+          // request here would let a caller assert on `paths` for an `all`
+          // stage, pass against the fixture, and fail against the server —
+          // the failure mode the projectBranches rule above exists to stop.
+          //
+          // The other place the two differ, said out loud rather than left to
+          // be discovered: the server EXPANDS a staged rename on unstage, so
+          // `paths` can come back LONGER than the request. This fixture never
+          // does, which is honest only for as long as its dataset holds no
+          // rename — it holds none today.
+          paths: input.all === true ? [] : [...paths],
+          all: input.all === true,
+          staged,
+          files: [...gitLane.dirty],
+          filesTruncated: false,
+          dirty: {
+            staged: staged.length,
+            unstaged: gitLane.dirty.filter((f) => f.status !== '??' && f.status[1] !== ' ').length,
+            untracked: gitLane.dirty.filter((f) => f.status === '??').length,
+            total: gitLane.dirty.length,
+          },
+          checkedAt: FIXTURE_NOW,
+        });
+      },
       async gitCommit(id, input: ExecutionGitCommitInput): Promise<SessionGitCommitResult> {
         requireGitLane(id);
+        // THE SAME REFUSAL THE SERVER MAKES: a path-scoped commit that would
+        // also sweep up an already-staged file it was not asked about is
+        // refused by name, not silently widened. Mirrored here because the UI
+        // has to render that refusal, and it can only be tested if the double
+        // can produce it.
+        if (input.all !== true && (input.paths?.length ?? 0) > 0) {
+          const outside = gitLane.dirty
+            .filter((f) => fxIsStaged(f) && input.paths?.includes(f.path) !== true)
+            .map((f) => f.path);
+          if (outside.length > 0) {
+            throw new CollabError(
+              'conflict',
+              `commit refused: ${outside.length} staged path(s) are outside the selection`,
+              {
+                details: {
+                  reason: 'staged_outside_selection',
+                  outsidePaths: outside,
+                  outsideCount: outside.length,
+                  hint: 'unstage them, or include them in paths',
+                },
+              },
+            );
+          }
+        }
         const staging = input.all === true
           ? [...gitLane.dirty]
-          : gitLane.dirty.filter((f) => input.paths?.includes(f.path));
+          : gitLane.dirty.filter((f) => input.paths?.includes(f.path) === true || fxIsStaged(f));
         if (staging.length === 0) {
           throw new CollabError('conflict', 'nothing is staged', {
-            details: { hint: 'stage changes first' },
+            details: { reason: 'nothing_staged', hint: 'stage changes first' },
           });
         }
         gitLane.serial += 1;
@@ -4610,6 +5096,98 @@ export function createFixtureSeam(): FixtureSeam {
           terminated: true,
         };
       },
+
+      // Service keys: none stored and no node fallback, so the TypeSafe row
+      // opens on its empty "paste a key" state — the case a new member meets.
+      async serviceKeys() {
+        return clone(serviceKeysState);
+      },
+
+      async saveServiceKey(provider, apiKey) {
+        const entry = serviceKeysState.keys.find((key) => key.provider === provider)!;
+        entry.connected = true;
+        entry.keyHint = apiKey.trim().slice(-4);
+        entry.updatedAt = tick();
+        return clone(entry);
+      },
+
+      async removeServiceKey(provider) {
+        const entry = serviceKeysState.keys.find((key) => key.provider === provider)!;
+        entry.connected = false;
+        entry.keyHint = null;
+        entry.updatedAt = null;
+        return { provider, revoked: true };
+      },
+
+      space: {
+        async list(spaceId) {
+          return { spaceId, credentials: clone(spaceCredentialsState.filter((c) => c.spaceId === spaceId)) };
+        },
+        async create(spaceId, input) {
+          const row: SpaceCredentialView = {
+            id: `0f1e2d3c-0000-4000-8000-${String(Date.now()).padStart(12, '0').slice(-12)}`,
+            spaceId,
+            provider: input.provider,
+            shape: input.shape,
+            label: input.label.trim(),
+            isDefault: !spaceCredentialsState.some((c) => c.provider === input.provider && c.isDefault),
+            status: 'active',
+            createdByAccountId: 'acct-ada',
+            displayLogin: input.provider === 'github' ? 'ada' : null,
+            keyHint: input.secret.trim().slice(-4),
+            createdAt: tick(), updatedAt: tick(), lastUsedAt: null, lastProbeAt: tick(),
+          };
+          spaceCredentialsState.push(row);
+          return clone(row);
+        },
+        async rekey(credentialId, secret) {
+          const row = spaceCredentialById(credentialId);
+          row.keyHint = secret.trim().slice(-4);
+          row.status = 'active';
+          row.updatedAt = tick();
+          return clone(row);
+        },
+        async rename(credentialId, label) {
+          const row = spaceCredentialById(credentialId);
+          row.label = label.trim();
+          return clone(row);
+        },
+        async setDefault(credentialId) {
+          const row = spaceCredentialById(credentialId);
+          for (const c of spaceCredentialsState) if (c.provider === row.provider) c.isDefault = c.id === row.id;
+          return clone(row);
+        },
+        async remove(credentialId) {
+          const at = spaceCredentialsState.findIndex((c) => c.id === credentialId);
+          if (at >= 0) spaceCredentialsState.splice(at, 1);
+          // D6a: deleting the default promotes NOTHING.
+          return {
+            credentialId, revoked: at >= 0,
+            terminatedLoginSessionIds: [], terminatedAgentSessionIds: [], failures: [],
+          };
+        },
+        async policy(spaceId) {
+          return { ...clone(spacePolicyState), spaceId };
+        },
+        async setPolicy(spaceId, provider, allowedSources) {
+          const entry = spacePolicyState.providers.find((p) => p.provider === provider);
+          if (entry) entry.allowedSources = allowedSources ? [...allowedSources] : null;
+          return { spaceId, provider, allowedSources };
+        },
+      },
+
+      node: {
+        async status() {
+          return clone(nodeCredentialsState);
+        },
+        async setPolicy(provider, allowNode) {
+          const entry = nodeCredentialsState.providers.find((p) => p.provider === provider);
+          if (entry) entry.allowNode = allowNode;
+          const policy = spacePolicyState.node.find((p) => p.provider === provider);
+          if (policy) policy.allowNode = allowNode;
+          return { provider, allowNode };
+        },
+      },
     },
 
     liveness: {
@@ -4656,6 +5234,9 @@ export function createFixtureSeam(): FixtureSeam {
       setPrMergeGuard(guard) {
         prMergeGuard = guard;
       },
+      setJevScenario: (scenario) => jevFixture.setScenario(scenario),
+      setJevDelay: (ms) => jevFixture.setDelay(ms),
+      jevRequests: () => jevFixture.requests,
     },
   };
 

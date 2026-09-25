@@ -60,7 +60,9 @@ import { channelFeedPortFromGateData } from './channel-feed-port';
 import { attentionSectionFor } from './attentionSurface';
 import { debugSurfaceFor } from './debugSurface';
 import { sessionStatsSurfaceFor } from './sessionStatsSurface';
+import { sessionContextSurfaceFor } from './sessionContextSurface';
 import { gitSurfaceFor } from './gitSurface';
+import { changesSurfaceFor } from './changesSurface';
 import { taskGitSectionFor } from './taskGitSection';
 import { graphSurfaceFor } from './graphSurface';
 import { attachmentsFor } from '../files/port';
@@ -475,7 +477,13 @@ export function WorkspaceView(props: WorkspaceViewProps) {
           host={host}
           reasons={reasons}
           ctx={{ ...ctx, entityId: id }}
-          controls={{ ...controlHostBase, kind: detail?.kind ?? '', ctx: { ...ctx, entityId: id } }}
+          controls={{
+            ...controlHostBase,
+            kind: detail?.kind ?? '',
+            ctx: { ...ctx, entityId: id },
+            /* The same executor the side lists' rows use for the sharing slot. */
+            onShareSession: primaries.shareSession,
+          }}
           /* The panel primaries, finally executable: Terminate commits here,
              Run expands the same launch config the list rows open, and edit /
              add-child come from `EntityVerbs` — see `composePanelActions`. */
@@ -497,7 +505,9 @@ export function WorkspaceView(props: WorkspaceViewProps) {
           attentionSection={attentionSectionFor(data.seam, data.spaceId, id, () => data.pull?.(id))}
           debugSurface={debugSurfaceFor(data.seam, id, data.livenessOf)}
           sessionStatsSurface={sessionStatsSurfaceFor(data.seam, id)}
+          sessionContextSurface={sessionContextSurfaceFor(data.seam, id, data.livenessOf)}
           gitSurface={gitSurfaceFor(data.seam, id, data.livenessOf)}
+          changesSurface={changesSurfaceFor(data.seam, id, data.livenessOf)}
           taskGitSection={taskGitSectionFor(data.seam, detail, openEntity)}
           graphSurface={graphSurfaceFor(data.seam, id, data.livenessOf, openEntity)}
           attachments={attachments}
@@ -823,6 +833,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
                expanded inline under a task (any panel kind) deserves the same
                close the sessions list gives it. */
             onTerminate={handleSessionTerminate}
+            onShareSession={primaries.shareSession}
             onResume={handleSessionResume}
             onSetState={rowLifecycle.setState}
             onArchive={rowLifecycle.archive}
@@ -903,8 +914,13 @@ export function WorkspaceView(props: WorkspaceViewProps) {
               /* Undefined until the kind is hydrated, and the sheet draws that
                  as "unknown" rather than "none" — see the picker's comment. */
               memories={data.launch.memories}
+          loadSkillPreview={data.launch.loadSkillPreview}
+          jev={data.launch.jev}
+          spaceId={data.spaceId}
               capacity={data.launch.capacity}
               loadCredentialStatus={data.seam.credentials.status}
+              loadSpaceCredentials={data.seam.credentials.space.list}
+              loadSpacePolicy={data.seam.credentials.space.policy}
               onCancel={() => props.onLaunchCancel?.()}
               onLaunch={(config) => props.onLaunchSubmit?.(config)}
               /* Passed straight through, unbound to any sheet state — see the
@@ -990,6 +1006,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
             onSelect={openEntity}
             /* Same rule as the left dock — see the comment there. */
             onTerminate={handleSessionTerminate}
+            onShareSession={primaries.shareSession}
             onResume={handleSessionResume}
             onSetState={rowLifecycle.setState}
             onArchive={rowLifecycle.archive}

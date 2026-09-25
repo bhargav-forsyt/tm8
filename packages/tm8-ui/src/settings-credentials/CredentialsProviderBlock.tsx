@@ -7,12 +7,14 @@ import { useCallback, useEffect, useState } from 'react';
 import type {
   CredentialConnectionView,
   CredentialProviderName,
+  CredentialRoutingView,
   CredentialsDeleteResult,
   CredentialsLoginSessionFinishResult,
   CredentialsStatusView,
 } from '@tm8/contract';
 import { LiveTerminal, TerminalHost, isLiveTerminalEnabled } from '../terminal';
-import { presentationOf } from './provider-presentation';
+import { CREDENTIAL_PROVIDER_LABEL } from '../domain/launch';
+import { presentationOf, providerBinaryLabel } from './provider-presentation';
 import {
   disconnectVerdictOf,
   verdictOf,
@@ -28,7 +30,7 @@ export interface CredentialsProviderBlockProps {
 }
 
 /** A login terminal that has been opened and not yet harvested. */
-interface PendingLogin {
+export interface PendingLogin {
   provider: CredentialProviderName;
   workSessionId: string;
   expiresAt: string;
@@ -204,12 +206,17 @@ function ProviderCard({
           <ProviderIcon />
         </span>
         <span className="cred-card__name">{presentation.name}</span>
-        <code className="cred-card__binary">{presentation.binary}</code>
+        <code className="cred-card__binary">{providerBinaryLabel(entry.provider)}</code>
       </header>
 
       <div className="cred-card__state" data-testid={`credential-verdict-${entry.provider}`}>
         <VerdictLine verdict={verdict} login={entry.login} binary={presentation.binary} />
       </div>
+
+      {/* The routing disclosure. It sits directly under the verdict because it
+          is part of the same answer: "connected" and "used for these models
+          on claude-code" are one fact told in two sentences. */}
+      {entry.routing ? <RoutingLine provider={entry.provider} routing={entry.routing} /> : null}
 
       {/* A connected-null result is a complete probe answer, not an account
           name that is still loading. Only a real name earns an Account row. */}
@@ -232,7 +239,13 @@ function ProviderCard({
       <div className="cred-card__actions">
         {verdict === 'unavailable' ? (
           <span className="cred-install" data-testid={`credential-install-${entry.provider}`}>
-            Install <code>{presentation.binary}</code> on this node to enable sign-in.
+            {presentation.binary === null ? (
+              <>This provider cannot be reached from this node.</>
+            ) : (
+              <>
+                Install <code>{presentation.binary}</code> on this node to enable sign-in.
+              </>
+            )}
           </span>
         ) : (
           <>
@@ -267,6 +280,51 @@ function ProviderCard({
   );
 }
 
+/**
+ * Say, on the card, which sessions this credential serves.
+ *
+ * Kimi and Groq are backends for a tool that already exists, so a member can
+ * reasonably wonder whether connecting one moves their Claude Code or Codex
+ * sessions off Anthropic or OpenAI. It does not: routing is per model, and
+ * this line says so — the key serves its own models on the tool, and every
+ * other session on that tool keeps its native login. Only a backend card
+ * carries routing; a native provider's card needs no warning.
+ *
+ * `agentTool` and the counterpart come from the server, which computes them
+ * from the same table spawn resolves against. Nothing here is hardcoded to
+ * "kimi" or "anthropic".
+ *
+ * BOTH NAMES COME FROM THE VENDOR TABLE, NOT THE PRESENTATION TABLE. This line
+ * is about whose service answers and whose account is billed, so it says
+ * "Moonshot AI" and "Anthropic"; `presentationOf` would say "Claude Code",
+ * which is the tool — the one thing that does not change.
+ */
+function RoutingLine({
+  provider,
+  routing,
+}: {
+  provider: CredentialProviderName;
+  routing: CredentialRoutingView;
+}) {
+  const vendor = CREDENTIAL_PROVIDER_LABEL[provider];
+  const counterpart = CREDENTIAL_PROVIDER_LABEL[routing.counterpart];
+  const tool = <code>{routing.agentTool}</code>;
+
+  return (
+    <p
+      className={`cred-card__routing${routing.active ? ' cred-card__routing--active' : ''}`}
+      data-testid={`credential-routing-${routing.role}`}
+      data-routing-active={routing.active ? 'true' : 'false'}
+    >
+      {routing.active ? (
+        <>Used only for models served by {vendor} on {tool}. Every other {tool} session keeps using {counterpart}.</>
+      ) : (
+        <>Connect this to run models served by {vendor} on {tool}. Other {tool} sessions keep using {counterpart}.</>
+      )}
+    </p>
+  );
+}
+
 /** Four meanings, stated in words so colour is never the only state signal. */
 function VerdictLine({
   verdict,
@@ -275,7 +333,11 @@ function VerdictLine({
 }: {
   verdict: ConnectionVerdict;
   login: string | null;
-  binary: string;
+  // Null for providers with no vendor CLI. Only the `unavailable` arm reads it,
+  // and that arm is unreachable for those providers — the binary their probe
+  // measures is `node`, which ships with the server. The fallback below is
+  // correctness insurance, not a case anyone should see.
+  binary: string | null;
 }) {
   switch (verdict) {
     case 'connected-named':
@@ -283,7 +345,13 @@ function VerdictLine({
     case 'connected-unnamed':
       return <span>Connected — inference access</span>;
     case 'unavailable':
-      return <span>{`Unavailable — ${binary} is not installed on this node.`}</span>;
+      return (
+        <span>
+          {binary === null
+            ? 'Unavailable — this node cannot reach the provider.'
+            : `Unavailable — ${binary} is not installed on this node.`}
+        </span>
+      );
     case 'unknown':
       return (
         <span>
@@ -369,23 +437,27 @@ function OutcomeNotice({ outcome }: { outcome: Outcome }) {
 /**
  * Login is an ordinary PTY work_session, hosted by the existing terminal
  * module. The test-build placeholder says plainly when live bytes are disabled.
+ * Settings → Space credentials mounts this same panel for a space login, with
+ * its own `lede` naming the credential being logged into.
  */
-function LoginTerminalPanel({
+export function LoginTerminalPanel({
   login,
   serverBaseUrl,
   busy,
   onFinish,
+  lede,
 }: {
   login: PendingLogin;
   serverBaseUrl?: string;
   busy: boolean;
   onFinish: () => void;
+  lede?: string;
 }) {
   const provider = presentationOf(login.provider);
   return (
     <div className="cred-terminal" data-testid="credential-login-terminal">
       <span className="cred-intro">
-        {`Signing in to ${provider.name}. Follow the terminal prompts, then press “I’ve finished signing in”.`}
+        {lede ?? `Signing in to ${provider.name}. Follow the terminal prompts, then press “I’ve finished signing in”.`}
       </span>
       <span className="cred-notice__why" data-testid="credential-login-expiry">
         {`This terminal runs \`${login.command}\` and expires at ${login.expiresAt}.`}

@@ -1,7 +1,7 @@
 /**
  * `tm8 task …` — the closed kind-command namespace for tasks (§4.5).
  *
- * SEVEN commands: `transition`, `complete`, `gate`, `axis`, `link-pr`,
+ * EIGHT commands: `transition`, `complete`, `tick`, `gate`, `axis`, `link-pr`,
  * `link-commit`, `import-issue`. There is deliberately no `task create`,
  * `task get` or
  * `task list`: a task is an entity, so it is created, read and queried through
@@ -48,6 +48,10 @@ import {
   withActor,
 } from './entity.js';
 import type { CommandContext, CommandModule } from '../run.js';
+import { callerMutationId, successReceipt, type ReceiptWarning } from '../receipt.js';
+import { errorInput, withErrorReceipt } from '../receipt-error.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The six statuses `task transition` documents, in the frozen contract
@@ -68,14 +72,14 @@ async function taskTransition(cmd: CommandContext): Promise<ExitCode> {
     });
   }
 
-  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.commands.work', {
-    params: { id },
-    body: withActor(cmd, {
-      clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
-      status,
-    }),
-  });
-  cmd.out.data(data, renderCommandResult);
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
+  const data = await withErrorReceipt(cmd, errorInput(cmd, 'task.transition', { id, mutationId }), () =>
+    observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.commands.work', {
+      params: { id },
+      body: withActor(cmd, { clientMutationId: mutationId, status }),
+    }));
+  cmd.out.mutation('task.transition', data, renderCommandResult, () =>
+    successReceipt('task.transition', data, callerMutationId(cmd.options)));
   return EXIT_OK;
 }
 
@@ -91,25 +95,80 @@ async function taskComplete(cmd: CommandContext): Promise<ExitCode> {
   const expectedVersion = cmd.options.integer('expect-version');
   if (expectedVersion === undefined) {
     throw new CliError('`tm8 task complete` requires --expect-version <n>', EXIT_USAGE, {
-      hint: 'read the current version with `tm8 entity get <task-id>`',
+      hint: 'read the current version with `tm8 entity context <task-id>` (its first line)',
     });
   }
   const completerIds = cmd.options.values('by');
+  // A tm8-spawned session knows its own actor id; name it, so an agent does not
+  // guess one from its harness (an email, a name) and reach the wire with it.
+  const self = process.env.TM8_TEAM_MEMBER_ID?.trim();
+  const byHint = self ? `your team-member id is ${self}: --by ${self}` : 'completion records who completed the task; --by is repeatable';
   if (completerIds.length === 0) {
-    throw new CliError('`tm8 task complete` requires at least one --by <actor-id>', EXIT_USAGE, {
-      hint: 'completion records who completed the task; --by is repeatable',
+    throw new CliError('`tm8 task complete` requires at least one --by <actor-id>', EXIT_USAGE, { hint: byHint });
+  }
+  const notIds = completerIds.filter((by) => !UUID_RE.test(by));
+  if (notIds.length > 0) {
+    throw new CliError(`--by expects an actor id (a uuid), got ${notIds.map((by) => JSON.stringify(by)).join(', ')}`, EXIT_USAGE, {
+      hint: byHint,
     });
   }
 
-  const data = await observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.commands.complete', {
-    params: { id },
-    body: withActor(cmd, {
-      clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
-      expectedVersion,
-      completerIds,
-    }),
-  });
-  cmd.out.data(data, renderCommandResult);
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
+  const data = await withErrorReceipt(
+    cmd,
+    errorInput(cmd, 'task.complete', { id, mutationId, expectedVersion }),
+    () =>
+      observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.commands.complete', {
+        params: { id },
+        body: withActor(cmd, { clientMutationId: mutationId, expectedVersion, completerIds }),
+      }),
+  );
+  cmd.out.mutation('task.complete', data, renderCommandResult, () =>
+    successReceipt('task.complete', data, { expectedVersion, completerIds, ...callerMutationId(cmd.options) }));
+  return EXIT_OK;
+}
+
+/**
+ * `tm8 task tick <task-id> <criterion-id>... [--untick] --expect-version <n>`
+ * — the write `task complete`'s criteria gate asks for.
+ *
+ * A FLAT TASK VERB, like `complete` and `gate`, over its own operation
+ * (`entities.commands.tick`), not `entity update` sugar. The Server merges the
+ * named ids into the stored list, so the caller never restates the whole
+ * `acceptanceCriteria` array — and never has to learn that member name, which
+ * is what sent agents to a 29.5 KB `entity get`. Ids come from the
+ * `acceptance` section of `tm8 entity context`, whose `acceptanceWrite` and
+ * the complete refusal's `next` both print this command filled in.
+ */
+async function taskTick(cmd: CommandContext): Promise<ExitCode> {
+  assertKnownOptions(cmd, ['expect-version', 'untick', 'mutation-id']);
+  const id = requireArg(cmd, 0, '<task-id>');
+  const criterionIds = cmd.args.slice(1);
+  if (criterionIds.length === 0) {
+    throw new CliError('`tm8 task tick` needs at least one <criterion-id>', EXIT_USAGE, {
+      hint: `the ids are in the acceptance section of \`tm8 entity context ${id}\``,
+    });
+  }
+  const expectedVersion = cmd.options.integer('expect-version');
+  if (expectedVersion === undefined) {
+    throw new CliError('`tm8 task tick` requires --expect-version <n>', EXIT_USAGE, {
+      hint: `read the current version with \`tm8 entity context ${id}\``,
+    });
+  }
+  const done = !cmd.options.bool('untick');
+
+  const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
+  const data = await withErrorReceipt(
+    cmd,
+    errorInput(cmd, 'task.tick', { id, mutationId, expectedVersion }),
+    () =>
+      observedInvoke<unknown>(clientFor(cmd.ctx), 'entities.commands.tick', {
+        params: { id },
+        body: withActor(cmd, { clientMutationId: mutationId, expectedVersion, criterionIds, done }),
+      }),
+  );
+  cmd.out.mutation('task.tick', data, renderCommandResult, () =>
+    successReceipt('task.tick', data, { expectedVersion, ...callerMutationId(cmd.options) }));
   return EXIT_OK;
 }
 
@@ -131,24 +190,29 @@ async function taskComplete(cmd: CommandContext): Promise<ExitCode> {
  * the PR as a tracked object; the coder may be one of several sessions on
  * the branch. Liveness still outranks both.
  */
+interface ClaimOutcome {
+  /** A claim that should have landed and did not — a receipt warning. */
+  warning?: ReceiptWarning;
+}
+
 async function claimLinkedArtifactSession(
   cmd: CommandContext,
   data: unknown,
   artifactKind: 'pull_request' | 'commit',
-): Promise<void> {
+): Promise<ClaimOutcome> {
   const sessionId = cmd.ctx.sessionId;
-  if (sessionId === undefined) return;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) return;
+  if (sessionId === undefined) return {};
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) return {};
 
   const patches = (data as { patches?: unknown } | null)?.patches;
-  if (!Array.isArray(patches)) return;
+  if (!Array.isArray(patches)) return {};
   const artifact = patches.find(
     (p): p is { id: string; kind: string } =>
       typeof p === 'object' && p !== null &&
       (p as { kind?: unknown }).kind === artifactKind &&
       typeof (p as { id?: unknown }).id === 'string',
   );
-  if (artifact === undefined) return;
+  if (artifact === undefined) return {};
 
   try {
     await clientFor(cmd.ctx).invoke('edges.create', {
@@ -159,17 +223,19 @@ async function claimLinkedArtifactSession(
         clientMutationId: resolveMutationId(undefined),
       },
     });
+    return {};
   } catch (err) {
     // `not_found` on the session is the benign cross-database answer (env
     // leakage into a harness, or --server pointing elsewhere): no edge is the
     // correct outcome. `conflict` means an earlier link already claimed a
     // birth session — also correct, first claim wins. Anything else is a
     // claim that should have landed, so it is warned, never raised.
-    if (err instanceof ApiError && (err.code === 'not_found' || err.code === 'conflict')) return;
-    cmd.out.warn(
-      `note: could not record this session as the linker of ${artifact.id} ` +
-        `(${err instanceof Error ? err.message : String(err)}). The link itself landed.`,
-    );
+    if (err instanceof ApiError && (err.code === 'not_found' || err.code === 'conflict')) return {};
+    const message =
+      `could not record this session as the linker of ${artifact.id} ` +
+      `(${err instanceof Error ? err.message : String(err)}). The link itself landed.`;
+    cmd.out.warn(`note: ${message}`);
+    return { warning: { code: 'session_link_failed', message } };
   }
 }
 
@@ -182,20 +248,31 @@ function linker(
     assertKnownOptions(cmd, ['project', 'mutation-id']);
     const id = requireArg(cmd, 0, '<task-id>');
     const url = requireArg(cmd, 1, '<url>');
-    const body: Record<string, unknown> = {
-      clientMutationId: resolveMutationId(cmd.options.value('mutation-id')),
-      url,
-    };
+    const mutationId = resolveMutationId(cmd.options.value('mutation-id'));
+    const body: Record<string, unknown> = { clientMutationId: mutationId, url };
     const projectId = cmd.options.value('project');
     if (projectId !== undefined) body.projectId = projectId;
 
-    const data = await observedInvoke<unknown>(clientFor(cmd.ctx), operation, {
-      params: { id },
-      body: withActor(cmd, body),
-    });
+    const op = artifactKind === 'pull_request' ? 'task.link-pr' : 'task.link-commit';
+    const data = await withErrorReceipt(cmd, errorInput(cmd, op, { id, mutationId }), () =>
+      observedInvoke<unknown>(clientFor(cmd.ctx), operation, {
+        params: { id },
+        body: withActor(cmd, body),
+      }));
     // After the link has landed, never before it — see claimLinkedArtifactSession.
-    await claimLinkedArtifactSession(cmd, data, artifactKind);
-    cmd.out.data(data, renderCommandResult);
+    // The claim reads the artifact id from the FULL result, so it works the
+    // same whatever the caller asked to print (§9.9); the receipt is projected
+    // only after it, at render time.
+    const claim = await claimLinkedArtifactSession(cmd, data, artifactKind);
+    // The claim's own edge is not a ref here, unlike `entity create`'s: the
+    // spec's link-pr receipt is the artifact and its `tracks` edge (§5), and
+    // nothing chains off the linker edge. A claim that failed IS reported.
+    cmd.out.mutation(op, data, renderCommandResult, () =>
+      successReceipt(op, data, {
+        url,
+        ...callerMutationId(cmd.options),
+        ...(claim.warning ? { warnings: [claim.warning] } : {}),
+      }));
     return EXIT_OK;
   };
 }
@@ -222,7 +299,7 @@ async function taskGate(cmd: CommandContext): Promise<ExitCode> {
   const expectedVersion = cmd.options.integer('expect-version');
   if (expectedVersion === undefined) {
     throw new CliError('`tm8 task gate` requires --expect-version <n>', EXIT_USAGE, {
-      hint: 'read the current version with `tm8 entity get <task-id>`',
+      hint: 'read the current version with `tm8 entity context <task-id>` (its first line)',
     });
   }
 
@@ -492,6 +569,7 @@ async function taskAxis(cmd: CommandContext): Promise<ExitCode> {
 export const TASK_COMMANDS: CommandModule[] = [
   { path: ['task', 'transition'], run: taskTransition },
   { path: ['task', 'complete'], run: taskComplete },
+  { path: ['task', 'tick'], run: taskTick },
   { path: ['task', 'gate'], run: taskGate },
   { path: ['task', 'axis'], run: taskAxis },
   { path: ['task', 'link-pr'], run: linker('entities.commands.linkPr') },

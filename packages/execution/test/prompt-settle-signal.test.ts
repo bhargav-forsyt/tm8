@@ -8,6 +8,7 @@
 import { describe, expect, it, afterEach } from 'vitest';
 
 import { PtyHostService } from '../src/pty/PtyHostService.js';
+import { echoAgentPath } from '../src/spawn/manifest.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -80,12 +81,21 @@ describe('PtyHostService onPromptSettled -- two-signal prompt delivery', () => {
       // sees it, advancing the cursor to a fresh row and defeating the whole
       // point of this fixture (verification would then find the token gone,
       // same as a real, working submit).
-      command: `node -e "process.stdin.setRawMode(true); process.stdin.on('data', d => process.stdout.write(d))"`,
+      //
+      // READY ONLY ONCE RAW. The fixture prints `ready> ` AFTER setRawMode, and
+      // the delivery requires ready output, so the body cannot be written while
+      // the PTY is still cooked. It used to rely on node starting inside the
+      // 1500ms cold-idle gate; on a loaded CI runner it did not, the first
+      // Enters were echoed as real newlines by the cooked line discipline, the
+      // token scrolled out of the cursor band after ~4 presses, and the verifier
+      // correctly read that as "submitted": `delivered` at ~8.7s. Reproduced
+      // exactly (8788ms, `delivered`) by delaying setRawMode by 7s.
+      command: `node -e "process.stdin.setRawMode(true); process.stdin.on('data', d => process.stdout.write(d)); process.stdout.write('ready> ')"`,
       cwd: '/tmp',
       env: {},
     });
 
-    const admitted = await host.deliverPrompt(sessionId, 'stuck-token', 'send', 'delivery-2');
+    const admitted = await host.deliverPrompt(sessionId, 'stuck-token', 'send', 'delivery-2', true);
     expect(admitted).toBe(true);
 
     await waitFor(() => settled.length === 1, 60000);
@@ -256,4 +266,79 @@ describe('PtyHostService onPromptSettled -- two-signal prompt delivery', () => {
     expect(settled[0]?.outcome).toBe('delivered');
     expect(settled[0]?.reason).toBeUndefined();
   }, 40000);
+
+  /**
+   * A MULTI-LINE first turn to an agent that never asserts bracketed paste —
+   * echo-agent, or any operator wrapper reading stdin by line, which is exactly
+   * who still takes the first turn over the PTY. Written raw, every embedded
+   * newline is an Enter, so the agent consumes each line as it lands and its own
+   * output moves the cursor off the rest. Looking for the body AT THE CURSOR can
+   * therefore never succeed, and every such spawn failed with
+   * `body_never_reached_composer` (the steer / ws-e2e A6c failures on main).
+   *
+   * Arrival is the terminal rendering our tail after the write, and the body is
+   * written ONCE: a rewrite would re-submit lines that already went through.
+   */
+  it('delivers a multi-line first turn to a line-oriented agent exactly once', async () => {
+    const settled: Array<{ sessionId: string; deliveryId: string; outcome: string; reason?: string }> = [];
+    host = new PtyHostService({
+      logger: quiet,
+      onPromptSettled: (sessionId, deliveryId, outcome, reason) => {
+        settled.push({ sessionId, deliveryId, outcome, reason });
+      },
+    });
+    const sessionId = 'settle-multiline-first-turn';
+    const chunks: Buffer[] = [];
+    host.spawn({ sessionId, command: `node ${echoAgentPath()}`, cwd: '/tmp', env: {} });
+    host.onFrames(sessionId, (f) => chunks.push(f));
+    const seen = () => Buffer.concat(chunks).toString('utf8');
+
+    // Past the tty's input queue (1024 bytes on macOS), which is what the real
+    // task envelope is: the kernel then echoes the body in pieces as the agent
+    // drains it, and the agent's own replies land inside the tail's echo.
+    const filler = Array.from({ length: 40 }, (_, i) => `filler line ${i} of the assignment, long enough to count`);
+    const body = ['<task>', 'line one of the assignment', ...filler, '</task>'].join('\n');
+    const admitted = await host.deliverPrompt(sessionId, body, 'send', 'delivery-multiline', true);
+    expect(admitted).toBe(true);
+
+    await waitFor(() => settled.length === 1, 60000);
+    expect(settled[0]).toEqual({
+      sessionId,
+      deliveryId: 'delivery-multiline',
+      outcome: 'delivered',
+      reason: undefined,
+    });
+    await waitFor(() => seen().includes('TM8-ECHO: </task>'));
+    expect(seen().split('TM8-ECHO: line one of the assignment').length - 1).toBe(1);
+  }, 70000);
+
+  it('still reports body_never_reached_composer for a multi-line first turn that is swallowed', async () => {
+    const settled: Array<{ sessionId: string; deliveryId: string; outcome: string; reason?: string }> = [];
+    host = new PtyHostService({
+      logger: quiet,
+      onPromptSettled: (sessionId, deliveryId, outcome, reason) => {
+        settled.push({ sessionId, deliveryId, outcome, reason });
+      },
+    });
+    const sessionId = 'settle-multiline-swallowed';
+    host.spawn({
+      sessionId,
+      command: `node -e "process.stdout.write('booting\\n'); process.stdin.setRawMode(true); process.stdin.resume(); setInterval(() => {}, 1000)"`,
+      cwd: '/tmp',
+      env: {},
+    });
+
+    const admitted = await host.deliverPrompt(
+      sessionId,
+      'first line\nsecond line that never lands',
+      'send',
+      'delivery-multiline-swallowed',
+      true,
+    );
+    expect(admitted).toBe(true);
+
+    await waitFor(() => settled.length === 1, 60000);
+    expect(settled[0]?.outcome).toBe('unknown');
+    expect(settled[0]?.reason).toBe('body_never_reached_composer');
+  }, 70000);
 });
