@@ -8,6 +8,7 @@ export interface McpCredentialBinding { spaceId: string; serverId: string; crede
 export interface McpOAuthSecret {
   kind: 'oauth'; accessToken: string; refreshToken?: string; expiresAt?: number;
   issuer: string; tokenEndpoint: string; revocationEndpoint?:string; resource: string; clientId: string;
+  clientSecret?: string; tokenEndpointAuthMethod?: 'none' | 'client_secret_basic' | 'client_secret_post';
 }
 export type McpSecret = { kind: 'api_key'; value: string } | McpOAuthSecret;
 interface SealedRow { credentialId: string; spaceId: string; serverId: string; definitionVersion?: number; ciphertext: string; nonce: string }
