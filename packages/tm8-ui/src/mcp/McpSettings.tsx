@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useMcpCatalog } from './context';
 import { readiness } from './McpPicker';
 import type { McpAccount, McpDefinition, McpPort, McpServer } from './port';
+import { SectionFrame } from '../settings-space';
 import './mcp.css';
 
 function DefinitionForm({ server, busy, onSave }: { server?: McpServer; busy: boolean; onSave(input: McpDefinition): Promise<void> }) {
@@ -99,10 +100,10 @@ export function McpSettings() {
     catch (error) { setFailure(error instanceof McpUiError ? error.message : 'The request could not be completed. Check your permissions and connection, then try again.'); }
     finally { refresh(); setBusy(false); }
   }
-  if (!port) return <p role="status">Connectors are unavailable on this connection.</p>;
+  if (!port) return <SectionFrame title="Connectors" bodyTestId="connectors-body"><p role="status">Connectors are unavailable on this connection.</p></SectionFrame>;
   const server = catalog?.servers.find(s => s.id === active);
-  return <section className="mcp-settings" aria-label="Connectors" aria-busy={busy}>
-    <h2>Connectors</h2><p>Add tools to chats and tasks. Select the account to use each time you launch.</p>
+  return <SectionFrame title="Connectors" bodyTestId="connectors-body"><section className="mcp-settings" aria-label="Connector management" aria-busy={busy}>
+    <p>Add tools to chats and tasks. Select the account to use each time you launch.</p>
     {error && <p role="alert">{error} <button onClick={refresh}>Retry</button></p>}
     {failure && <p role="alert" className="mcp-error">{failure}</p>}
     {message && <p role="status">{message}</p>}
@@ -141,5 +142,5 @@ export function McpSettings() {
         {oauthUrl && <div className="mcp-actions"><a href={oauthUrl} rel="noreferrer">Continue authorization</a><button onClick={refresh}>Refresh account status</button></div>}
       </>}
     </article>}
-  </section>;
+  </section></SectionFrame>;
 }

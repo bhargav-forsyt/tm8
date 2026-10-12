@@ -95,7 +95,19 @@ export function createMcpPort(http: HttpClient, seam: Pick<Seam, 'query' | 'conn
     async test(selection) { const result = await http.call<McpTestResult>('mcp.servers.test', { params: { serverId: selection.serverId }, body: { ...command(), ...selection } }); return { ok: result.ready, message: result.reason, tools: result.tools }; },
     async createKey(serverId, label, secret) { await http.call('mcp.credentials.create', { params: { serverId }, body: { ...command(), serverId, label, secret } }); },
     async rotateKey(_serverId, credentialId, secret) { await http.call('mcp.credentials.rotate', { params: { credentialId }, body: { ...command(), credentialId, secret } }); },
-    async startOAuth(serverId, label) { const result = await http.call<{authorizationUrl:string}>('mcp.oauth.begin', { params: { serverId }, body: { ...command(), serverId, label } }); rememberMcpOAuth(result.authorizationUrl, spaceId); return result; },
+    async startOAuth(serverId, label) {
+      let result: {authorizationUrl:string};
+      try {
+        result = await http.call<{authorizationUrl:string}>('mcp.oauth.begin', { params: { serverId }, body: { ...command(), serverId, label } });
+      } catch (error) {
+        if (error instanceof Error && ['OAuth client registration failed', 'OAuth client registration rejected by provider'].includes(error.message)) {
+          throw new McpUiError('This provider rejected tm8 as an OAuth client. Some providers only allow approved MCP clients; ask the provider to approve tm8, then retry.');
+        }
+        throw error;
+      }
+      rememberMcpOAuth(result.authorizationUrl, spaceId);
+      return result;
+    },
     async share(_serverId, credentialId, sharing, memberIds) { await http.call('mcp.credentials.share', { params: { credentialId }, body: { ...command(), credentialId, visibility: sharing === 'members' ? 'selected' : sharing, memberIds } }); },
     async revoke(_serverId, credentialId) { await http.call('mcp.credentials.revoke', { params: { credentialId }, body: { ...command(), credentialId } }); },
     async members() {

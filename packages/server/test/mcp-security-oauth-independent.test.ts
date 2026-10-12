@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { McpOAuth, refreshOAuth } from '../src/mcp/oauth.js';
+import { McpOAuth, refreshOAuth, revokeOAuth } from '../src/mcp/oauth.js';
 import { McpProxy } from '../src/mcp/proxy.js';
 import { HandlerRegistry } from '../src/facade/registry.js';
 import { registerMcpRuntimeHandlers } from '../src/mcp/handlers.js';
@@ -27,7 +27,7 @@ async function provider() {
     metadata: {} as Record<string, unknown>, resource: {} as Record<string, unknown>,
     registration: { client_id: 'registered-client', token_endpoint_auth_method: 'none' } as Record<string, unknown>,
     token: { access_token: 'access-secret', refresh_token: 'refresh-secret', token_type: 'Bearer', expires_in: 3600 } as Record<string, unknown>,
-    tokenStatus: 200, rawResource: undefined as string | undefined, rawRegistration: undefined as string | undefined,
+    registrationStatus: 200, tokenStatus: 200, rawResource: undefined as string | undefined, rawRegistration: undefined as string | undefined,
   };
   origin = await fixture(async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -36,7 +36,7 @@ async function provider() {
     if (req.url === '/mcp') { res.writeHead(401, { 'www-authenticate': `Bearer resource_metadata="${origin}/resource"` }); res.end(); }
     else if (req.url === '/resource') res.end(state.rawResource ?? JSON.stringify(state.resource));
     else if (req.url?.startsWith('/.well-known/')) res.end(JSON.stringify(state.metadata));
-    else if (req.url === '/register') res.end(state.rawRegistration ?? JSON.stringify(state.registration));
+    else if (req.url === '/register') { res.statusCode = state.registrationStatus; res.end(state.rawRegistration ?? JSON.stringify(state.registration)); }
     else { res.statusCode = state.tokenStatus; res.end(JSON.stringify(state.token)); }
   });
   state.metadata = { issuer: origin, authorization_endpoint: `${origin}/authorize`, token_endpoint: `${origin}/token`, registration_endpoint: `${origin}/register`, code_challenge_methods_supported: ['S256'] };
@@ -87,6 +87,13 @@ describe('independent OAuth binding and lifecycle', () => {
     await expect(p.begin()).rejects.toThrow();
     expect(p.calls).toHaveLength(1);
   });
+  it('accepts an HTTPS authorization endpoint on the provider login origin', async () => {
+    const p = await provider();
+    p.state.metadata.authorization_endpoint = 'https://login.provider.test/oauth/authorize';
+    const auth = await p.begin();
+    expect(auth.origin).toBe('https://login.provider.test');
+    expect(auth.pathname).toBe('/oauth/authorize');
+  });
   it('discovers protected resource and refuses a substituted resource binding', async () => {
     const p = await provider();
     const auth = await p.begin({ issuer: undefined }); expect(auth.searchParams.get('resource')).toBe(p.input.resource);
@@ -101,9 +108,47 @@ describe('independent OAuth binding and lifecycle', () => {
     await p.oauth.callback('human', { state: auth.searchParams.get('state')!, code: 'code' });
     expect(new URLSearchParams(p.calls.find(call => call.path === '/token')!.body).get('client_id')).toBe('registered-client');
   });
-  it('refuses confidential dynamic registration without exposing provider secret', async () => {
-    const p = await provider(); p.state.registration.client_secret = 'provider-confidential-secret';
-    await expect(p.begin({ clientId: undefined })).rejects.toThrow('public client');
+  it('reports a provider client allowlist rejection without exposing its body', async () => {
+    const p = await provider();
+    p.state.registrationStatus = 403;
+    p.state.rawRegistration = 'provider-private-detail';
+    const error = await p.begin({ clientId: undefined }).catch(value => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('OAuth client registration rejected by provider');
+    expect(error.message).not.toContain('provider-private-detail');
+  });
+  it('uses a dynamically registered confidential client without exposing its secret', async () => {
+    const p = await provider();
+    p.state.metadata.token_endpoint_auth_methods_supported = ['client_secret_basic', 'client_secret_post'];
+    p.state.metadata.revocation_endpoint = `${p.origin}/revoke`;
+    p.state.registration = {
+      client_id: 'figma-style-client',
+      client_secret: 'provider-confidential-secret',
+      token_endpoint_auth_method: 'client_secret_basic',
+    };
+    const auth = await p.begin({ clientId: undefined });
+    expect(JSON.parse(p.calls.find(call => call.path === '/register')!.body)).toMatchObject({ token_endpoint_auth_method: 'client_secret_basic' });
+    const { secret } = await p.oauth.callback('human', { state: auth.searchParams.get('state')!, code: 'code' });
+    const expectedAuthorization = `Basic ${Buffer.from(`${encodeURIComponent('figma-style-client')}:${encodeURIComponent('provider-confidential-secret')}`).toString('base64')}`;
+    const exchanged = p.calls.find(call => call.path === '/token')!;
+    expect(exchanged.authorization).toBe(expectedAuthorization);
+    expect(exchanged.body).not.toContain('provider-confidential-secret');
+    expect(secret).toMatchObject({ clientId: 'figma-style-client', clientSecret: 'provider-confidential-secret', tokenEndpointAuthMethod: 'client_secret_basic' });
+
+    await refreshOAuth(secret, true);
+    await revokeOAuth(secret, true);
+    expect(p.calls.filter(call => call.path === '/token' || call.path === '/revoke').every(call => call.authorization === expectedAuthorization)).toBe(true);
+  });
+  it('supports client_secret_post when that is the registered client method', async () => {
+    const p = await provider();
+    p.state.metadata.token_endpoint_auth_methods_supported = ['client_secret_post'];
+    p.state.registration = { client_id: 'post-client', client_secret: 'post-secret', token_endpoint_auth_method: 'client_secret_post' };
+    const auth = await p.begin({ clientId: undefined });
+    const { secret } = await p.oauth.callback('human', { state: auth.searchParams.get('state')!, code: 'code' });
+    const exchanged = p.calls.find(call => call.path === '/token')!;
+    expect(exchanged.authorization).toBeUndefined();
+    expect(Object.fromEntries(new URLSearchParams(exchanged.body))).toMatchObject({ client_id: 'post-client', client_secret: 'post-secret' });
+    expect(secret.tokenEndpointAuthMethod).toBe('client_secret_post');
   });
   it('consumes state on denied token exchange and redacts provider error body', async () => {
     const p = await provider(); p.state.tokenStatus = 400; p.state.token = { error: 'access_denied', error_description: 'secret-from-provider' };

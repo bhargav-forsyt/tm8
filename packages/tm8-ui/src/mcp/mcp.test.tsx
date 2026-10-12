@@ -72,6 +72,21 @@ describe('native MCP picker', () => {
   });
 });
 describe('native MCP management', () => {
+  it('uses the shared settings scroller so account actions remain reachable', async () => {
+    const data = catalog();
+    data.servers[0]!.auth = 'oauth';
+    data.servers[0]!.accounts = [];
+    const { container } = render(<McpProvider port={fixture(data)}><McpSettings /></McpProvider>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage Calendar' }));
+
+    const scroll = screen.getByTestId('connectors-body');
+    expect(container.querySelectorAll('.set-section')).toHaveLength(1);
+    expect(container.querySelectorAll('.set-section__scroll')).toHaveLength(1);
+    expect(scroll.contains(screen.getByRole('button', { name: 'Connect with OAuth' }))).toBe(true);
+    expect(screen.getAllByText('Connectors')).toHaveLength(1);
+  });
+
   it('tests with the selected account and displays discovered tools', async () => {
     const port = fixture(); render(<McpProvider port={port}><McpSettings /></McpProvider>);
     fireEvent.click(await screen.findByRole('button', { name: 'Manage Calendar' }));
