@@ -313,6 +313,12 @@ export const OPERATIONS = [
   // `single` node may link one folder into several spaces.
   { name: 'spaces.projects.list',    method: 'GET',    path: '/v2/spaces/:spaceId/projects',                kind: 'read',    status: 'v1' },
   { name: 'spaces.projects.create',  method: 'POST',   path: '/v2/spaces/:spaceId/projects/create',         kind: 'command', status: 'v1' },
+  // A space admin's GitHub clone (task 01a13574): a JOB, because a clone can
+  // outlast any HTTP deadline. `clone` answers 202 with the job; the get reads
+  // its status until it lands on `succeeded` (with the space's project) or
+  // `failed`. The token never reaches the request, the remote or a log.
+  { name: 'spaces.projects.clone',         method: 'POST', path: '/v2/spaces/:spaceId/projects/clone',              kind: 'command', status: 'v1' },
+  { name: 'spaces.projects.cloneJobs.get', method: 'GET',  path: '/v2/spaces/:spaceId/projects/clone-jobs/:jobId', kind: 'read',    status: 'v1' },
   { name: 'gate.folders.list',       method: 'GET',    path: '/v2/gate/folders',                            kind: 'read',    status: 'v1' },
   { name: 'gate.folders.create',     method: 'POST',   path: '/v2/gate/folders',                            kind: 'command', status: 'v1' },
   { name: 'projects.unlink',         method: 'DELETE', path: '/v2/spaces/:spaceId/projects/:projectId',     kind: 'command', status: 'v1' },
