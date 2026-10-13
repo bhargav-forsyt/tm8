@@ -21,12 +21,12 @@
  */
 import { assertWithinBudget, BYTE_BUDGETS, utf8Bytes } from './budgets.js';
 import { escapeAttr, untrustedData } from './escape.js';
-import { PROMPT_VERSION_V2 } from './prompt-version.js';
+import { PROMPT_V2_MODES, PROMPT_VERSION_V2 } from './prompt-version.js';
 import { serializeMemoryEntry } from './skill-index.js';
 import { serializeLaunchIndex } from './context-index.js';
 import { renderStoryContext } from './story-context.js';
 import { renderDesignContext } from './design-context.js';
-import { acceptanceCriteriaOf, coordinatorKindOf } from './templates.js';
+import { acceptanceCriteriaOf, attachmentManifest, coordinatorKindOf } from './templates.js';
 import { workerRoutineV2Rule } from './worker-routine.js';
 import type { AgentMode, PromptEnvelope, PromptManifest, PromptRuntime } from './index.js';
 
@@ -304,6 +304,26 @@ export function primaryContextBudgetV2(tasks: readonly ManifestTask[]): number {
   return Math.max(0, BYTE_BUDGETS.assignmentSnapshot - cards);
 }
 
+/**
+ * Room the launch fit holds back for the embedded task context (DTO). Typical
+ * DTOs measure ~5 KiB; the full §5.3 cap would starve the context index, so the
+ * fit reserves this and the spawn path hands the DTO whatever is really left.
+ */
+export const TASK_CONTEXT_RESERVE_V2 = 8192;
+
+/**
+ * The bytes a launch's context fit must reserve for the DTO the spawn path
+ * embeds after the manifest is written: none unless the manifest renders the
+ * v2 frame with a primary task. The baseline the fit measures carries only the
+ * degraded header, so without this the index fills the room the DTO needs.
+ */
+export function taskContextReserveV2(manifest: PromptManifest): number {
+  const tasks = manifest.tasks ?? [];
+  if (manifest.promptVersion !== PROMPT_VERSION_V2 || tasks.length === 0) return 0;
+  if (!PROMPT_V2_MODES.includes(manifest.mode ?? 'worker')) return 0;
+  return Math.min(primaryContextBudgetV2(tasks), TASK_CONTEXT_RESERVE_V2);
+}
+
 // -- Composer -----------------------------------------------------------------
 
 function block(text: string, pad: string): string {
@@ -445,6 +465,14 @@ export function composePromptV2(
       }));
     }
     for (const other of tasks.slice(1)) t.push(untrustedJson('task-card', taskCardV2(other)));
+    // Files ride here, never in the index: the task's ticked files and the
+    // ones picked at launch, each once, with the command that downloads them.
+    const seen = new Set<string>();
+    const files = tasks.flatMap((task) => task.attachments ?? []).filter((file) => !seen.has(file.fileEntityId) && seen.add(file.fileEntityId));
+    if (files.length > 0) {
+      const manifest = attachmentManifest(files);
+      t.push(...manifest.control, manifest.names);
+    }
   } else {
     t.push(`<note>${esc(facts.noTaskNote)}</note>`);
   }

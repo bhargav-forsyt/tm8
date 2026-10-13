@@ -11,7 +11,9 @@ import {
   instructionFor,
   DEFAULT_PROMPT_VERSION,
   isPromptVersion,
-  KERNEL_TEMPLATE_V2,
+  LEGACY_PROMPT_VERSION,
+  TASK_CONTEXT_RESERVE_V2,
+  taskContextReserveV2,
   PROMPT_VERSIONS,
   promptVersionFor,
   primaryContextBudgetV2,
@@ -90,22 +92,28 @@ function embedded(task: string, type = 'entity-context'): unknown[] {
 }
 
 describe('prompt versions', () => {
-  it('offers v1 and v2, and keeps v1 the default until the §6.2 evaluation flips it', () => {
+  it('offers v1 and v2, makes v2 the default for new launches, and reads an absent stamp as v1', () => {
     expect(PROMPT_VERSIONS).toEqual(['1', '2']);
     expect(isPromptVersion('2')).toBe(true);
-    expect(DEFAULT_PROMPT_VERSION).toBe('1');
+    expect(DEFAULT_PROMPT_VERSION).toBe('2');
+    expect(LEGACY_PROMPT_VERSION).toBe('1');
+    const { promptVersion: _stamp, ...unstamped } = { ...base, promptVersion: '1' };
+    const legacy = composePrompt(unstamped, runtime);
+    expect(legacy.metadata.promptVersion).toBe('1');
+    expect(legacy.system).toBe(composePrompt({ ...base, promptVersion: '1' }, runtime).system);
+    expect(legacy.system).toMatch(/^<tm8_system_prompt version="1\.0"/);
   });
 
-  it('selects v2 from the profile kernelTemplate, for every mode', () => {
-    const snapshot = { agentProjection: { promptPolicy: { kernelTemplate: KERNEL_TEMPLATE_V2 } } };
-    for (const mode of AGENT_MODES) {
-      expect(promptVersionFor({ mode, profileSnapshot: snapshot }), mode).toBe('2');
-    }
-    expect(promptVersionFor({ mode: 'planner', profileSnapshot: snapshot })).toBe('1');
-    const core = { agentProjection: { promptPolicy: { kernelTemplate: 'tm8.core.v1' } } };
-    expect(promptVersionFor({ mode: 'worker', profileSnapshot: core })).toBe('1');
-    expect(promptVersionFor({ mode: 'worker', profileSnapshot: { profile: {} } })).toBe('1');
-    expect(promptVersionFor({ mode: 'worker' })).toBe('1');
+  it('stamps v2 for every mode with no profile, and v1 for a mode v2 does not cover', () => {
+    for (const mode of AGENT_MODES) expect(promptVersionFor({ mode }), mode).toBe('2');
+    expect(promptVersionFor({ mode: 'planner' })).toBe('1');
+    expect(promptVersionFor({ mode: null })).toBe('1');
+  });
+
+  it('reserves room for the embedded task context only on a v2 launch with a task', () => {
+    expect(taskContextReserveV2({ ...base, promptVersion: '2' })).toBe(TASK_CONTEXT_RESERVE_V2);
+    expect(taskContextReserveV2({ ...base, promptVersion: '1' })).toBe(0);
+    expect(taskContextReserveV2({ ...base, promptVersion: '2', tasks: [] })).toBe(0);
   });
 
   it('keeps v1 byte-identical for a manifest stamped "1"', () => {

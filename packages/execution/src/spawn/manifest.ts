@@ -18,7 +18,7 @@ import {
   type HarnessSurface,
   type HarnessSurfaceSource,
 } from './harness-surface.js';
-import { composePrompt, BudgetExceededError, BYTE_BUDGETS, contextBudgetOverrun, type PromptContextGroup, promptVersionFor, utf8Bytes, serializeSkillIndex, serializeSkillIndexEntry, type FitContextIndexResult } from '@tm8/prompt';
+import { composePrompt, BudgetExceededError, BYTE_BUDGETS, contextBudgetOverrun, taskContextReserveV2, type PromptContextGroup, promptVersionFor, utf8Bytes, serializeSkillIndex, serializeSkillIndexEntry, type FitContextIndexResult } from '@tm8/prompt';
 // @tm8/execution — launch-config precedence, cwd resolution, command building
 // and manifest composition. Pure functions: no I/O, no graph, no PTY, so every
 // precedence rule below is directly unit-testable.
@@ -1921,8 +1921,8 @@ export function composeManifest(input: ComposeManifestInput): Tm8Manifest {
   effectiveSkills.skipped.push(...(context.skippedSkills ?? []));
   const manifest: Tm8Manifest = redactSecretsDeep({
     manifestVersion: '1',
-    // v1 unless the pinned profile opts a worker into v2 (spec ca8d Q14).
-    promptVersion: promptVersionFor({ mode: launch.mode, profileSnapshot: interactionProfile.snapshot }),
+    // v2 for every agent mode (Subhang, 2026-10-13); no profile is consulted.
+    promptVersion: promptVersionFor({ mode: launch.mode }),
     sessionId,
     spaceId: context.spaceId,
     generatedAt: (input.now ?? new Date()).toISOString(),
@@ -2047,8 +2047,11 @@ export function composeManifest(input: ComposeManifestInput): Tm8Manifest {
   }
   // Measure the real non-index prompt once, then account for the exact escaped
   // serializer. This stays linear even when a deep equipment chain has no count cap.
+  // A v2 launch embeds its task context (DTO) at spawn, after this fit: the
+  // baseline renders only the degraded header, so the DTO's room is reserved.
   const baseline = composePrompt({ ...manifest, skills: [] }, { sessionId, baseUrl });
-  const baseBytes = utf8Bytes(`${baseline.system}\n\n${baseline.task}`);
+  const taskContextReserve = taskContextReserveV2(manifest);
+  const baseBytes = utf8Bytes(`${baseline.system}\n\n${baseline.task}`) + taskContextReserve;
   const dropped: ManifestSkillContext[] = [];
   let indexFit: FitContextIndexResult | null = null;
   if (input.contextIndex) {
@@ -2068,7 +2071,7 @@ export function composeManifest(input: ComposeManifestInput): Tm8Manifest {
       try {
         const p = composePrompt({ ...manifest, skills: manifest.skills.filter(skill => !gone.has(skill.entityId)), contextIndex: fit.index }, { sessionId, baseUrl });
         if (inline && referencesTaskBodies(p.task)) return Number.POSITIVE_INFINITY;
-        return utf8Bytes(`${p.system}\n\n${p.task}`);
+        return utf8Bytes(`${p.system}\n\n${p.task}`) + taskContextReserve;
       } catch (error) {
         if (error instanceof BudgetExceededError) return Number.POSITIVE_INFINITY;
         throw error;

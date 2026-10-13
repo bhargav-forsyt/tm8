@@ -45,7 +45,7 @@ import {
   type BootstrapControlFacts,
   type CoordinatorKind,
 } from './templates.js';
-import { DEFAULT_PROMPT_VERSION, PROMPT_V2_MODES, PROMPT_VERSION_V2 } from './prompt-version.js';
+import { LEGACY_PROMPT_VERSION, PROMPT_V2_MODES, PROMPT_VERSION_V2 } from './prompt-version.js';
 import {
   composePromptV2, COORDINATOR_SUBTASK_RULE, HEADER_AUTHORING_RULE, PLACEMENT_RULE, type TaskContextSnapshot,
 } from './prompt-v2.js';
@@ -217,7 +217,7 @@ export interface PromptEnvelope {
     spaceId: string | null;
     taskCount: number;
     commandCount: number;
-    /** The manifest's `promptVersion`, or the default when it predates the stamp. */
+    /** The manifest's `promptVersion`, or legacy v1 when it predates the stamp. */
     promptVersion: string;
   };
 }
@@ -873,8 +873,9 @@ export function composePrompt(
   const coordinatorSessionId = manifest.coordinator?.sessionId?.trim() || null;
   const coordinatorKind = coordinatorKindOf(manifest.coordinator?.kind);
   // A manifest written before the stamp existed was, by definition, booted on
-  // today's frame — so absent reads as the default rather than as unknown.
-  const promptVersion = manifest.promptVersion ?? DEFAULT_PROMPT_VERSION;
+  // the v1 frame — so absent reads as legacy, never as the current default
+  // (a re-render of a stored manifest must not change what it shows).
+  const promptVersion = manifest.promptVersion ?? LEGACY_PROMPT_VERSION;
 
   // A `manifestVersion: "2"` bootstrap manifest takes the harness path: the
   // §5.2 kernel and one §14 control block, with no persona/skill/memory frame

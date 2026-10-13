@@ -605,7 +605,7 @@ export function serializeAttachmentEntry(file: Pick<SessionInputAttachment, 'fil
   return `    <file entity_id="${attr(file.fileEntityId)}" mime="${attr(file.mime)}" />`;
 }
 
-function attachmentManifest(all: readonly SessionInputAttachment[]): {
+export function attachmentManifest(all: readonly SessionInputAttachment[]): {
   control: string[];
   names: string;
 } {

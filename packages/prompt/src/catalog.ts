@@ -504,9 +504,8 @@ const DISCOVERY_ENTRIES: readonly PromptEntry[] = [
 ];
 
 const V2_GATE =
-  'On a launch whose pinned Interaction Profile sets ' +
-  'promptPolicy.kernelTemplate "tm8.core.v2" (manifest promptVersion "2"). v1 stays the default ' +
-  'until the spec ca8d §6.2 evaluation passes.';
+  'On every launch (manifest promptVersion "2"), the default since 2026-10-13. A stored manifest ' +
+  'without the stamp still re-renders as v1.';
 
 const FRAME_ENTRIES: readonly PromptEntry[] = [
   {

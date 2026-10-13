@@ -18,12 +18,14 @@ import type {
 } from '../pty/PromptSettlementWaiter.js';
 import type { Logger, PtyActivity, PtyExitInfo, PtyKillOutcome, PtySessionStatus } from '../pty/types.js';
 import {
+  BudgetExceededError,
   BYTE_BUDGETS,
   composePrompt,
   dispatchRequestInjection,
   primaryContextBudgetV2,
   PROMPT_VERSION_V2,
   utf8Bytes,
+  type PromptEnvelope,
   type PromptRuntime,
   type PromptStoryContext,
   type PromptDesignContext,
@@ -304,6 +306,28 @@ const CONFINED: SandboxDecision = { unavailable: false, degradedReason: null };
 
 /** How long a v2 launch waits for its task's context render before degrading. */
 const TASK_CONTEXT_RENDER_TIMEOUT_MS = 5_000;
+
+/**
+ * Bytes held back from a v2 DTO's room for what changes when it replaces the
+ * degraded header: the orientation line, the JSON wrapper and its escaping.
+ */
+const TASK_CONTEXT_MARGIN_BYTES = 512;
+
+/**
+ * Compose the launch prompt. A v2 DTO that still overruns the combined ceiling
+ * (escaping can grow a `<`-heavy body past the margin) degrades to the
+ * `snapshot="unavailable"` header naming the one read to run; it never fails
+ * the launch.
+ */
+function composeLaunchPrompt(manifest: Tm8Manifest, runtime: PromptRuntime): PromptEnvelope {
+  try {
+    return composePrompt(manifest, runtime);
+  } catch (error) {
+    const taskContext = runtime.taskContext;
+    if (!(error instanceof BudgetExceededError) || !taskContext || !('dto' in taskContext)) throw error;
+    return composePrompt(manifest, { ...runtime, taskContext: { taskId: taskContext.taskId, unavailable: 'over_budget' } });
+  }
+}
 
 /** PTY exit status → work_session status. The PTY speaks in outcomes, the
  *  graph in lifecycle states, and 'completed' is not one of the five the
@@ -1264,10 +1288,17 @@ export class SpawnService {
     if (!primary) return { codeGraph };
     const load = this.graph.loadTaskContextSnapshot?.bind(this.graph);
     if (!load) return { codeGraph, taskContext: { taskId: primary.id, unavailable: 'not_supported' } };
+    // The DTO gets the §5.3 cap or what the rest of the prompt leaves of the
+    // combined ceiling, whichever is smaller: measured on the degraded frame,
+    // less a margin for the header and the JSON escaping that swaps in with it.
+    const degraded = composePrompt(manifest, { sessionId, baseUrl: this.baseUrl, codeGraph });
+    const room = BYTE_BUDGETS.combinedInitialInjection - utf8Bytes(`${degraded.system}\n\n${degraded.task}`) - TASK_CONTEXT_MARGIN_BYTES;
+    const totalBytes = Math.min(primaryContextBudgetV2(manifest.tasks), room);
+    if (totalBytes <= 0) return { codeGraph, taskContext: { taskId: primary.id, unavailable: 'over_budget' } };
     let timer: NodeJS.Timeout | undefined;
     try {
       const dto = await Promise.race([
-        load(auth, { sessionId, taskId: primary.id, totalBytes: primaryContextBudgetV2(manifest.tasks) }),
+        load(auth, { sessionId, taskId: primary.id, totalBytes }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(Object.assign(new Error('context render timed out'), { code: 'timeout' })), TASK_CONTEXT_RENDER_TIMEOUT_MS);
         }),
@@ -1751,11 +1782,12 @@ export class SpawnService {
       // failure mode designed out rather than handled. `tm8 worker init` remains
       // for an agent that wants to re-read its own briefing, and shares this
       // exact composer (`@tm8/prompt`) so the two can never drift.
-      const envelope = composePrompt(manifest, {
+      const runtime: PromptRuntime = {
         sessionId,
         baseUrl: this.baseUrl,
         ...(await this.promptV2Runtime(auth, manifest, sessionId, cwd)),
-      });
+      };
+      const envelope = composeLaunchPrompt(manifest, runtime);
       // The two halves stay SEPARATE all the way to the argv. `envelope.system`
       // configures the agent; `envelope.task` is its first user turn, and is
       // what actually makes it start. Concatenating them here is what left every
