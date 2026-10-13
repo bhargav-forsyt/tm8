@@ -21,12 +21,19 @@
  */
 import { assertWithinBudget, BYTE_BUDGETS, utf8Bytes } from './budgets.js';
 import { escapeAttr, untrustedData } from './escape.js';
-import { PROMPT_VERSION_V2 } from './prompt-version.js';
+import { PROMPT_V2_MODES, PROMPT_VERSION_V2 } from './prompt-version.js';
 import { serializeMemoryEntry } from './skill-index.js';
 import { serializeLaunchIndex } from './context-index.js';
 import { renderStoryContext } from './story-context.js';
 import { renderDesignContext } from './design-context.js';
-import { acceptanceCriteriaOf, coordinatorKindOf } from './templates.js';
+import {
+  acceptanceCriteriaOf,
+  attachmentManifest,
+  COORDINATION_INSTRUCTION_CHAT,
+  coordinatorKindOf,
+  linkedManifest,
+} from './templates.js';
+import { contextIndexNames } from './context-index.js';
 import { workerRoutineV2Rule } from './worker-routine.js';
 import type { AgentMode, PromptEnvelope, PromptManifest, PromptRuntime } from './index.js';
 
@@ -182,6 +189,16 @@ export function roleLayerV2(mode: AgentMode): string {
  * The coordinated modifier's text, with the coordinator's real session id in
  * the command: an agent copies a working command, never a placeholder.
  */
+/**
+ * The coordinated line when the coordinator is a CHAT (176): v1's sentence,
+ * with the chat's id in place of the placeholder. It REPLACES the session line
+ * rather than following it, because that line's "send to the task and to it"
+ * contradicts the chat rule of never sending the completion to the task.
+ */
+export function chatCoordinationLineV2(coordinatorSessionId: string): string {
+  return COORDINATION_INSTRUCTION_CHAT.replace(/<coordinator-session-id>/g, coordinatorSessionId);
+}
+
 export function coordinationLineV2(coordinatorSessionId: string): string {
   return (
     'A coordinator is waiting on you. Send every report and your closing message to ' +
@@ -304,6 +321,26 @@ export function primaryContextBudgetV2(tasks: readonly ManifestTask[]): number {
   return Math.max(0, BYTE_BUDGETS.assignmentSnapshot - cards);
 }
 
+/**
+ * Room the launch fit holds back for the embedded task context (DTO). Typical
+ * DTOs measure ~5 KiB; the full §5.3 cap would starve the context index, so the
+ * fit reserves this and the spawn path hands the DTO whatever is really left.
+ */
+export const TASK_CONTEXT_RESERVE_V2 = 8192;
+
+/**
+ * The bytes a launch's context fit must reserve for the DTO the spawn path
+ * embeds after the manifest is written: none unless the manifest renders the
+ * v2 frame with a primary task. The baseline the fit measures carries only the
+ * degraded header, so without this the index fills the room the DTO needs.
+ */
+export function taskContextReserveV2(manifest: PromptManifest): number {
+  const tasks = manifest.tasks ?? [];
+  if (manifest.promptVersion !== PROMPT_VERSION_V2 || tasks.length === 0) return 0;
+  if (!PROMPT_V2_MODES.includes(manifest.mode ?? 'worker')) return 0;
+  return Math.min(primaryContextBudgetV2(tasks), TASK_CONTEXT_RESERVE_V2);
+}
+
 // -- Composer -----------------------------------------------------------------
 
 function block(text: string, pad: string): string {
@@ -392,7 +429,7 @@ export function composePromptV2(
   if (coordinatorSessionId && (mode === 'coordinated-worker' || mode === 'coordinated-coordinator')) {
     layers.push(
       `<coordination coordinator_session="${escapeAttr(coordinatorSessionId)}" kind="${coordinatorKind}">` +
-        `${coordinationLineV2(esc(coordinatorSessionId))}</coordination>`,
+        `${(coordinatorKind === 'chat' ? chatCoordinationLineV2 : coordinationLineV2)(esc(coordinatorSessionId))}</coordination>`,
     );
   }
   s.push(...layers);
@@ -445,6 +482,24 @@ export function composePromptV2(
       }));
     }
     for (const other of tasks.slice(1)) t.push(untrustedJson('task-card', taskCardV2(other)));
+    // Files ride here, never in the index: the task's ticked files and the
+    // ones picked at launch, each once, with the command that downloads them.
+    const seen = new Set<string>();
+    const files = tasks.flatMap((task) => task.attachments ?? []).filter((file) => !seen.has(file.fileEntityId) && seen.add(file.fileEntityId));
+    if (files.length > 0) {
+      const manifest = attachmentManifest(files);
+      t.push(...manifest.control, manifest.names);
+    }
+    // Links picked at launch (the attach palette's references), per task, under
+    // the same caps as v1 and with the same declared "omitted" surplus. Titles
+    // the context index already names are not repeated.
+    const namedInIndex = contextIndexNames(manifest.contextIndex);
+    for (const task of tasks) {
+      if (Math.max(task.linkedTotal ?? 0, task.linked?.length ?? 0) === 0) continue;
+      const linked = linkedManifest(task.linked ?? [], task.linkedTotal ?? 0, namedInIndex, task.id);
+      t.push(...linked.control);
+      if (linked.names !== '') t.push(linked.names);
+    }
   } else {
     t.push(`<note>${esc(facts.noTaskNote)}</note>`);
   }

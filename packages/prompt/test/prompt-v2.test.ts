@@ -11,7 +11,9 @@ import {
   instructionFor,
   DEFAULT_PROMPT_VERSION,
   isPromptVersion,
-  KERNEL_TEMPLATE_V2,
+  LEGACY_PROMPT_VERSION,
+  TASK_CONTEXT_RESERVE_V2,
+  taskContextReserveV2,
   PROMPT_VERSIONS,
   promptVersionFor,
   primaryContextBudgetV2,
@@ -90,22 +92,28 @@ function embedded(task: string, type = 'entity-context'): unknown[] {
 }
 
 describe('prompt versions', () => {
-  it('offers v1 and v2, and keeps v1 the default until the §6.2 evaluation flips it', () => {
+  it('offers v1 and v2, makes v2 the default for new launches, and reads an absent stamp as v1', () => {
     expect(PROMPT_VERSIONS).toEqual(['1', '2']);
     expect(isPromptVersion('2')).toBe(true);
-    expect(DEFAULT_PROMPT_VERSION).toBe('1');
+    expect(DEFAULT_PROMPT_VERSION).toBe('2');
+    expect(LEGACY_PROMPT_VERSION).toBe('1');
+    const { promptVersion: _stamp, ...unstamped } = { ...base, promptVersion: '1' };
+    const legacy = composePrompt(unstamped, runtime);
+    expect(legacy.metadata.promptVersion).toBe('1');
+    expect(legacy.system).toBe(composePrompt({ ...base, promptVersion: '1' }, runtime).system);
+    expect(legacy.system).toMatch(/^<tm8_system_prompt version="1\.0"/);
   });
 
-  it('selects v2 from the profile kernelTemplate, for every mode', () => {
-    const snapshot = { agentProjection: { promptPolicy: { kernelTemplate: KERNEL_TEMPLATE_V2 } } };
-    for (const mode of AGENT_MODES) {
-      expect(promptVersionFor({ mode, profileSnapshot: snapshot }), mode).toBe('2');
-    }
-    expect(promptVersionFor({ mode: 'planner', profileSnapshot: snapshot })).toBe('1');
-    const core = { agentProjection: { promptPolicy: { kernelTemplate: 'tm8.core.v1' } } };
-    expect(promptVersionFor({ mode: 'worker', profileSnapshot: core })).toBe('1');
-    expect(promptVersionFor({ mode: 'worker', profileSnapshot: { profile: {} } })).toBe('1');
-    expect(promptVersionFor({ mode: 'worker' })).toBe('1');
+  it('stamps v2 for every mode with no profile, and v1 for a mode v2 does not cover', () => {
+    for (const mode of AGENT_MODES) expect(promptVersionFor({ mode }), mode).toBe('2');
+    expect(promptVersionFor({ mode: 'planner' })).toBe('1');
+    expect(promptVersionFor({ mode: null })).toBe('1');
+  });
+
+  it('reserves room for the embedded task context only on a v2 launch with a task', () => {
+    expect(taskContextReserveV2({ ...base, promptVersion: '2' })).toBe(TASK_CONTEXT_RESERVE_V2);
+    expect(taskContextReserveV2({ ...base, promptVersion: '1' })).toBe(0);
+    expect(taskContextReserveV2({ ...base, promptVersion: '2', tasks: [] })).toBe(0);
   });
 
   it('keeps v1 byte-identical for a manifest stamped "1"', () => {
@@ -378,10 +386,45 @@ describe('v2 coordinated modes (Q10)', () => {
     expect(chat.system).toContain(`<coordination coordinator_session="${COORD}" kind="chat">`);
   });
 
+  it('tells a chat-spawned worker its answer must be durable, with v1\'s sentence in place of the session line', () => {
+    const chat = composePrompt({ ...coordinated, coordinator: { sessionId: COORD, kind: 'chat' } }, runtime);
+    expect(chat.system).toContain('A CHAT spawned you and is waiting on a durable answer.');
+    expect(chat.system).toContain(`\`tm8 message send --to ${COORD} "<body>"\``);
+    expect(chat.system).toContain('Never send that completion report to the assignment or task anchor');
+    // The session line ("to the task and to it in one send") would contradict it.
+    expect(chat.system).not.toContain('A coordinator is waiting on you.');
+    const session = composePrompt(coordinated, runtime);
+    expect(session.system).toContain('A coordinator is waiting on you.');
+    expect(session.system).not.toContain('A CHAT spawned you');
+  });
+
   it('throws without a coordinator id, as v1 does', () => {
     expect(() => composePrompt({ ...coordinated, coordinator: null }, runtime)).toThrow(/coordinator session id/);
     expect(() => composePrompt({ ...coordinated, mode: 'coordinated-coordinator', coordinator: null }, runtime))
       .toThrow(/coordinator session id/);
+  });
+});
+
+describe('v2 linked references (the attach palette, task.linked)', () => {
+  const link = (i: number) => ({ entityId: `doc-${i}`, kind: 'doc', link: 'relates_to', title: `Doc ${i}` });
+  const withLinks = (linked: ReturnType<typeof link>[], linkedTotal: number): PromptManifest =>
+    ({ ...base, tasks: [{ ...base.tasks![0]!, linked, linkedTotal }] });
+
+  it('renders the task\'s links with the v1 caps, and declares the "N more" total', () => {
+    const linked = Array.from({ length: 20 }, (_, i) => link(i));
+    const { task } = composePrompt(withLinks(linked, 30), { ...runtime, taskContext: { taskId: TASK, dto } });
+    expect(task).toContain(`<linked task="${TASK}" count="30" omitted="14" fetch_with="tm8 entity context &lt;entity-id&gt;">`);
+    expect(task).toContain('<entity id="doc-0" kind="doc" link="relates_to" />');
+    expect(task).toContain('<entity id="doc-15" kind="doc" link="relates_to" />');
+    expect(task).not.toContain('doc-16');
+    expect(task).toContain('<untrusted_data type="linked-names"');
+    // After the snapshot, inside the task turn.
+    expect(task.indexOf('<linked ')).toBeGreaterThan(task.indexOf('type="entity-context"'));
+    expect(task.indexOf('<linked ')).toBeLessThan(task.indexOf('</tm8_task_prompt>'));
+  });
+
+  it('renders nothing for a task without links', () => {
+    expect(composePrompt(base, runtime).task).not.toContain('<linked');
   });
 });
 

@@ -19,9 +19,8 @@ describe('story spawn launch', () => {
     vi.spyOn(pty,'waitForBootSettlement').mockResolvedValue(null);
   });
   afterEach(async () => {vi.restoreAllMocks();await rm(dataDir,{recursive:true,force:true});await rm(projectDir,{recursive:true,force:true});});
-  it.each([false, true])('launches taskless when story context reading fails (v2=%s)', async v2 => {
-    const graph = new FakeGraph({ workingDir: projectDir, sessionId: SESSION,
-      ...(v2 ? { profileSnapshot: { agentProjection: { promptPolicy: { kernelTemplate: 'tm8.core.v2' } } } } : {}) });
+  it('launches taskless when story context reading fails', async () => {
+    const graph = new FakeGraph({ workingDir: projectDir, sessionId: SESSION });
     (graph as GraphPort).loadStoryContext = vi.fn().mockRejectedValue(new Error('context unavailable'));
     const logger = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
     const service = new SpawnService({ graph, pty, logger, baseUrl: 'http://127.0.0.1:4611', dataDir,
@@ -38,8 +37,8 @@ describe('story spawn launch', () => {
       sessionId: SESSION, taskId: undefined, error: 'Error: context unavailable',
     });
   });
-  it.each([false,true])('persists story anchor and injects taskless context (v2=%s)',async v2 => {
-    const graph = new FakeGraph({workingDir:projectDir,sessionId:SESSION,...(v2 ? {profileSnapshot:{agentProjection:{promptPolicy:{kernelTemplate:'tm8.core.v2'}}}} : {})});
+  it('persists story anchor and injects taskless context',async () => {
+    const graph = new FakeGraph({workingDir:projectDir,sessionId:SESSION});
     const create=vi.spyOn(graph,'createWorkSession');
     const load=vi.fn(async (_auth, input) => {
       expect(input).toEqual({sessionId:SESSION});

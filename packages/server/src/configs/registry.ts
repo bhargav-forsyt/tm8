@@ -313,7 +313,7 @@ const CORE_DRAFT = 'db/migrations/079_core_draft_prompt_policy_repair.sql';
 
 /** Interaction-profile values, by JSON path into the draft, against the core default. */
 export const PROFILE_KNOBS: readonly SubjectKnob[] = [
-  { name: 'promptPolicy.kernelTemplate', summary: 'Kernel prompt template sessions on this profile get.', default: 'tm8.core.v1', definedIn: CORE_DRAFT, change: 'profile' },
+  { name: 'promptPolicy.kernelTemplate', summary: 'Recorded only: since 2026-10-13 every session gets the v2 prompt frame whatever this says.', default: 'tm8.core.v1', definedIn: CORE_DRAFT, change: 'profile' },
   { name: 'promptPolicy.manifestMaxBytes', summary: 'Launch manifest byte ceiling (≤ BYTE_BUDGETS.manifest).', default: '4096', definedIn: CORE_DRAFT, change: 'profile' },
   { name: 'promptPolicy.kernelMaxBytes', summary: 'Kernel prompt byte ceiling (≤ BYTE_BUDGETS.kernel).', default: '6144', definedIn: CORE_DRAFT, change: 'profile' },
   { name: 'promptPolicy.initialContextMaxBytes', summary: 'Initial context byte ceiling.', default: '32768', definedIn: CORE_DRAFT, change: 'profile' },
