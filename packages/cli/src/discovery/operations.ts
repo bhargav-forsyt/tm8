@@ -2375,13 +2375,34 @@ const ROWS: Record<OperationName, Row> = {
   },
   'spaces.projects.create': {
     cmd: ['project', 'add'],
-    syn: 'tm8 project add <folder-id> [--name <name>] [--space <space-id>] [--mutation-id <id>]',
-    sum: "Name the Space's project on a folder granted to that Space",
+    syn: 'tm8 project add <folder-id> [--name <name>] | --working-dir <absolute-path> --name <name> [--ensure-working-dir] [--trust trusted|untrusted]  [--space <space-id>] [--mutation-id <id>]',
+    sum: "Name the Space's project on a folder granted to that Space, or register a folder on the node for it",
     authz: 'space',
     input: 'bound',
     notes: [
       'requires the Space owner/admin capability; a folder granted to another Space is refused: this folder belongs to another space',
+      '--working-dir registers and grants a folder in one step; a Space admin who is not a node admin may do so only inside an explicitly configured TM8_PROJECT_ROOTS, and only untrusted',
     ],
+  },
+  'spaces.projects.clone': {
+    cmd: ['project', 'clone'],
+    syn: 'tm8 project clone <github-repo> --dest <absolute-parent> [--dir <name>] [--name <name>] [--branch <branch>] [--trust trusted|untrusted] [--space <space-id>] [--mutation-id <id>]',
+    sum: "Clone a GitHub repository onto the node as a job and add it as one of the Space's projects",
+    authz: 'space',
+    input: 'bound',
+    notes: [
+      'answers 202 with the job at once; poll it with tm8 project clone-status <job-id>',
+      "credential order: the caller's GitHub login, then the Space's GitHub credential, then the node token where node policy allows it; the token never reaches the remote URL or a log",
+      'a Space admin who is not a node admin may clone only inside an explicitly configured TM8_PROJECT_ROOTS',
+    ],
+  },
+  'spaces.projects.cloneJobs.get': {
+    cmd: ['project', 'clone-status'],
+    syn: 'tm8 project clone-status <job-id> [--space <space-id>]',
+    sum: 'Read one clone job: queued, cloning, registering, succeeded (with the project) or failed (with why)',
+    authz: 'space',
+    input: 'none',
+    notes: ["only the job's own caller can read it; anyone else gets not_found"],
   },
   'gate.folders.list': {
     cmd: ['project', 'folders'],
@@ -4378,7 +4399,7 @@ export const CATALOG_DIGEST =
   // Re-measured for MW W3.1 (+workspace.prompts.resolve) — RECOMPUTED, not adjusted.
   // Re-measured for the MW W4 merge of origin/main (+execution.gitCheckouts|gitCheckoutDiff) — RECOMPUTED, not adjusted.
   // Re-measured for Craft L3 (+workspace.crafts.list|get|command) — RECOMPUTED, not adjusted.
-  'sha256:527a376d04e641936fd86e67099a0fc993cb6fe872aa7e115f0a9795921eba40';
+  'sha256:381097f7e4f0019af9129662a71adf09a873c6dfa0d9ba68e968b0ee32f3869e';
 
 export const GRAMMAR_VERSION = '2';
 

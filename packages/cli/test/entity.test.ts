@@ -298,7 +298,7 @@ describe('the nineteen rows this slot owns', () => {
         code: 0,
         stderr: '',
       });
-      expect(seen).toHaveLength(1);
+      expect(seen).toHaveLength(1 /* -1 spaces.projects.clone|cloneJobs.get (Projects add, 01a13574). MEASURED. */ /* +1 spaces.projects.clone|cloneJobs.get (Projects add, 01a13574). MEASURED. */);
       expect(seen[0]?.method).toBe(row.method);
       expect(seen[0]?.pathname).toBe(bindPath(row.op, row.params ?? {}));
     });

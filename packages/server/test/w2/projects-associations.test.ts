@@ -714,6 +714,10 @@ describe('adding a project to a space inside the allowed roots (task 01a13574)',
     try {
       await withRoots(tree.root, async () => {
         const create = handler(registered(new FakeDb()), 'projects.create');
+        // Lane D B2, verbatim: this used to SUCCEED for a node admin and list the bogus path.
+        await expect(create(request('projects.create', {
+          body: { name: 'ghost2', workingDir: '/nonexistent/xyz' },
+        }))).rejects.toMatchObject({ code: 'not_found' });
         await expect(create(request('projects.create', {
           body: { name: 'x', workingDir: join(tree.root, 'missing') },
         }))).rejects.toMatchObject({ code: 'not_found' });

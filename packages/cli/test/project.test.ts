@@ -33,6 +33,7 @@ import {
   ProjectCreateInputSchema,
   ProjectLinkInputSchema,
   SpaceProjectCreateInputSchema,
+  ProjectCloneInputSchema,
   ProjectUpdateInputSchema,
 } from '@tm8/contract';
 import { parseInvocation } from '../src/args.js';
@@ -165,6 +166,8 @@ describe('the project module registers exactly its projected paths', () => {
       'project association correct',
       'project blame',
       'project branches',
+      'project clone',
+      'project clone-status',
       'project contention',
       'project create',
       'project file-history',
@@ -210,8 +213,12 @@ describe('G06 owns no paging surface — asserted at the SCHEMA, not by grepping
    */
   const PAGING = /cursor|limit|after|before|seq|page|offset/i;
 
-  const membersOf = (schema: unknown): string[] =>
-    Object.keys((schema as { _def: { shape: () => Record<string, unknown> } })._def.shape());
+  // A refined schema (superRefine: spaces.projects.create's one-of rule) wraps
+  // its object in `_def.schema`; the members are the inner object's.
+  const membersOf = (schema: unknown): string[] => {
+    const def = (schema as { _def: { shape?: () => Record<string, unknown>; schema?: unknown } })._def;
+    return def.shape ? Object.keys(def.shape()) : membersOf(def.schema);
+  };
 
   it('no G06 input schema carries a cursor, limit, or any other paging member', () => {
     const rows: [string, unknown][] = [
@@ -219,12 +226,13 @@ describe('G06 owns no paging surface — asserted at the SCHEMA, not by grepping
       ['projects.update', ProjectUpdateInputSchema],
       ['projects.link', ProjectLinkInputSchema],
       ['spaces.projects.create', SpaceProjectCreateInputSchema],
+      ['spaces.projects.clone', ProjectCloneInputSchema],
       ['projects.associations.correct', CorrectProjectAssociationInputSchema],
       ['files.uploadInit', FileUploadInitInputSchema],
       ['files.uploadComplete', FileUploadCompleteInputSchema],
     ];
     // A loop that silently iterates zero rows is the classic vacuous pass.
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(8);
     for (const [name, schema] of rows) {
       const members = membersOf(schema);
       expect(members.length, `${name} introspected to an EMPTY shape`).toBeGreaterThan(0);

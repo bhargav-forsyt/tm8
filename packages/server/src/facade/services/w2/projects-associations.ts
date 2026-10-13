@@ -812,7 +812,9 @@ export class W2ProjectsAssociationsService {
         'forbidden',
         input.ensureWorkingDir
           ? 'node-admin access is required to create a project directory'
-          : 'node-admin access is required to create a project',
+          // Lane D B1: name the path that works without node admin.
+          : 'node-admin access is required to create a project; a space admin adds one to their own space with '
+            + 'tm8 project add --working-dir (or Add project on the Projects list), and a member asks a space admin',
       );
     }
     // Without `ensureWorkingDir` this used to record the supplied string as-is:

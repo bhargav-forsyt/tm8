@@ -84,6 +84,8 @@ import { composePanelActions, panelSessionControlsFor, usePanelPrimaries } from 
 import { composeListActions, useChatAbout } from './useChatAbout';
 import { useSessionStart } from './useSessionStart';
 import { useNewContainerSheet } from './useNewContainerSheet';
+import { useAddProjectSheet } from './useAddProjectSheet';
+import { AddProjectSheet, addProjectPort } from '../projects';
 import { useRowLifecycle } from './useRowLifecycle';
 import { useMembershipSurface } from './membershipSurface';
 import type { ContentSurface } from '../routes';
@@ -627,10 +629,18 @@ export function EntityView(props: EntityViewProps) {
   /* ONE `onAction` reaches the list panel, and two hooks perform verbs for it.
      Passing either alone would drop the other's verb back to
      disabled-with-reason — the defect both hooks were extracted to fix. */
+  /* THE PROJECTS LIST'S BIRTH SHEET (task 01a13574): Add project — a
+     folder, an upload or a GitHub clone. See `useAddProjectSheet`. */
+  const addProject = useAddProjectSheet({
+    spaceId: data.spaceId,
+    available: Boolean(data.seam.spaceProjects),
+  });
+  const addProjectSeamPort = useMemo(() => addProjectPort(data.seam, data.spaceId), [data.seam, data.spaceId]);
   const listActions = composeListActions([
     { onAction: sessionStart.onAction, wiredActions: sessionStart.wiredActions },
     { onAction: chatAbout.onAction, wiredActions: chatAbout.wiredActions },
     { onAction: newContainer.onAction, wiredActions: newContainer.wiredActions },
+        { onAction: addProject.onAction, wiredActions: addProject.wiredActions },
   ]);
 
   /**
@@ -1052,6 +1062,27 @@ export function EntityView(props: EntityViewProps) {
                 }))}
               onCreate={newContainer.create}
               onCancel={newContainer.close}
+            />
+          </div>
+        </div>
+      )}
+      {addProject.isOpen && addProjectSeamPort && (
+        <div className="pn-ncs-scrim" role="presentation" onClick={addProject.close}>
+          <div
+            className="pn-ncs-host"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add project"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <AddProjectSheet
+              nodeLabel="this node"
+              port={addProjectSeamPort}
+              onAdded={(id) => {
+                addProject.close();
+                if (id) (selectFromList)(id as EntityId);
+              }}
+              onCancel={addProject.close}
             />
           </div>
         </div>

@@ -156,6 +156,10 @@ import {
   type ProjectFileHistory,
   type ProjectCreateInput,
   type ProjectDirectoryListing,
+  type ProjectCloneInput,
+  type ProjectCloneJob,
+  type SpaceProjectCreateInput,
+  type SpaceProject,
   type ProjectFileAttachInput,
   type ProjectFileReadResult,
   type ProjectFolderUploadAbortInput,
@@ -1138,6 +1142,23 @@ export function createOps(http: HttpClient, options: OpsOptions = {}) {
 
     projectDirectories(path?: string): Promise<ProjectDirectoryListing> {
       return http.call<ProjectDirectoryListing>('projects.directories.list', { query: { path } });
+    },
+
+    /** `?spaceId=`: a space admin browses the node's explicit TM8_PROJECT_ROOTS for that space. */
+    spaceProjectDirectories(spaceId: SpaceId, path?: string): Promise<ProjectDirectoryListing> {
+      return http.call<ProjectDirectoryListing>('projects.directories.list', { query: { spaceId, path } });
+    },
+
+    addSpaceProject(spaceId: SpaceId, input: SpaceProjectCreateInput): Promise<SpaceProject> {
+      return http.call<SpaceProject>('spaces.projects.create', { params: { spaceId }, body: input });
+    },
+
+    cloneSpaceProject(spaceId: SpaceId, input: ProjectCloneInput): Promise<ProjectCloneJob> {
+      return http.call<ProjectCloneJob>('spaces.projects.clone', { params: { spaceId }, body: input });
+    },
+
+    spaceProjectCloneJob(spaceId: SpaceId, jobId: string): Promise<ProjectCloneJob> {
+      return http.call<ProjectCloneJob>('spaces.projects.cloneJobs.get', { params: { spaceId, jobId } });
     },
 
     projectFiles(projectId: ProjectId, path?: string): Promise<ProjectFileListing> {

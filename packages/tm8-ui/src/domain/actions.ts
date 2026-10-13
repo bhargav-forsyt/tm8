@@ -1016,6 +1016,16 @@ const ACTIONS: Readonly<Record<ActionRef, ActionDef>> = {
    * `merge-pr` draws between its verb and its confirm.
    */
   'new-container': define('new-container', 'New container', '＋', (ctx) => opGate(ctx, 'containers.create') ?? AVAILABLE),
+
+  /*
+   * THE PROJECT BIRTH VERB (task 01a13574): opens the Add project sheet, which
+   * commits `spaces.projects.create` (a folder), the folder-upload lifecycle,
+   * or `spaces.projects.clone`. Gated on `spaces.projects.create`, the one
+   * every source ends in. Whether THIS viewer may add (a space admin, inside
+   * the node's allowed roots) is the node's answer, shown in the sheet — the
+   * same division `new-container` draws.
+   */
+  'add-project': define('add-project', 'Add project', '＋', (ctx) => opGate(ctx, 'spaces.projects.create') ?? AVAILABLE),
 };
 
 /** Resolve a ref to its definition. Total over `ActionRef` — never throws. */

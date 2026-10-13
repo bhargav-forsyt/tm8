@@ -516,7 +516,14 @@ export type ActionRef =
   | 'container-destroy'
   | 'container-terminal'
   | 'container-screen'
-  | 'new-container';
+  | 'new-container'
+  /*
+   * THE PROJECT BIRTH VERB (task 01a13574). A project is not a generic
+   * entity create — the node refuses `entities.create` for the kind — so the
+   * Projects list's ＋ opens the Add project sheet: a folder on the node, an
+   * uploaded folder, or a GitHub clone.
+   */
+  | 'add-project';
 
 export type ActionAvailability = { kind: 'available' } | { kind: 'disabled'; reason: string };
 

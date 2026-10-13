@@ -45,7 +45,8 @@ export async function isSpaceAdmin(db: Db, claims: DbClaims, spaceId: string): P
  */
 export async function spaceProjectRoots(db: Db, claims: DbClaims, spaceId: string): Promise<string[]> {
   if (!(await isSpaceAdmin(db, claims, spaceId))) {
-    throw new CollabError('forbidden', 'space admin access is required to add a project to this space', {
+    // Lane D B1: the refusal names who can unblock the caller.
+    throw new CollabError('forbidden', 'only a space admin can add a project to this space; ask a space admin (or a node admin) to add it, or to make you an admin', {
       details: { reason: 'space_admin_required' },
     });
   }
