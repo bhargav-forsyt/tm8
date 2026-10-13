@@ -3,7 +3,7 @@ import type { ToolView } from '@tm8/contract';
 import { useDismissable } from '../panels/useDismissable';
 import type { ToolPort, ToolSourceChange } from './port';
 import { InputValue } from './InputValue';
-import { initialValues, runValues, UI_ACCESS_REFUSAL } from './values';
+import { apiAccessNotice, initialValues, runValues } from './values';
 
 export function RunDialog({ tool, port, onClose, onOpenSession }: { tool: ToolView; port: ToolPort; onClose(): void; onOpenSession(id: string): void }) {
   const [values, setValues] = useState(() => initialValues(tool));
@@ -29,14 +29,14 @@ export function RunDialog({ tool, port, onClose, onOpenSession }: { tool: ToolVi
     document.addEventListener('keydown', focusTrap);
     return () => { active = false; document.removeEventListener('keydown', focusTrap); if (previousFocus instanceof HTMLElement) previousFocus.focus(); };
   }, [port, tool]);
-  const refused = tool.definition.tm8Access !== 'none';
+  const access = tool.definition.tm8Access;
   return <div className="tool-dialog-backdrop"><div ref={dialog} className="tool-dialog" role="dialog" aria-modal="true" aria-label={`Run ${tool.definition.name}`}>
     <h2>Run {tool.definition.name}</h2><p>{tool.definition.description}</p>
     {change && <p role="status" className="tool-notice">Source changed since your last run, by {change.changedBy}.</p>}
     {checking && <p role="status">Checking source changes…</p>}
     {sourceError && <p role="alert">{sourceError}</p>}
-    {refused && <p role="alert">{UI_ACCESS_REFUSAL}</p>}
-    <form onSubmit={event => { event.preventDefault(); if (busy || refused || checking || sourceError) return; setError('');
+    {access !== 'none' && <p role="status" className="tool-notice">{apiAccessNotice(access)}</p>}
+    <form onSubmit={event => { event.preventDefault(); if (busy || checking || sourceError) return; setError('');
       let resolved: ReturnType<typeof runValues>;
       try { resolved = runValues(tool, values, secrets); } catch (failure) { setError(failure instanceof Error ? failure.message : 'Check the inputs.'); return; }
       setBusy(true); setSecrets({});
@@ -44,13 +44,13 @@ export function RunDialog({ tool, port, onClose, onOpenSession }: { tool: ToolVi
     }}>
       {tool.definition.inputs.map(input => <label key={input.name} className="tool-field"><span>{input.name}{input.required ? ' · required' : ''}</span>
         {input.description && <small>{input.description}</small>}
-        <InputValue input={input} value={(input.type === 'secret' ? secrets : values)[input.name] ?? ''} disabled={busy || refused}
+        <InputValue input={input} value={(input.type === 'secret' ? secrets : values)[input.name] ?? ''} disabled={busy}
           onChange={value => input.type === 'secret' ? setSecrets(previous => ({ ...previous, [input.name]: value })) : setValues(previous => ({ ...previous, [input.name]: value }))} />
         {input.type === 'secret' && tool.secretBindings.some(binding => binding.inputName === input.name) && <small>Leave blank to use the saved secret.</small>}
       </label>)}
       {error && <p role="alert">{error}</p>}
       <p>The terminal stays open as a shell after the tool exits. Close the tab when you’re finished.</p>
-      <div className="tool-actions"><button type="button" className="pn-btn" disabled={busy} onClick={onClose}>Cancel</button><button className="pn-btn pn-btn--primary" disabled={busy || refused || checking || Boolean(sourceError)}>{busy ? 'Starting…' : 'Run tool'}</button></div>
+      <div className="tool-actions"><button type="button" className="pn-btn" disabled={busy} onClick={onClose}>Cancel</button><button className="pn-btn pn-btn--primary" disabled={busy || checking || Boolean(sourceError)}>{busy ? 'Starting…' : 'Run tool'}</button></div>
     </form>
   </div></div>;
 }

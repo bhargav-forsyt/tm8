@@ -61,7 +61,7 @@ Attached runs print the session id and stream output; the CLI exits with the too
 | `space-digest` | python3 | `since`: exclusive event sequence, `format`: markdown/json. Reads the space event feed with its run token; reports event counts, task updates and merged PR events. |
 | `slack-notify` | bash, curl, python3 | `text`, optional `channel`, secret `slack_webhook_url`. Sends JSON to the webhook. Slack may ignore channel overrides. |
 
-`space-digest` requires an **agent session** in v1. Human CLI/UI attempts are refused because no human run-token mint exists yet; follow-up [01a125a6-fb9e](tm8://entity/01a125a6-fb9e) tracks it. Its event walk follows examined cursors (including skipped/filtered rows), stops when caught up, and is capped at 1000 pages. It summarises the retained feed; task entries show hydrated current status rather than a full historical transition log. The `through` sequence in JSON can be passed as the next `since`.
+`space-digest` runs from agent sessions and from human CLI/UI sessions alike; a human run gets a read token acting as the human, revoked on exit. Its event walk follows examined cursors (including skipped/filtered rows), stops when caught up, and is capped at 1000 pages. It summarises the retained feed; task entries show hydrated current status rather than a full historical transition log. The `through` sequence in JSON can be passed as the next `since`.
 
 An agent can run the digest, inspect its output and pass the summary as `slack-notify --text`. The run wrapper adds terminal headers and footers, so extract the digest body before composing the notification.
 

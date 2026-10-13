@@ -1,6 +1,6 @@
 import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CollabError, DEFAULT_TOOL_CAP, type ToolRunInput, type ToolSecretBindInput } from '@tm8/contract';
+import { CollabError, DEFAULT_TOOL_CAP, isHumanAuthKind, type ToolRunInput, type ToolSecretBindInput } from '@tm8/contract';
 import { ToolSessionLauncher, resolveToolInputs, confineToolPath, type PtyHostService, type SpawnService } from '@tm8/execution';
 import type { Db, DbClaims } from '../db/types.js';
 import type { RequestIdentity } from '../http/types.js';
@@ -36,8 +36,11 @@ export class ToolRuntime {
     if (claims.viaLinkId || claims.authKind === 'link') throw new CollabError('forbidden', 'Tool runs are unavailable through space links');
     const tool = await this.options.db.tx(claims, q => loadTool(q, input.toolId));
     const access = tool.definition.tm8Access;
-    if (access !== 'none' && (identity.authKind !== 'agent' || !identity.actorId || !identity.sessionId || !claims.workSessionId)) {
-      throw new CollabError('forbidden', 'Tools with tm8Access read or write require an invoking agent persona in v1');
+    // An agent's run token acts as its persona under its live bearer; a human's
+    // (browser, CLI or the loopback owner) acts as the human's own account.
+    const human = isHumanAuthKind(identity.authKind);
+    if (access !== 'none' && !human && (identity.authKind !== 'agent' || !identity.actorId || !identity.sessionId || !claims.workSessionId)) {
+      throw new CollabError('forbidden', 'Tools with tm8Access read or write require a human session or an invoking agent persona');
     }
     const caller = claims.workSessionId ? (await this.options.db.query<{ workdir_path: string | null }>(claims,
       'select workdir_path from public.work_sessions where entity_id=$1', [claims.workSessionId]))[0]?.workdir_path : null;
@@ -86,8 +89,13 @@ export class ToolRuntime {
     try {
       if (access !== 'none') {
         const secret = generateSecret();
-        const row = await this.options.db.rpc<{ id: string }>(claims, 'issue_tool_session_agent_session',
-          [sessionId, identity.actorId!, hashToken(secret), new Date(Date.now() + (tool.definition.timeoutSeconds + 60) * 1000).toISOString(), toolTokenScope(access, identity.apiScope), identity.sessionId!]);
+        const expires = new Date(Date.now() + (tool.definition.timeoutSeconds + 60) * 1000).toISOString();
+        const scope = toolTokenScope(access, identity.apiScope);
+        const row = human
+          ? await this.options.db.rpc<{ id: string }>(claims, 'issue_tool_session_human_session',
+            [sessionId, hashToken(secret), expires, scope, identity.sessionId ?? null])
+          : await this.options.db.rpc<{ id: string }>(claims, 'issue_tool_session_agent_session',
+            [sessionId, identity.actorId!, hashToken(secret), expires, scope, identity.sessionId!]);
         if (!row.id) throw new CollabError('upstream_unavailable', 'Tool token mint returned no session');
         token = formatToken(row.id, secret);
       }
