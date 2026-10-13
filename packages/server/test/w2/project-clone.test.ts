@@ -224,6 +224,7 @@ describe('spaces.projects.clone', () => {
     expect(job.credentialSource).toBe('node');
     expect(job.error!.message).toContain('[redacted]');
     expect(job.error!.message).not.toContain(TOKEN);
+    expect(job.error!.message).toContain('The node GitHub credential was refused');
     await expect(stat(join(root, 'private'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(db.calls.map((c) => c.fn)).not.toContain('register_space_folder');
   });

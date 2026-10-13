@@ -483,9 +483,12 @@ export class ProjectCloneService {
       }
       if (cloned.code !== 0) {
         const reason = redactSecret(tail(cloned.stderr), token);
+        const refused = /could not read Username|Authentication failed|returned error: 40[13]|Repository not found/i.test(cloned.stderr);
         const hint = token === null
           ? ' No GitHub credential was available: for a private repository, sign in to GitHub in your settings or add a space GitHub credential.'
-          : '';
+          : refused
+            ? ` The ${job.credentialSource} GitHub credential was refused, or it cannot read this repository.`
+            : '';
         throw new CollabError('upstream_unavailable', `git clone failed: ${reason || `exit ${cloned.code}`}${hint}`);
       }
 
