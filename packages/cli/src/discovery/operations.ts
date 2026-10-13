@@ -1139,56 +1139,6 @@ const ROWS: Record<OperationName, Row> = {
     side: 'durable',
     tags: ['ref', 'reference', 'cross-space'],
   },
-  'opRequests.create': {
-    cmd: ['request', 'create'],
-    syn: "tm8 request create <op> --justification <text> [--params <json>] [--input <json>]",
-    sum: 'Ask a human for an operation you may not do yourself (link a space, set a link\'s spawn switch, register a gate folder, grant a filesystem path); they approve and it runs as them, or deny',
-    authz: 'space',
-    input: 'bound',
-    side: 'durable',
-    tags: ['request', 'approve', 'human-only', 'link', 'cross-space', 'folder', 'agent'],
-    notes: [
-      '<op> must be on OP_REQUESTABLE in @tm8/contract; --input is the op\'s own body without clientMutationId, --params its path params (spaceId defaults to this Space)',
-      'the request is raised as an approve item; the outcome is messaged back to the session that filed it',
-    ],
-    examples: [
-      'tm8 request create spaceLinks.add --input \'{"targetSpaceId":"<space-id>","alias":"docs"}\' --justification "I need to read tasks in the docs space"',
-    ],
-  },
-  'opRequests.list': {
-    cmd: ['request', 'list'],
-    syn: 'tm8 request list [--status <pending|executing|succeeded|failed|denied>] [--limit <count>]',
-    sum: 'List this Space\'s op requests, newest first',
-    authz: 'space',
-    input: 'none',
-    tags: ['request', 'approve', 'list'],
-  },
-  'opRequests.get': {
-    cmd: ['request', 'get'],
-    syn: 'tm8 request get <request-id>',
-    sum: 'Read one op request: its op, body, justification, status and outcome',
-    authz: 'entity',
-    input: 'none',
-    tags: ['request', 'approve'],
-  },
-  'opRequests.approve': {
-    cmd: ['request', 'approve'],
-    syn: 'tm8 request approve <request-id> [--note <text>]',
-    sum: 'Approve an op request: the Server runs the op as YOU, with your own authority checks, and messages the outcome to the requesting session — human sessions only',
-    authz: 'entity',
-    input: 'bound',
-    side: 'durable',
-    tags: ['request', 'approve', 'human-only'],
-  },
-  'opRequests.deny': {
-    cmd: ['request', 'deny'],
-    syn: 'tm8 request deny <request-id> [--note <text>]',
-    sum: 'Deny an op request: nothing runs, and the requesting session is told — human sessions only',
-    authz: 'entity',
-    input: 'bound',
-    side: 'durable',
-    tags: ['request', 'deny', 'human-only'],
-  },
   'node.credentials.status': {
     cmd: null,
     sum: 'Read the node\'s credential fallback per provider — node admin, human sessions only',
@@ -4251,7 +4201,6 @@ const NOUN_BY_FAMILY: Record<string, string> = {
   // `servers.*` (W8, 261): the same `tm8 server` noun 044's rows used.
   // generator.ts nounForOperation says the same.
   servers: 'server',
-  opRequests: 'request',
   // Styles (284, styles spec v8 §5). `identity.stylePrefs.*` and
   // `spaces.styleDefault.*` keep their family nouns; their commands are
   // `style use` and `style default`. generator.ts nounForOperation says the same.
@@ -4369,7 +4318,6 @@ export const CATALOG_DIGEST =
   // identity.pathGrants.list; path grants) — RECOMPUTED, not adjusted.
   // +4 spaceLinks.inbound.list|audit|revoke|restore (278, D2): read from the regenerated conformance manifest.
   // +3 entities.refs.list|add|remove (L3 cross-space refs, 279): read from the regenerated conformance manifest.
-  // Re-measured (L5, 280): +5 opRequests.* — read from the regenerated conformance manifest.
   // Re-measured (styles, 284): +15 styles.*, identity.stylePrefs.get|set, spaces.styleDefault.get|set. RECOMPUTED from JSON.stringify(OPERATIONS).
   // Re-measured (main sync: cross-space + styles).
   // +1 spaceLinks.inbound.grant (W9c, 301): read from the regenerated conformance manifest.
@@ -4378,7 +4326,8 @@ export const CATALOG_DIGEST =
   // Re-measured for MW W3.1 (+workspace.prompts.resolve) — RECOMPUTED, not adjusted.
   // Re-measured for the MW W4 merge of origin/main (+execution.gitCheckouts|gitCheckoutDiff) — RECOMPUTED, not adjusted.
   // Re-measured for Craft L3 (+workspace.crafts.list|get|command) — RECOMPUTED, not adjusted.
-  'sha256:527a376d04e641936fd86e67099a0fc993cb6fe872aa7e115f0a9795921eba40';
+  // Re-measured after the request noun's removal (-5 rows) — RECOMPUTED, not adjusted.
+  'sha256:0c35a578ddc525df374434587736ad05da97965d77409b5118b976eb09e1e9b4';
 
 export const GRAMMAR_VERSION = '2';
 

@@ -93,7 +93,7 @@ describe('spaceLinks.invoke — an actor B refuses says why and what to do (task
 
   it('auditReasonOf: a closed details.reason for every error, else the code; never free text', () => {
     expect(auditReasonOf(actorNotPermitted(OTHER_ACTOR))).toBe('actor_not_permitted');
-    expect(auditReasonOf(new CollabError('conflict', 'x', { details: { reason: 'op_request_executing' } }))).toBe('op_request_executing');
+    expect(auditReasonOf(new CollabError('conflict', 'x', { details: { reason: 'space_link_pairing_required' } }))).toBe('space_link_pairing_required');
     expect(auditReasonOf(new CollabError('forbidden', 'x', { details: { reason: 'Not A Reason!' } }))).toBe('forbidden');
     expect(auditReasonOf(new CollabError('not_found', 'x'))).toBe('not_found');
     expect(auditReasonOf(new Error('boom'))).toBe('internal');

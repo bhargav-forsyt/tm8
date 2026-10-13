@@ -645,15 +645,6 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
       },
     },
 
-    // -- op requests (L5) -----------------------------------------------------
-
-    opRequests: {
-      list: (spaceId, query) => ops.opRequestsList(spaceId, query),
-      get: (requestId) => ops.opRequestsGet(requestId),
-      approve: (requestId, note) => ops.opRequestsDecide('opRequests.approve', requestId, note),
-      deny: (requestId, note) => ops.opRequestsDecide('opRequests.deny', requestId, note),
-    },
-
     // -- remote servers (W8) --------------------------------------------------
 
     crossSpaceRefs: {
@@ -693,7 +684,5 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
      `seam` or `seam.commands` would break it here and nowhere else. */
   seam.commands.managed = managedPortFromSeam(seam);
   seam.commands.tools = createToolPort(http, seam);
-  // The approve card's port IS the noun; the panel reaches it through `commands`.
-  seam.commands.opRequests = seam.opRequests;
   return seam;
 }

@@ -118,7 +118,6 @@ import {
   type SpaceLinkInboundAuditEntry,
   type SpaceLinkInboundView,
   type CrossSpaceRef,
-  type OpRequestView,
   type ServerView,
   type ActionRows,
   type ContentionReport,
@@ -199,7 +198,6 @@ import {
   ada,
   fixtureDetails,
   fixtureHandoffsBySession,
-  fixtureOpRequests,
   fixtureSummaries,
   memberAda,
   memberNoor,
@@ -841,9 +839,6 @@ function synthesizeContent(s: EntitySummary): EntityContent {
     case 'credential':
       // W10a: content is the same allow-list as state — no secret, hint or login.
       return { ...state };
-    case 'op_request':
-      // 280: the same facts as its state; the rest is `opRequests.get`'s.
-      return { ...state };
     case 'story':
       // The page is hydrated on a detail read only; a seam row carries none.
       return { kind: 'story', description: '', page: null };
@@ -1381,28 +1376,6 @@ export function createFixtureSeam(): FixtureSeam {
       },
     },
   ];
-  /**
-   * Op requests (L5, 280) — the `opRequests.get` answers behind the dataset's
-   * `op_request` rows. Approving RUNS NOTHING here: the fixture records the
-   * decision (succeeded, no result) and says whether a session would be told,
-   * which is the whole of what the approve card reads back.
-   */
-  const opRequestsState: OpRequestView[] = clone(fixtureOpRequests);
-  const opRequestById = (id: string): OpRequestView => {
-    const request = opRequestsState.find((r) => r.id === id);
-    if (!request) throw new CollabError('not_found', `op request ${id} not found`);
-    return request;
-  };
-  const decideOpRequest = (id: string, to: 'succeeded' | 'denied', note?: string | null) => {
-    const request = opRequestById(id);
-    if (request.status !== 'pending') throw new CollabError('conflict', `op request ${id} is already ${request.status}`);
-    const at = tick();
-    Object.assign(request, {
-      status: to, decidedBy: ada.id, decidedAt: at, decisionNote: note ?? null,
-      canDecide: false, updatedAt: at, version: request.version + 1,
-    });
-    return { request: clone(request), notified: request.requestingSessionId !== null };
-  };
   /** W7 audit rows (none until an agent invokes through a link). */
   const spaceLinkAuditState: SpaceLinkAuditEntry[] = [];
   /**
@@ -6163,18 +6136,6 @@ export function createFixtureSeam(): FixtureSeam {
         return { id: refId, entityId, removed: true as const };
       },
     },
-    opRequests: {
-      async list(spaceId, query) {
-        const rows = opRequestsState
-          .filter((r) => r.spaceId === spaceId && (query?.status === undefined || r.status === query.status))
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        return clone(query?.limit === undefined ? rows : rows.slice(0, query.limit));
-      },
-      async get(requestId) { return clone(opRequestById(requestId)); },
-      async approve(requestId, note) { return decideOpRequest(requestId, 'succeeded', note); },
-      async deny(requestId, note) { return decideOpRequest(requestId, 'denied', note); },
-    },
-
     servers: {
       async get(serverId) {
         return clone(serverById(serverId));
@@ -6297,7 +6258,5 @@ export function createFixtureSeam(): FixtureSeam {
      finished object. This therefore REQUIRES an unfrozen seam; freezing
      `seam` or `seam.commands` would break it here and nowhere else. */
   seam.commands.managed = managedPortFromSeam(seam);
-  // The approve card's port IS the noun; the panel reaches it through `commands`.
-  seam.commands.opRequests = seam.opRequests;
   return seam;
 }
