@@ -132,6 +132,7 @@ import {
 } from '../profiles/w2-profile-resolver.js';
 import { formatToken, generateSecret, hashToken } from '../identity/crypto.js';
 import { resolveBearerIdentity, SESSION_TTL_MS } from '../identity/pg-auth.js';
+import { probeNodeAgentLogin } from './services/w2/credential-probe.js';
 
 // Claims come from ./context.ts, deliberately NOT from a local helper.
 //
@@ -2000,6 +2001,13 @@ export function createExecutionRuntime(deps: ExecutionRuntimeDeps): ExecutionRun
         }
       : {}),
     ...(worktrees ? { worktrees } : {}),
+    // A `source=node` spawn on a host with no claude/codex login is refused
+    // by name instead of hanging at Claude Code's first-run screen. The same
+    // probe answers Node admin's "usable login" row. TM8_NODE_AGENT_LOGIN_CHECK=0
+    // turns it off for a node whose login the probe cannot see.
+    ...(process.env.TM8_NODE_AGENT_LOGIN_CHECK?.trim() === '0'
+      ? {}
+      : { nodeAgentLoginProbe: probeNodeAgentLogin }),
     // Model routing. `undefined` unless this node has BOTH a policy and a key,
     // and undefined spreads to nothing — so a fleet that sets neither resolves
     // every model exactly as it did before this existed.
@@ -2196,6 +2204,13 @@ export function registerExecutionHandlers(
         }
       : {}),
     ...(worktrees ? { worktrees } : {}),
+    // A `source=node` spawn on a host with no claude/codex login is refused
+    // by name instead of hanging at Claude Code's first-run screen. The same
+    // probe answers Node admin's "usable login" row. TM8_NODE_AGENT_LOGIN_CHECK=0
+    // turns it off for a node whose login the probe cannot see.
+    ...(process.env.TM8_NODE_AGENT_LOGIN_CHECK?.trim() === '0'
+      ? {}
+      : { nodeAgentLoginProbe: probeNodeAgentLogin }),
     // Model routing. `undefined` unless this node has BOTH a policy and a key,
     // and undefined spreads to nothing — so a fleet that sets neither resolves
     // every model exactly as it did before this existed.
