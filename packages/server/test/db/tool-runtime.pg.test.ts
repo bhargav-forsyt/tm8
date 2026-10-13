@@ -98,6 +98,62 @@ it('mints only for live agent personas, with the pinned tool/caller cap and cano
  await expect(database.query("update public.auth_sessions set api_scope='write' where id=$1", [row.id])).rejects.toThrow('immutable');
 });
 
+const tokenHash = () => createHash('sha256').update(randomUUID()).digest('hex');
+async function mintHuman(session: string, claims = auth(), scope = 'write', parentAuthId: string | null = null) {
+ const hash = tokenHash();
+ const row = await db.rpc<{id: string; kind: string; api_scope: string; space_id: string; work_session_id: string; acting_as_team_member_id: string | null}>(
+  claims, 'issue_tool_session_human_session', [session, hash, new Date(Date.now() + 60000).toISOString(), scope, parentAuthId]);
+ return { hash, row };
+}
+async function humanBearer(identity: string, scope: 'read' | 'write', workSession: string | null = null) {
+ const id = randomUUID();
+ await database.query("insert into public.auth_sessions(id,account_id,kind,work_session_id,token_hash,expires_at,api_scope) select $1,id,'cli',$3,$4,now()+interval '30 seconds',$5 from public.accounts where identity_id=$2",
+  [id, identity, workSession, tokenHash(), scope]);
+ return id;
+}
+
+it('mints a human run bearer only for the invoking human, narrowed to the run', async () => {
+ const opened: Array<[string, DbClaims]> = [];
+ const open = async (tool: string, claims = auth()) => { const id = await run(tool, {}, false, claims); opened.push([id, claims]); return id; };
+ const tool = await accessibleTool('write'), session = await open(tool);
+ for (const kind of ['agent', 'agent_runtime', 'link', '']) await expect(mintHuman(session, { ...auth(), authKind: kind })).rejects.toThrow();
+ await expect(mintHuman(session, { ...auth(), viaLinkId: randomUUID() })).rejects.toThrow();
+ await expect(mintHuman(session, auth('tools-peer'))).rejects.toThrow();
+ await expect(mintHuman(await open(tool, agent))).rejects.toThrow('invoking human');
+ await expect(mintHuman(session, auth(), 'write', parentAuth)).rejects.toThrow('live invoking human bearer');
+ await expect(mintHuman(session, auth(), 'write', await humanBearer('tools-peer', 'write'))).rejects.toThrow('live invoking human bearer');
+ await expect(mintHuman(await open(await accessibleTool('none')))).rejects.toThrow('no tm8 API access');
+ const { hash, row } = await mintHuman(session);
+ expect(row).toMatchObject({ kind: 'cli', api_scope: 'write', space_id: space, work_session_id: session, acting_as_team_member_id: null });
+ expect(row).not.toHaveProperty('token_hash');
+ expect(await db.rpc({}, 'resolve_auth_session', [hash])).toMatchObject({ kind: 'cli', apiScope: 'write', workSessionId: session, identityId: 'tools-owner', spaceId: space });
+ expect((await mintHuman(session, { ...auth(), apiScope: 'read' })).row.api_scope).toBe('read');
+ expect(await db.rpc({}, 'resolve_auth_session', [hash])).toBeNull(); // a re-mint revokes the previous bearer
+ expect((await mintHuman(await open(await accessibleTool('read')))).row.api_scope).toBe('read');
+ // A human bearer narrows scope, caps lifetime, and cascades its revocation.
+ const bearer = await humanBearer('tools-owner', 'read');
+ const child = await mintHuman(session, auth(), 'write', bearer);
+ expect(child.row.api_scope).toBe('read');
+ const [capped] = await database.query<{ok: boolean}>('select c.expires_at<=p.expires_at as ok from public.auth_sessions c join public.auth_sessions p on p.id=c.parent_session_id where c.id=$1', [child.row.id]);
+ expect(capped!.ok).toBe(true);
+ await database.query('update public.auth_sessions set revoked_at=now() where id=$1', [bearer]);
+ expect(await db.rpc({}, 'resolve_auth_session', [child.hash])).toBeNull();
+ await expect(mintHuman(session, auth(), 'write', bearer)).rejects.toThrow('live invoking human bearer');
+ // Nested: a tool run from inside a human run needs that run's own bearer.
+ const nestedParent = await humanBearer('tools-owner', 'write', session);
+ const nested = await open(tool, { ...auth(), workSessionId: session });
+ await expect(mintHuman(nested, { ...auth(), workSessionId: session })).rejects.toThrow('live invoking human bearer');
+ expect((await mintHuman(nested, { ...auth(), workSessionId: session }, 'write', nestedParent)).row.work_session_id).toBe(nested);
+ // Settlement revokes.
+ await db.rpc(auth(), 'work_session_transition', [session, 'running']);
+ const live = await mintHuman(session);
+ await db.rpc(auth(), 'record_tool_exit', [session, 0, 'exited', '']);
+ expect(await db.rpc({}, 'resolve_auth_session', [live.hash])).toBeNull();
+ await expect(mintHuman(session)).rejects.toThrow('live tool session');
+ // Release the member's tool-session slots for the runtime cases below.
+ for (const [id, claims] of opened) await db.rpc(claims, 'work_session_transition', [id, 'failed', null, 'test cleanup']);
+});
+
 it('caps expiry at the live parent bearer and cascades parent revocation', async () => {
  const session = await run(await accessibleTool('write'), {}, false, agent);
  const root = parentAuth;
@@ -188,7 +244,7 @@ it('runs only reviewed stored source, resolves server inputs, and never returns 
   spawnService: { adoptToolSession: vi.fn() } as unknown as SpawnService, dataDir: dir,
   baseUrl: 'http://127.0.0.1:17777', nodeId: 'tool-test' });
  const identity = { identityId: 'tools-owner', authKind: 'agent', actorId: persona, workSessionId: parent, sessionId: parentAuth } as const;
- let session: string | undefined;
+ let session: string | undefined, humanSession: string | undefined;
  try {
   await db.rpc(auth(), 'set_tool_config', [tool, await version(tool), 'value', JSON.stringify('configured-public'), false, null, randomUUID()]);
   await runtime.createSecret(auth(), { toolId: tool, expectedVersion: await version(tool), inputName: 'key', value: 'bound-private-value', clientMutationId: randomUUID() });
@@ -209,6 +265,11 @@ it('runs only reviewed stored source, resolves server inputs, and never returns 
   const changed = await db.tx(agent, q => loadTool(q, tool));
   expect(changed.sourceChangedSinceViewerLastRun).toMatchObject({ byActor: { id: owner }, fromSha: started.sourceSha256, toSha: changed.sourceSha256 });
   await expect(runtime.run(agent, identity, { ...input, clientMutationId: randomUUID(), expectedVersion: reviewed })).rejects.toThrow();
-  await expect(runtime.run(auth(), { identityId: 'tools-owner', authKind: 'browser' }, input)).rejects.toThrow('invoking agent');
- } finally { if (session) pty.kill(session); await rm(dir, { recursive: true, force: true }); }
+  const human = await runtime.run(auth(), { identityId: 'tools-owner', authKind: 'browser' }, { ...input, clientMutationId: randomUUID() });
+  humanSession = human.sessionId;
+  const [token] = await database.query('select kind,api_scope,space_id,acting_as_team_member_id,parent_session_id from public.auth_sessions where work_session_id=$1', [humanSession]);
+  expect(token).toMatchObject({ kind: 'cli', api_scope: 'read', space_id: space, acting_as_team_member_id: null, parent_session_id: null });
+  await vi.waitFor(async () => expect((await db.tx(auth(), q => loadToolRun(q, humanSession!))).state).toBe('exited'), { timeout: 10000 });
+  expect((await database.query('select revoked_at from public.auth_sessions where work_session_id=$1', [humanSession]))[0]!.revoked_at).toBeTruthy();
+ } finally { if (session) pty.kill(session); if (humanSession) pty.kill(humanSession); await rm(dir, { recursive: true, force: true }); }
 });

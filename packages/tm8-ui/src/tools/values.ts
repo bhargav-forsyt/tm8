@@ -37,4 +37,9 @@ export function runLabel(run: ToolRun): string {
     case 'killed': return 'Killed';
   }
 }
-export const UI_ACCESS_REFUSAL = 'Tools with tm8 API access cannot be run from the UI in v1. Run this tool with the tm8 CLI in an agent session.';
+/** What a run of a tool with tm8 API access may do as the person running it. */
+export function apiAccessNotice(access: 'read' | 'write'): string {
+  return access === 'read'
+    ? 'This tool can read tm8 as you while it runs. Its access ends when it exits.'
+    : 'This tool can read and change tm8 as you while it runs. Its access ends when it exits.';
+}

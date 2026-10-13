@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
-  PtyHostService, ToolSessionLauncher, confineToolPath, resolveToolInputs, redactToolOutput,
+  PERL_TIMEOUT, PtyHostService, ToolSessionLauncher, confineToolPath, resolveToolInputs, redactToolOutput,
   type ToolExit,
 } from '@tm8/execution';
 import { ToolDefinitionSchema, ToolRunInputSchema, ToolSecretBindInputSchema, OPERATIONS, getOperation, type ToolView } from '@tm8/contract';
@@ -105,6 +106,16 @@ describe('tool exit capture on real PTYs', () => {
     expect(run.recordExit).toHaveBeenCalledTimes(1);
     const wrapper = await readFile(join(run.dir, 'tool-runs', run.sessionId, 'run'), 'utf8');
     expect(wrapper).toContain('timeout --foreground -k 10'); expect(wrapper).not.toContain('shell-secret');
+    expect(wrapper).toContain('/usr/bin/perl -e'); // hosts without GNU timeout (macOS)
+  });
+  it('the perl timeout fallback keeps timeout\'s exit codes and stdin', () => {
+    const watchdog = (t: number, k: number, script: string, input = '') =>
+      spawnSync('/usr/bin/perl', ['-e', PERL_TIMEOUT, String(t), String(k), '/bin/bash', '-c', script], { input, encoding: 'utf8' });
+    expect(watchdog(5, 5, 'exit 7').status).toBe(7);
+    expect(watchdog(5, 5, 'read x; printf "got:%s" "$x"', 'line\n').stdout).toBe('got:line');
+    expect(watchdog(1, 5, 'sleep 4').status).toBe(124);
+    expect(watchdog(1, 1, 'trap "" TERM; sleep 4').status).toBe(137); // the orphaned sleep holds stdout until it ends
+    expect(spawnSync('/usr/bin/perl', ['-e', PERL_TIMEOUT, '5', '5', '/nonexistent-tool']).status).toBe(127);
   });
   it('records killed when the PTY disappears before a status file is written', async () => {
     const run = await launch('/bin/sleep 30', false, { secret: 'secret-on-kill' });

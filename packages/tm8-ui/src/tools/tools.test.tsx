@@ -6,7 +6,7 @@ import { fixtureDetails, sessionStale } from '../fixtures';
 import { ToolBody } from './ToolBody';
 import { RunDialog } from './RunDialog';
 import { fixtureTool, createToolFixture } from './fixture';
-import { UI_ACCESS_REFUSAL } from './values';
+import { apiAccessNotice } from './values';
 
 vi.mock('./SourceEditor', () => ({ SourceEditor: ({ value, onChange, readOnly }: { value: string; onChange(value: string): void; readOnly?: boolean }) => <textarea aria-label="Source" value={value} readOnly={readOnly} onChange={event => onChange(event.target.value)} /> }));
 afterEach(cleanup);
@@ -56,12 +56,14 @@ describe('generated Run form', () => {
     await waitFor(() => expect(port.run).toHaveBeenCalledWith(expect.objectContaining({ keepOpen: true, inputs: { url: 'https://example.test', limit: 8, verbose: false, state: 'open' } })));
     await waitFor(() => expect(open).toHaveBeenCalledWith(expect.any(String))); expect(close).toHaveBeenCalled();
   });
-  it.each(['read', 'write'] as const)('refuses %s API access with an explanation and makes no run request', async tm8Access => {
-    const { port } = createToolFixture(); port.run = vi.fn(port.run);
-    render(<RunDialog tool={{ ...fixtureTool, definition: { ...fixtureTool.definition, tm8Access } }} port={port} onClose={vi.fn()} onOpenSession={vi.fn()} />);
-    expect(screen.getByText(UI_ACCESS_REFUSAL)).toBeTruthy();
+  it.each(['read', 'write'] as const)('runs a tool with %s API access from the UI, naming that access', async tm8Access => {
+    const { port } = createToolFixture(); port.run = vi.fn(port.run); const open = vi.fn();
+    render(<RunDialog tool={{ ...fixtureTool, definition: { ...fixtureTool.definition, tm8Access } }} port={port} onClose={vi.fn()} onOpenSession={open} />);
+    expect(screen.getByText(apiAccessNotice(tm8Access))).toBeTruthy();
     await waitFor(() => expect(screen.queryByText('Checking source changes…')).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: 'Run tool' })); expect(port.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Run tool' }));
+    await waitFor(() => expect(port.run).toHaveBeenCalledWith(expect.objectContaining({ keepOpen: true })));
+    await waitFor(() => expect(open).toHaveBeenCalledWith(expect.any(String)));
   });
   it('refuses a missing required secret, without sending input values', async () => {
     const tool = structuredClone(fixtureTool); tool.definition.inputs.find(input => input.name === 'token')!.required = true;
