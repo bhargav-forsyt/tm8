@@ -33,7 +33,7 @@ export async function isSpaceAdmin(db: Db, claims: DbClaims, spaceId: string): P
 
 /**
  * The canonical roots inside which THIS caller may put a folder behind one of
- * `spaceId`'s projects (task 01a13574, migration 323).
+ * `spaceId`'s projects (task 01a13574, migration 324).
  *
  * Asked BEFORE anything touches the filesystem, so a member who is not a space
  * admin can neither create a directory nor learn which paths exist:
@@ -59,7 +59,7 @@ export async function spaceProjectRoots(db: Db, claims: DbClaims, spaceId: strin
 }
 
 /**
- * Trust is the gate's (migration 323 refuses it too). Asked up front so a space
+ * Trust is the gate's (migration 324 refuses it too). Asked up front so a space
  * admin's `trusted` is refused before a directory is created or a byte lands,
  * not after.
  */

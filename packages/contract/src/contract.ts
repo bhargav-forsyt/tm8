@@ -5883,7 +5883,7 @@ export interface SpaceProject {
  * project. Exactly one of:
  *   - `folderId`: a folder already granted to the space;
  *   - `workingDir`: a folder on the node, registered and granted in the same
- *     step (migration 323). For a space admin who is not a node admin the path
+ *     step (migration 324). For a space admin who is not a node admin the path
  *     must lie inside an explicitly configured `TM8_PROJECT_ROOTS`.
  */
 export interface SpaceProjectCreateInput extends CommandContext {

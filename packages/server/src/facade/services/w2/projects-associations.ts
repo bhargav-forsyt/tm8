@@ -918,7 +918,7 @@ export class W2ProjectsAssociationsService {
   };
 
   /**
-   * `spaces.projects.create` with `workingDir` (migration 323): a space admin
+   * `spaces.projects.create` with `workingDir` (migration 324): a space admin
    * registers a folder inside their allowed roots, grants it to the space and
    * names the project, in one step.
    *
@@ -1081,7 +1081,7 @@ export async function allowedWorkingDir(raw: string, roots: readonly string[], e
   return canonical;
 }
 
-/** `register_space_folder` (323). The path must already be canonical and inside the caller's roots. */
+/** `register_space_folder` (324). The path must already be canonical and inside the caller's roots. */
 export async function registerSpaceFolderRow(
   db: FacadeDeps['db'],
   claims: DbClaims,

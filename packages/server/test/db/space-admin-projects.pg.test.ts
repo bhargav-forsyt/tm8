@@ -6,7 +6,7 @@ import type { PoolClient } from 'pg';
 import { createW1ScratchDatabase, migrationFiles, type W1ScratchDatabase } from './w1-pg.js';
 
 /**
- * 323 — `register_space_folder`: a space admin's door to a project folder
+ * 324 — `register_space_folder`: a space admin's door to a project folder
  * (task 01a13574). Space A: H is its owner (not a node admin), M a plain
  * member, N an admin who is also a node (gate) admin. Folder G is registered
  * on the node and granted nowhere. Every refusal is paired with a positive by
@@ -108,7 +108,7 @@ afterAll(async () => {
   await database?.destroy();
 }, 180_000);
 
-describe.sequential('323 register_space_folder', () => {
+describe.sequential('324 register_space_folder', () => {
   it('a space admin who is not a node admin registers, grants and names a new folder — untrusted, with remote and branch', async () => {
     const result = await register(ids.identityH, false, {
       path: pathFor('new'), name: 'Hello', repoUrl: 'https://github.com/octo/hello.git', branch: 'main',
