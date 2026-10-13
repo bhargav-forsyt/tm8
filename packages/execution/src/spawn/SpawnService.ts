@@ -48,6 +48,15 @@ import {
   type CodexNetworkPreflight,
 } from './codex-network-preflight.js';
 import {
+  AGENT_ONBOARDING_SCREEN,
+  NodeAgentLoginGate,
+  nodeAgentLoginProvider,
+  ONBOARDING_FAIL_READS,
+  ONBOARDING_GRACE_MS,
+  readClaudeOnboarding,
+  type NodeAgentLoginProbe,
+} from './node-agent-login.js';
+import {
   buildAgentCommand,
   childLaunchPosture,
   composeEnv,
@@ -252,6 +261,13 @@ export interface SpawnServiceOptions {
   failedTransitionRetryMs?: number;
   /** Injected only for deterministic compatibility-preflight tests. */
   codexNetworkPreflight?: CodexNetworkPreflight;
+  /**
+   * Asks whether the node's OWN claude/codex login is usable, so a session on
+   * `source=node` is refused by name instead of hanging at Claude Code's
+   * first-run screen. The server injects `probeNodeAgentLogin`; absent means
+   * unchecked, exactly as before. See ./node-agent-login.ts.
+   */
+  nodeAgentLoginProbe?: NodeAgentLoginProbe;
   /**
    * Resolves the spawning identity's own vendor credential home, so an agent
    * authenticates as the MEMBER rather than as the node's machine account.
@@ -525,6 +541,7 @@ export class SpawnService {
   private readonly firstPromptSettlementMs: number;
   private readonly failedTransitionRetryMs: number;
   private readonly codexNetworkPreflight: CodexNetworkPreflight;
+  private readonly nodeAgentLogin: NodeAgentLoginGate | undefined;
   private readonly credentialHome: AgentCredentialHomePort | undefined;
   private readonly gitHubCredentials: GitHubCredentialPort | undefined;
   private readonly spaceCredentials: SpaceCredentialPort | undefined;
@@ -587,6 +604,9 @@ export class SpawnService {
     this.firstPromptSettlementMs = options.firstPromptSettlementMs ?? 150_000;
     this.failedTransitionRetryMs = options.failedTransitionRetryMs ?? 1_000;
     this.codexNetworkPreflight = options.codexNetworkPreflight ?? preflightCodexNetworkPolicy;
+    this.nodeAgentLogin = options.nodeAgentLoginProbe
+      ? new NodeAgentLoginGate(options.nodeAgentLoginProbe)
+      : undefined;
     this.credentialHome = options.credentialHome;
     this.gitHubCredentials = options.gitHubCredentials;
     this.spaceCredentials = options.spaceCredentials;
@@ -794,6 +814,19 @@ export class SpawnService {
       (!override || override === 'codex')
     ) {
       await this.codexNetworkPreflight(resolved, env);
+    }
+
+    // The node's own login, only when this session will run on it. A
+    // TM8_AGENT_CMD override is a test or wrapper agent, not the vendor CLI,
+    // so there is no vendor login to ask about.
+    const provider = nodeAgentLoginProvider(launch.agentTool);
+    if (
+      this.nodeAgentLogin
+      && provider !== null
+      && launch.credentialSources[provider] === 'node'
+      && !override
+    ) {
+      await this.nodeAgentLogin.assertUsable({ provider, env, cwd: env.HOME ?? process.cwd() });
     }
   }
 
@@ -1907,13 +1940,40 @@ export class SpawnService {
       // after that await creates a gap where the PTY entry and its exit evidence
       // have already been removed before we begin watching.
       const bootSettlement = this.pty.waitForBootSettlement(sessionId, this.bootSettlementMs);
+      // A claude with no login boots into its first-run onboarding, where the
+      // first prompt can never land: the settlement wait below would run its
+      // whole budget and the lane would sit there. Watch for that screen WHILE
+      // waiting, and fail by name the moment it is up.
+      const onboarding = launch.agentTool === 'claude-code' && !reused
+        ? this.detectClaudeOnboarding(sessionId)
+        : null;
       await this.assertSpaceCredentialsStillActive(auth, sessionId, spaceCredentialIds);
-      const [earlyExit, promptOutcome] = await Promise.all([
-        bootSettlement,
-        firstPromptDeliveryId && firstPromptOutcome
-          ? this.waitForFirstPromptSettlement(firstPromptDeliveryId, firstPromptOutcome)
-          : Promise.resolve<PromptSettlementResult>({ outcome: 'delivered' }),
-      ]);
+      let earlyExit: Awaited<typeof bootSettlement>;
+      let promptOutcome: PromptSettlementResult | 'onboarding';
+      try {
+        [earlyExit, promptOutcome] = await Promise.all([
+          bootSettlement,
+          Promise.race([
+            firstPromptDeliveryId && firstPromptOutcome
+              ? this.waitForFirstPromptSettlement(firstPromptDeliveryId, firstPromptOutcome)
+              : Promise.resolve<PromptSettlementResult>({ outcome: 'delivered' }),
+            ...(onboarding
+              ? [onboarding.seen.then((seen) => (seen ? ('onboarding' as const) : new Promise<never>(() => {})))]
+              : []),
+          ]),
+        ]);
+      } finally {
+        onboarding?.stop();
+      }
+      if (promptOutcome === 'onboarding') {
+        throw new SpawnError(
+          `${AGENT_ONBOARDING_SCREEN}: Claude Code started its first-run onboarding (theme picker / login), ` +
+            `so the login this session runs on is missing. Log in as the server's OS user ` +
+            `(claude auth login), or launch on a member or space credential.`,
+          'invalid_input',
+          { sessionId, reason: AGENT_ONBOARDING_SCREEN },
+        );
+      }
       if (earlyExit) {
         bootExit = earlyExit;
         throw new SpawnError(
@@ -2752,6 +2812,8 @@ export class SpawnService {
     const start = Date.now();
     let keystrokes = 0;
     let absentReads = 0;
+    let onboardingReads = 0;
+    let bootedAt: number | null = null;
     for (;;) {
       await new Promise<void>((resolve) => {
         setTimeout(resolve, this.trustWatchdogPollMs).unref?.();
@@ -2759,6 +2821,37 @@ export class SpawnService {
       if (epoch === null || this.pty.getEpoch(sessionId) !== epoch) return;
       const screen = await this.pty.readScreen(sessionId);
       if (screen === null) return;
+      // Claude Code's first-run flow (theme picker, login method) means the
+      // config home has no login: nothing tm8 can press gets past it, and the
+      // lane would otherwise sit there forever. Checked before the trust
+      // decision, which stands down for good once the composer banner is up —
+      // so text a working agent prints can never trip this.
+      if (readClaudeOnboarding(screen)) {
+        onboardingReads += 1;
+        if (onboardingReads < ONBOARDING_FAIL_READS) continue;
+        this.loud(
+          `session ${sessionId} booted into Claude Code's first-run onboarding (theme picker / login) — ` +
+            `the agent's config home has no login. Failing it as ${AGENT_ONBOARDING_SCREEN}.`,
+        );
+        await this.killThenRecordEnding(this.sessionAuth.get(sessionId), sessionId, {
+          onNotFound: 'skip',
+          status: 'failed',
+          error: () =>
+            `${AGENT_ONBOARDING_SCREEN}: Claude Code started its first-run onboarding, so the login it ` +
+            `runs on is missing — log in as the server's OS user (claude auth login) or launch on a ` +
+            `member or space credential`,
+          endedKind: 'unknown',
+          endedReason: "Stopped: the agent has no login and was waiting at Claude Code's first-run screen.",
+        });
+        return;
+      }
+      onboardingReads = 0;
+      // Past the banner the trust question is settled; only onboarding, drawn
+      // a frame later under the same banner, is still worth a look.
+      if (bootedAt !== null) {
+        if (Date.now() - bootedAt >= Math.min(ONBOARDING_GRACE_MS, this.trustWatchdogMs)) return;
+        continue;
+      }
       const action = decideTrustWatchdog({
         screen,
         elapsedMs: Date.now() - start,
@@ -2793,6 +2886,10 @@ export class SpawnService {
           });
           return;
         case 'stop':
+          if (action.reason === 'booted') {
+            bootedAt = Date.now();
+            continue;
+          }
           if (action.reason === 'opted_out') {
             this.loud(
               `session ${sessionId} is waiting at Claude Code's workspace-trust prompt and ` +
@@ -2817,6 +2914,35 @@ export class SpawnService {
           return;
       }
     }
+  }
+
+  /**
+   * Resolves true once Claude Code's first-run onboarding has been on screen
+   * for ONBOARDING_FAIL_READS consecutive reads; false when the PTY goes away,
+   * the watch window passes, or `stop()` is called. Never rejects.
+   */
+  private detectClaudeOnboarding(sessionId: string): { seen: Promise<boolean>; stop: () => void } {
+    let stopped = false;
+    const stop = (): void => { stopped = true; };
+    if (typeof (this.pty as Partial<PtyHostService>).readScreen !== 'function' || this.trustWatchdogMs <= 0) {
+      return { seen: Promise.resolve(false), stop };
+    }
+    const seen = (async (): Promise<boolean> => {
+      const start = Date.now();
+      let reads = 0;
+      while (!stopped && Date.now() - start < this.trustWatchdogMs) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, this.trustWatchdogPollMs).unref?.();
+        });
+        if (stopped) return false;
+        const screen = await this.pty.readScreen(sessionId);
+        if (screen === null) return false;
+        reads = readClaudeOnboarding(screen) ? reads + 1 : 0;
+        if (reads >= ONBOARDING_FAIL_READS) return true;
+      }
+      return false;
+    })().catch(() => false);
+    return { seen, stop };
   }
 
   private async waitForFirstPromptSettlement(

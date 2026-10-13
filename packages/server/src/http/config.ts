@@ -474,11 +474,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new ConfigError(`TM8_PORT must be a valid port number, got ${JSON.stringify(env.TM8_PORT)}`);
   }
 
-  // S1. The refusal, not a warning.
+  // S1. The refusal, not a warning. Token auth (S8) exists now, so the reason
+  // is no longer "not implemented": the node binds loopback and a reverse proxy
+  // that terminates TLS is the one supported way in from another machine. A
+  // bare 0.0.0.0 would hand every client on the network a plaintext password
+  // form, and in `single` mode a forwarded-header-free path to the auto-owner.
   if (!isLoopback(host)) {
     throw new ConfigError(
-      `refusing to bind ${host}:${port} — non-loopback binding requires token auth (10-SECURITY S1/S8), ` +
-        `which is not implemented yet. Unset TM8_BIND to bind 127.0.0.1.`,
+      `refusing to bind ${host}:${port} — tm8 always binds loopback. To reach this node from another ` +
+        `machine, keep TM8_BIND unset (127.0.0.1) and put a TLS reverse proxy in front of it with ` +
+        `TM8_NODE_MODE=multi and TM8_PUBLIC_ORIGIN=https://<your-host> — see docs/ops/OPERATOR-GUIDE.md.`,
     );
   }
 
@@ -570,6 +575,38 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     .map((value) => parseBareOrigin(value, 'TM8_ALLOWED_ORIGINS', env).origin);
 
   const preview = resolvePreview(env, host, port, extraAllowedHostnames, publicOrigin, allowedOrigins);
+
+  // The public origin is the name this node is reached by, so it is allowed by
+  // default — Host and Origin both. Before this, an operator who set
+  // TM8_PUBLIC_ORIGIN (the claim link) also had to repeat its hostname in
+  // TM8_ALLOWED_HOSTNAMES, or every proxied browser got a 403 naming neither.
+  // Derived AFTER resolvePreview so its boot refusals keep naming the variable
+  // the operator actually wrote. The origin joins TM8_ALLOWED_ORIGINS only when
+  // that list is in use: a non-empty list switches the Origin check to exact
+  // matching, and switching it on here would refuse the loopback origins.
+  if (publicOrigin) {
+    const publicHost = new URL(publicOrigin).hostname.toLowerCase();
+    if (!isLoopback(publicHost) && !extraAllowedHostnames.includes(publicHost)) {
+      extraAllowedHostnames.push(publicHost);
+    }
+    if (allowedOrigins.length > 0 && !allowedOrigins.includes(publicOrigin)) {
+      allowedOrigins.push(publicOrigin);
+    }
+  }
+  // An exact-origin list must not lock out the node's OWN loopback origin. With
+  // only the public https origin listed, a browser on the box at
+  // http://127.0.0.1:<port> — the address install.sh, the claim banner and an
+  // ssh tunnel all hand out — had every API call refused and saw a blank page.
+  // The Host allowlist already admits the loopback names, so this widens
+  // nothing a loopback browser could not already reach. A loopback name the
+  // second-origin preview owns stays out (security.ts partitions it).
+  if (allowedOrigins.length > 0) {
+    for (const name of ['127.0.0.1', 'localhost', '[::1]']) {
+      if (preview && !preview.sameOrigin && preview.host === name) continue;
+      const own = `http://${name}:${port}`;
+      if (!allowedOrigins.includes(own)) allowedOrigins.push(own);
+    }
+  }
 
   const dataDir = resolveServerDataDir(env);
   const clipboardDir = resolveClipboardDir(env, dataDir);

@@ -260,6 +260,18 @@ export async function bootstrap(opts: BootstrapOptions = {}): Promise<Bootstrapp
     const folders = await writeNodePolicy(config.databaseUrl, gatePosture(config));
     console.log(`  project folders: ${folders === 'shared' ? 'shared across spaces (loopback-only node)' : 'one space per folder'}`);
   }
+  // Say who the loopback socket trusts. An ssh -L tunnel lands on 127.0.0.1
+  // with no forwarding header, so on a single node it IS the owner — the one
+  // fact an operator letting a second machine in must not have to infer.
+  if ((config.nodeMode ?? 'single') === 'multi') {
+    console.log('  node mode: multi — no loopback auto-owner; every caller signs in');
+  } else if (config.disableAutoOwner !== true) {
+    console.log(
+      `  node mode: single — anything reaching ${config.host}:${config.port} directly (an ssh -L tunnel ` +
+        'included) is the owner. To let another machine in: TM8_NODE_MODE=multi behind a TLS proxy, ' +
+        'see docs/ops/OPERATOR-GUIDE.md',
+    );
+  }
   const dataDir = config.dataDir ?? resolveServerDataDir();
   const fileMaxSizeBytes = config.fileMaxSizeBytes ?? FILE_MAX_SIZE_BYTES_DEFAULT;
   const owner = db ? createLoopbackOwnerResolver(db) : undefined;
