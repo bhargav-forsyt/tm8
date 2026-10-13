@@ -26,7 +26,14 @@ import { serializeMemoryEntry } from './skill-index.js';
 import { serializeLaunchIndex } from './context-index.js';
 import { renderStoryContext } from './story-context.js';
 import { renderDesignContext } from './design-context.js';
-import { acceptanceCriteriaOf, attachmentManifest, coordinatorKindOf } from './templates.js';
+import {
+  acceptanceCriteriaOf,
+  attachmentManifest,
+  COORDINATION_INSTRUCTION_CHAT,
+  coordinatorKindOf,
+  linkedManifest,
+} from './templates.js';
+import { contextIndexNames } from './context-index.js';
 import { workerRoutineV2Rule } from './worker-routine.js';
 import type { AgentMode, PromptEnvelope, PromptManifest, PromptRuntime } from './index.js';
 
@@ -182,6 +189,16 @@ export function roleLayerV2(mode: AgentMode): string {
  * The coordinated modifier's text, with the coordinator's real session id in
  * the command: an agent copies a working command, never a placeholder.
  */
+/**
+ * The coordinated line when the coordinator is a CHAT (176): v1's sentence,
+ * with the chat's id in place of the placeholder. It REPLACES the session line
+ * rather than following it, because that line's "send to the task and to it"
+ * contradicts the chat rule of never sending the completion to the task.
+ */
+export function chatCoordinationLineV2(coordinatorSessionId: string): string {
+  return COORDINATION_INSTRUCTION_CHAT.replace(/<coordinator-session-id>/g, coordinatorSessionId);
+}
+
 export function coordinationLineV2(coordinatorSessionId: string): string {
   return (
     'A coordinator is waiting on you. Send every report and your closing message to ' +
@@ -412,7 +429,7 @@ export function composePromptV2(
   if (coordinatorSessionId && (mode === 'coordinated-worker' || mode === 'coordinated-coordinator')) {
     layers.push(
       `<coordination coordinator_session="${escapeAttr(coordinatorSessionId)}" kind="${coordinatorKind}">` +
-        `${coordinationLineV2(esc(coordinatorSessionId))}</coordination>`,
+        `${(coordinatorKind === 'chat' ? chatCoordinationLineV2 : coordinationLineV2)(esc(coordinatorSessionId))}</coordination>`,
     );
   }
   s.push(...layers);
@@ -472,6 +489,16 @@ export function composePromptV2(
     if (files.length > 0) {
       const manifest = attachmentManifest(files);
       t.push(...manifest.control, manifest.names);
+    }
+    // Links picked at launch (the attach palette's references), per task, under
+    // the same caps as v1 and with the same declared "omitted" surplus. Titles
+    // the context index already names are not repeated.
+    const namedInIndex = contextIndexNames(manifest.contextIndex);
+    for (const task of tasks) {
+      if (Math.max(task.linkedTotal ?? 0, task.linked?.length ?? 0) === 0) continue;
+      const linked = linkedManifest(task.linked ?? [], task.linkedTotal ?? 0, namedInIndex, task.id);
+      t.push(...linked.control);
+      if (linked.names !== '') t.push(linked.names);
     }
   } else {
     t.push(`<note>${esc(facts.noTaskNote)}</note>`);

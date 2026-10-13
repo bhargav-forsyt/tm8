@@ -686,14 +686,15 @@ describe('launch card v3: files ride in <attachments>, and <linked> follows the 
   });
 
   it('<linked> follows the picks: an unticked link leaves it; a ticked one keeps its id, named once (in the index)', () => {
-    const { manifest } = compose(picked, { on: true });
-    const prompt = storedV1(manifest);
+    const { manifest, prompt } = compose(picked, { on: true });
     expect(manifest.contextIndex!.groups.find((g) => g.name === 'references')!.entries.map((e) => e.id)).toEqual(['doc-1']);
     expect(prompt.task).toContain('<entity id="doc-1" kind="doc" link="relates_to" />');
     expect(prompt.task).not.toContain('Doc one');
     expect(prompt.task).not.toContain('doc-2');
     // What no other section carries stays: the teammate's own link.
     expect(prompt.task).toContain('<entity id="persona" kind="team_member" link="relates_to" />');
+    // A stored v1 manifest renders the same picks.
+    expect(storedV1(manifest).task).toContain('<entity id="doc-1" kind="doc" link="relates_to" />');
   });
 
   it('a file is in exactly one section, and a fitted link is named once', () => {
@@ -718,6 +719,8 @@ describe('launch card v3: files ride in <attachments>, and <linked> follows the 
       references: many.map((l) => ({ entityId: l.entityId, kind: 'doc', title: l.title, via: 'linked' as const, link: 'relates_to' })),
     }), { on: true });
     const v1 = storedV1(manifest);
+    // v2 renders the same <linked> identity line and name for a dropped link.
+    expect(prompt.task).toContain('<linked task="task-1"');
     const fitted = new Set(manifest.contextIndex!.groups.find((g) => g.name === 'references')!.entries.map((e) => e.id));
     const dropped = manifest.context!.dropped!.filter((d) => d.group === 'references' && d.level === 'entry').map((d) => d.entityId);
     expect(dropped.length).toBeGreaterThan(0);
@@ -730,7 +733,13 @@ describe('launch card v3: files ride in <attachments>, and <linked> follows the 
     expect(v1.task).toContain(named(gone));
     const kept = [...fitted][0]!;
     expect(v1.task).not.toContain(named(kept));
-    // v2 never names a dropped link in the turn: the references group says how many and how to list them.
+    {
+      const turn = prompt.task;
+      expect(turn).toContain(`<entity id="${gone}" kind="doc" link="relates_to" />`);
+      expect(turn).toContain(named(gone));
+      expect(turn).not.toContain(named(kept));
+    }
+    // The references group also says how many it left out and how to list them.
     expect(prompt.system).toContain('fetch="tm8 entity context');
   });
 
@@ -739,6 +748,7 @@ describe('launch card v3: files ride in <attachments>, and <linked> follows the 
     expect(prompt.task.match(/<file entity_id="file-own-1"/g)).toHaveLength(1);
     expect(prompt.task).toContain('<file entity_id="file-own-2"');
     expect(storedV1(manifest).task).toContain('<entity id="doc-1" kind="doc" link="relates_to" />');
+    expect(prompt.task.match(/<entity id="doc-1" kind="doc" link="relates_to" \/>/g)).toHaveLength(1);
   });
 });
 

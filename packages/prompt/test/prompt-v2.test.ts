@@ -386,10 +386,45 @@ describe('v2 coordinated modes (Q10)', () => {
     expect(chat.system).toContain(`<coordination coordinator_session="${COORD}" kind="chat">`);
   });
 
+  it('tells a chat-spawned worker its answer must be durable, with v1\'s sentence in place of the session line', () => {
+    const chat = composePrompt({ ...coordinated, coordinator: { sessionId: COORD, kind: 'chat' } }, runtime);
+    expect(chat.system).toContain('A CHAT spawned you and is waiting on a durable answer.');
+    expect(chat.system).toContain(`\`tm8 message send --to ${COORD} "<body>"\``);
+    expect(chat.system).toContain('Never send that completion report to the assignment or task anchor');
+    // The session line ("to the task and to it in one send") would contradict it.
+    expect(chat.system).not.toContain('A coordinator is waiting on you.');
+    const session = composePrompt(coordinated, runtime);
+    expect(session.system).toContain('A coordinator is waiting on you.');
+    expect(session.system).not.toContain('A CHAT spawned you');
+  });
+
   it('throws without a coordinator id, as v1 does', () => {
     expect(() => composePrompt({ ...coordinated, coordinator: null }, runtime)).toThrow(/coordinator session id/);
     expect(() => composePrompt({ ...coordinated, mode: 'coordinated-coordinator', coordinator: null }, runtime))
       .toThrow(/coordinator session id/);
+  });
+});
+
+describe('v2 linked references (the attach palette, task.linked)', () => {
+  const link = (i: number) => ({ entityId: `doc-${i}`, kind: 'doc', link: 'relates_to', title: `Doc ${i}` });
+  const withLinks = (linked: ReturnType<typeof link>[], linkedTotal: number): PromptManifest =>
+    ({ ...base, tasks: [{ ...base.tasks![0]!, linked, linkedTotal }] });
+
+  it('renders the task\'s links with the v1 caps, and declares the "N more" total', () => {
+    const linked = Array.from({ length: 20 }, (_, i) => link(i));
+    const { task } = composePrompt(withLinks(linked, 30), { ...runtime, taskContext: { taskId: TASK, dto } });
+    expect(task).toContain(`<linked task="${TASK}" count="30" omitted="14" fetch_with="tm8 entity context &lt;entity-id&gt;">`);
+    expect(task).toContain('<entity id="doc-0" kind="doc" link="relates_to" />');
+    expect(task).toContain('<entity id="doc-15" kind="doc" link="relates_to" />');
+    expect(task).not.toContain('doc-16');
+    expect(task).toContain('<untrusted_data type="linked-names"');
+    // After the snapshot, inside the task turn.
+    expect(task.indexOf('<linked ')).toBeGreaterThan(task.indexOf('type="entity-context"'));
+    expect(task.indexOf('<linked ')).toBeLessThan(task.indexOf('</tm8_task_prompt>'));
+  });
+
+  it('renders nothing for a task without links', () => {
+    expect(composePrompt(base, runtime).task).not.toContain('<linked');
   });
 });
 

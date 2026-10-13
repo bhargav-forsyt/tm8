@@ -37,6 +37,7 @@ import { renderDesignContext, type PromptDesignContext } from './design-context.
 import { composeKernel } from './kernel.js';
 import {
   acceptanceCriteriaOf,
+  COORDINATION_INSTRUCTION_CHAT,
   coordinatorBootstrapControl,
   coordinatorKindOf,
   dispatcherBootstrapControl,
@@ -462,23 +463,6 @@ export const COORDINATION_INSTRUCTION =
   'Send it with `tm8 message send --to <coordinator-session-id> "<body>"`, using the ' +
   'exact `coordinator_session_id` above, the moment you complete or block. Never send ' +
   'that completion report to the assignment or task anchor, and do not simply go idle.';
-
-/**
- * The same instruction when the coordinator is a CHAT (176).
- *
- * Written as its own constant rather than a suffix because the first sentence
- * of the original is now false in this case — the thing waiting is not a
- * coordinator session, and a worker told to look for one will not find it. The
- * COMMAND is deliberately identical: a chat is an anchor like any other, and
- * suggesting otherwise would invent a second protocol that does not exist.
- */
-export const COORDINATION_INSTRUCTION_CHAT =
-  'A CHAT spawned you and is waiting on a durable answer. Its id above is a chat ' +
-  'entity, not a work session, and `tm8 message send --to <coordinator-session-id> ' +
-  '"<body>"` reaches it exactly as it reaches a session: the message lands in the ' +
-  'chat transcript, runs the chat\'s next turn, and the human reading that chat sees ' +
-  'it. Send it the moment you complete or block. Never send that completion report ' +
-  'to the assignment or task anchor, and do not simply go idle.';
 
 /** The §14 instruction for a coordinator of the given kind. */
 export function coordinationInstructionFor(kind: CoordinatorKind): string {
