@@ -149,14 +149,17 @@ it('creates all four starters through the CLI and runs them from agent sessions'
   for (const call of apiCalls) { expect(call.authorization).toMatch(/^Bearer tm8s_/); expect(call.authorization).not.toBe(`Bearer ${agentToken}`); }
   const [row] = await node.database.query<{ api_scope: string; revoked_at: unknown }>('select api_scope,revoked_at from public.auth_sessions where work_session_id=$1', [id]); expect(row!.api_scope).toBe('read'); expect(row!.revoked_at).toBeTruthy();
 });
-it('runs the three no-access starters via the human UI API, retaining shells; refuses human digest', async () => {
+it('runs all four starters via the human UI API, retaining shells; digest gets a human read token', async () => {
   const gh = tools.get('gh-pr-status')!;
   const bound = await request('POST', `/v2/tools/${gh.id}/secrets/bind`, { expectedVersion: gh.version, clientMutationId: cmid(), inputName: 'github_token', value: secretValue }); expect(bound.status, JSON.stringify(bound.error)).toBe(200);
   const refreshed = await request<ToolView>('GET', '/v2/tools/' + gh.id); tools.set('gh-pr-status', refreshed.data!);
   const runs = [await launch(tools.get('url-check')!, { urls: stubUrl + '/ok' }), await launch(refreshed.data!, { repo: 'owner/repo' }), await launch(tools.get('slack-notify')!, { text: 'Human run' }, false, { slack_webhook_url: stubUrl + '/slack' })];
   for (const run of runs) { expect(run.exitCode).toBe(0); expect(run.keepOpen).toBe(true); expect(node.production.execution!.pty.hasSession(run.id)).toBe(true); }
   await Promise.all(runs.map(run => closeShell(run.id)));
-  const refused = await request('POST', `/v2/tools/${tools.get('space-digest')!.id}/run`, { clientMutationId: cmid(), inputs: {}, keepOpen: true }); expect(refused.status).toBe(403); expect(refused.error!.message).toContain('invoking agent');
+  const digest = await launch(tools.get('space-digest')!, { since: 0, format: 'markdown' }); expect(digest.exitCode, digest.outputTail).toBe(0); expect(digest.outputTail).toContain('# Space digest');
+  const [token] = await node.database.query<{ kind: string; api_scope: string; acting_as_team_member_id: string | null; space_id: string; revoked_at: unknown }>('select kind,api_scope,acting_as_team_member_id,space_id,revoked_at from public.auth_sessions where work_session_id=$1', [digest.id]);
+  expect(token).toMatchObject({ kind: 'cli', api_scope: 'read', acting_as_team_member_id: null, space_id: spaceId }); expect(token!.revoked_at).toBeTruthy();
+  await closeShell(digest.id);
 });
 it('updates, configures and unbinds secrets with route-only ids through the CLI', async () => {
   const gh = tools.get('gh-pr-status')!;

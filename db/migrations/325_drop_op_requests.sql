@@ -1,5 +1,5 @@
 -- =============================================================================
--- 323 — REMOVE the `op_request` kind entirely (task 01a1357d, owner ruling on
+-- 325 — REMOVE the `op_request` kind entirely (task 01a1357d, owner ruling on
 -- task 01a12c59, 2026-10-13: "remove the op_request ... nuke it entirely").
 --
 -- 280 (L5) added it: an agent filed a typed request for a human-only op, and a

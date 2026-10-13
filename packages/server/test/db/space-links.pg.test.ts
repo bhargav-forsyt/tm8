@@ -47,7 +47,7 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 180_000 });
 // set_space_credential_visibility, 239 + W10b's six, 255) + 6 non-credential
 // + 2 W4 session management (249) + 8 spaceLinks writes (6 + 278's revoke and
 // restore) + 7 servers (W8) = 51; + 3 space password (268) and + 2 path-grant
-// writes (282) = 56. (L5's decision helper left with migration 323.)
+// writes (282) = 56. (L5's decision helper left with migration 325.)
 // A caller not on this list fails; a listed caller
 // that stops calling the gate fails. Changing this list is a review event.
 // ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ describe('W6 pin — the STRICT gate\'s full caller set (lead ruling 02:08Z; fol
     expect(labels.filter((l) => l === SPACE_PASSWORD)).toHaveLength(3);
     expect(labels.filter((l) => l === SERVERS)).toHaveLength(5); // -2 W9c (301): store/open_server_gate_token refuse and call no gate
     expect(labels.filter((l) => l === PATH_GRANTS)).toHaveLength(2);
-    expect(labels).toHaveLength(68); // -1 the request decision helper (323) +3 tool secret writers (318) +1 set_chat_credentials (314) +1 mark_entity_seen (313)
+    expect(labels).toHaveLength(68); // -1 the request decision helper (325) +3 tool secret writers (318) +1 set_chat_credentials (314) +1 mark_entity_seen (313)
   });
 
   it('the matcher sees a quoted, mixed-case call and an execute format(...) that names the gate', async () => {

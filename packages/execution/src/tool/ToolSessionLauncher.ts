@@ -56,6 +56,24 @@ async function recordExitWithRetry(record: ToolLaunchRequest['recordExit'], exit
   }
 }
 
+/**
+ * `timeout --foreground -k <k> <t> cmd...` for hosts without GNU coreutils
+ * (macOS has no /usr/bin/timeout). The command stays in the PTY's foreground
+ * group; the watchdog ignores the tty's INT/QUIT, which reach the command too.
+ * Exit codes match timeout's: the command's own, 124 after TERM, 137 after KILL.
+ */
+export const PERL_TIMEOUT = `my ($t, $k, @c) = @ARGV;
+my $p = fork; defined $p or exit 125;
+unless ($p) { exec { $c[0] } @c; exit 127; }
+$SIG{INT} = $SIG{QUIT} = 'IGNORE';
+my $timed = 0;
+$SIG{ALRM} = sub { if ($timed++) { kill 'KILL', $p } else { kill 'TERM', $p; alarm $k } };
+alarm $t;
+waitpid $p, 0;
+my $s = $?;
+exit(($s & 127) == 9 ? 137 : 124) if $timed;
+exit(($s & 127) ? 128 + ($s & 127) : $s >> 8);`;
+
 /** A server-generated wrapper; no input value is interpolated into shell code. */
 export function toolWrapper(request: Pick<ToolLaunchRequest, 'definition' | 'toolVersion' | 'cwd' | 'keepOpen'>,
   runDir: string, shell: string, secretKeys: readonly string[]): string {
@@ -72,7 +90,11 @@ printf '%s\\n' ${shellQuote(`── ${label} · inputs: ${names} ──`)}
 start=$(/bin/date +%s)
 cd -- ${shellQuote(request.cwd)}
 if [ "$?" -eq 0 ]; then
-  /usr/bin/timeout --foreground -k 10 ${request.definition.timeoutSeconds} ${interpreter}
+  if [ -x /usr/bin/timeout ]; then
+    /usr/bin/timeout --foreground -k 10 ${request.definition.timeoutSeconds} ${interpreter}
+  else
+    /usr/bin/perl -e ${shellQuote(PERL_TIMEOUT)} ${request.definition.timeoutSeconds} 10 ${interpreter}
+  fi
   code=$?
 else
   code=125
