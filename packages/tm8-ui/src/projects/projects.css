@@ -64,6 +64,10 @@
 }
 
 .project-onboard__form > label:not(.project-onboard__trust),
+/* The same stacked label inside the source fieldset (Add project sheet and
+   Create Space): the name, the GitHub URL and the new folder's name. */
+.project-onboard__section > label:not(.project-onboard__trust):not(.project-onboard__radio):not(.project-onboard__button),
+.project-onboard__field > label:not(.project-onboard__radio):not(.project-onboard__button),
 .project-onboard__field,
 .project-browser__new {
   display: flex;
