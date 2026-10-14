@@ -52,6 +52,7 @@ import { useShellFrame } from './context';
 import { railCountLabel, railKindLabel, isRailCountKind, useRailCounts, type RailCounts } from './useRailCounts';
 import { RAIL_COLLAPSE_ART, RAIL_EXPAND_ART } from './railArt';
 import { RailAttention, RailUser } from './RailStatus';
+import { useCustomKindsVersion } from '../../data/custom-kinds';
 
 /** How long a press must be held to toggle a pin, and how far it may drift. */
 export const HOLD_MS = 500;
@@ -65,6 +66,7 @@ function prefersReducedMotion(): boolean {
 }
 
 export function WorkspaceRail() {
+  const customKinds = useCustomKindsVersion();
   const { gate, spaceId, currentKind: browserKind, currentSource, selectKind, selectSource } = useShellFrame();
   const railStore = useMemo(() => getRailStore(spaceId), [spaceId]);
   const pins = useStore(railStore, (s) => s.pins);
@@ -74,7 +76,7 @@ export function WorkspaceRail() {
   const counts: RailCounts = useRailCounts();
   const topRef = useRef<HTMLDivElement>(null);
 
-  const pinned = useMemo(() => workspacePinnedKinds(pins), [pins]);
+  const pinned = useMemo(() => workspacePinnedKinds(pins), [pins, customKinds]);
   const more = useScrollHints(topRef, pinned.length > 0);
   /* EVERY KIND (Subhang, 2026-10-10): the whole Home population, no Work
      filter. A pinned kind MOVES to Pinned and leaves the list; an unpinned
@@ -86,7 +88,7 @@ export function WorkspaceRail() {
       return i < 0 ? lifted.length : i;
     };
     return rest.map((config, i) => ({ config, i })).sort((a, b) => rank(a.config.kind) - rank(b.config.kind) || a.i - b.i).map((x) => x.config);
-  }, [pinned, lifted]);
+  }, [pinned, lifted, customKinds]);
   const railRef = useRef<HTMLElement>(null);
 
   /* A KIND PRESS FROM ANY MODE OPENS HOME WITH THAT KIND'S LIST (Craft

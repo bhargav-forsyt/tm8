@@ -77,6 +77,7 @@ import { crossSpaceRefsSurfaceFor } from './crossSpaceRefsSurface';
 import { attachmentsFor } from '../files/port';
 import { useMembershipSurface } from './membershipSurface';
 import { representedThreadMessageCount } from './message-thread';
+import { useCustomKindsVersion } from '../data/custom-kinds';
 
 /** The session collection is selected by capability, never by panel position
     or a kind literal. The empty centre must keep showing terminals after both
@@ -134,6 +135,7 @@ export interface WorkspaceViewProps {
 }
 
 export function WorkspaceView(props: WorkspaceViewProps) {
+  useCustomKindsVersion();
   const attentionApi = useAttentionOptional();
   const { data, nav, leftKind, rightKind, menuCollapsed, reasons } = props;
   /** In-flight read marks, so a double click on a row is one write. */

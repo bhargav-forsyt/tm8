@@ -92,6 +92,7 @@ import { useNewContainerSheet } from './useNewContainerSheet';
 import { useAddProjectSheet } from './useAddProjectSheet';
 import { AddProjectSheet, addProjectPort } from '../projects';
 import type { GateData } from './useGateData';
+import { useCustomKindsVersion } from '../data/custom-kinds';
 
 /* ---------------------------------------------------------------------------
    COLUMN A AND THE RAIL (task 01a00ac2)
@@ -279,6 +280,7 @@ function homeViewOf(root: HomeRoot): NavView {
 }
 
 export function HomeView(props: HomeViewProps) {
+  useCustomKindsVersion();
   const attentionApi = useAttentionOptional();
   const { data, reasons, onNotice } = props;
 
