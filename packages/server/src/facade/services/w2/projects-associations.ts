@@ -965,7 +965,16 @@ export class W2ProjectsAssociationsService {
     const envelope = commandEnvelope(ctx);
     const claims = claimsFor(owner, ctx, envelope);
     if (!isGateAdmin(claims)) {
-      throw new CollabError('forbidden', 'gate-admin access is required to register a folder');
+      // The refusal names the space admin's door (spaces.projects.create with
+      // workingDir, or spaces.projects.clone): an agent session acting for a
+      // space admin has no gate claim and lands here first (task 01a13ba3).
+      throw new CollabError(
+        'forbidden',
+        'gate-admin access is required to register a folder; a space admin adds a project to their own space with ' +
+          'tm8 project add --working-dir <path> --name <name> or tm8 project clone <github-repo> --dest <path> ' +
+          '(inside TM8_PROJECT_ROOTS, untrusted until a node admin trusts it)',
+        { details: { reason: 'gate_admin_required', spaceAdminPath: 'spaces.projects.create' } },
+      );
     }
     let workingDir: string;
     if (input.ensureWorkingDir) {

@@ -30,7 +30,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bindPath, type OperationName } from '@tm8/contract';
@@ -129,7 +129,11 @@ beforeAll(async () => {
     }
   }
   server = await startRealServer('g06-project-file');
-  scratch = mkdtempSync(join(tmpdir(), 'tm8-g06-'));
+  // Canonical, and the project folders exist up front: since task 01a13574
+  // projects.create checks existence and roots even without
+  // --ensure-working-dir, and stores the realpath (macOS tmpdir is a symlink).
+  scratch = realpathSync(mkdtempSync(join(tmpdir(), 'tm8-g06-')));
+  for (const dir of ['workspace', 'guard']) mkdirSync(join(scratch, dir));
 
   const created = await raw<{ space: { id: string }; defaultChannelId: string }>(
     'spaces.create',

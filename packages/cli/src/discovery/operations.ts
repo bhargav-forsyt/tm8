@@ -2368,7 +2368,10 @@ const ROWS: Record<OperationName, Row> = {
     sum: 'Register a folder inside TM8_PROJECT_ROOTS, optionally granting it to one Space',
     authz: 'server',
     input: 'bound',
-    notes: ['gate (node) admins only; a folder is granted to at most one Space'],
+    notes: [
+      'gate (node) admins only; a folder is granted to at most one Space',
+      'a Space admin (or an agent session acting for one) uses tm8 project add --working-dir or tm8 project clone instead',
+    ],
   },
   'projects.unlink': {
     cmd: ['project', 'unlink'],

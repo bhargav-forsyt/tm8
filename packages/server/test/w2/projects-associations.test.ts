@@ -764,6 +764,35 @@ describe('adding a project to a space inside the allowed roots (task 01a13574)',
     }
   });
 
+  // Task 01a13ba3: an Orchestrator session on tm8.sh, acting for a space admin,
+  // ran `project folder-add` (gate.folders.create) and was refused with no way
+  // forward. A pinned session never holds node admin (claimsFor, K6), even
+  // when its human does, so the gate stays shut; the space admin's door is open.
+  it('an agent session pinned to the space adds a project untrusted, and the gate refusal names that door', async () => {
+    const tree = await scratchTree();
+    const AGENT = {
+      kind: 'bearer', identityId: 'g06-space-admin', nodeAdmin: true, sessionSpaceId: IDS.space, authKind: 'agent',
+    } as RequestContext['identity'];
+    try {
+      const db = spaceDb(true);
+      await withRoots(tree.root, async () => {
+        await handler(registered(db), 'spaces.projects.create')(
+          addRequest({ name: 'by-agent', workingDir: join(tree.root, 'existing') }, AGENT),
+        );
+        await expect(handler(registered(db), 'gate.folders.create')(request('gate.folders.create', {
+          body: { name: 'by-agent', workingDir: join(tree.root, 'existing') }, identity: AGENT,
+        }))).rejects.toMatchObject({
+          code: 'forbidden',
+          message: expect.stringContaining('tm8 project add --working-dir <path> --name <name>'),
+        });
+      });
+      const call = db.calls.find((c) => c.fn === 'register_space_folder')!;
+      expect(call.args).toEqual([IDS.space, 'by-agent', join(tree.root, 'existing'), null, null, 'untrusted', null]);
+    } finally {
+      await tree.cleanup();
+    }
+  });
+
   it('refuses a space admin outside the roots, and creates nothing there', async () => {
     const tree = await scratchTree();
     try {
