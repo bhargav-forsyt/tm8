@@ -8827,7 +8827,7 @@ export interface StylePrefsSetResult {
 
 export interface SpaceStyleDefaultView {
   spaceId: SpaceId;
-  /** `builtin:atelier-light` when no row exists (revision 0). */
+  /** `builtin:chatgpt-light` (`BUILTIN_STYLE_IDS.light`) when no row exists (revision 0). */
   defaultStyle: string;
   setBy: EntityId | null;
   revision: number;
