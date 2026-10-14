@@ -2760,7 +2760,7 @@ export function ChatHomeScreen({
                     chooseMode(slashMode);
                     setDraft('');
                   }}
-                  rows={2}
+                  rows={1}
                   {...rich.areaProps}
                 />
                 <TriggerPopover

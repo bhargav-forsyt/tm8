@@ -49,6 +49,7 @@ import './session-graph/session-graph.css';
  * graph's actual drawing can be judged.
  *
  * Usage: /chat-dev.html   (add ?theme=dark for the dark ground,
+ *                          ?style=atelier for the retired Atelier tokens,
  *                          ?stage=fleet or ?stage=graph for a stage,
  *                          ?empty=1 for a space with no conversations,
  *                          ?shell=mobile for the phone arrangement,
@@ -95,6 +96,9 @@ function lengthen(count: number): ChatThreadDetail {
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   const theme = params.get('theme') === 'dark' ? 'dark' : undefined;
+  /* `?style=atelier` paints the retired Atelier tokens; anything else paints
+     the default ChatGPT pair straight from its tokens.css blocks. */
+  const style = params.get('style') === 'atelier' ? undefined : 'chatgpt';
   /* `?empty=1` gives a space with NO conversations — the new-thread state,
      where the composer is centred and a stage has to un-centre it. jsdom can
      assert the attribute; only a browser can show the layout. */
@@ -142,6 +146,7 @@ function Harness() {
     <div
       className="cv2-root"
       data-theme={theme}
+      data-style={style}
       /* The phone rules key on this attribute and nothing else — `MobileShell`
          does not have to be in the tree for them to apply, which is what makes
          a one-surface harness a fair reading of the phone's chat. */
