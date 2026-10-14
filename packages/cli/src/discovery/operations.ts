@@ -4348,7 +4348,8 @@ export const CATALOG_DIGEST =
   // Re-measured for the MW W4 merge of origin/main (+execution.gitCheckouts|gitCheckoutDiff) — RECOMPUTED, not adjusted.
   // Re-measured for Craft L3 (+workspace.crafts.list|get|command) — RECOMPUTED, not adjusted.
   // Re-measured after the request noun's removal (-5 rows) — RECOMPUTED, not adjusted.
-  'sha256:0c35a578ddc525df374434587736ad05da97965d77409b5118b976eb09e1e9b4';
+  // Re-measured for Projects add (+spaces.projects.clone|cloneJobs.get, 01a13574) on main 638f6069e — RECOMPUTED, not adjusted.
+  'sha256:cd50377655dfb62a17167c1983cb44d13a7c54a535e1207fee1afc8bf416da29';
 
 export const GRAMMAR_VERSION = '2';
 
