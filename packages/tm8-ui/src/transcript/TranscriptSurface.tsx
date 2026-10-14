@@ -658,7 +658,7 @@ function TranscriptComposer({
         <textarea
           ref={area}
           value={text}
-          rows={2}
+          rows={1}
           placeholder="Type to the session’s terminal…"
           /* THE THREE CHEAP HOMES for the disclosure the paragraph used to
              carry. The accessible name is what a screen reader announces on
