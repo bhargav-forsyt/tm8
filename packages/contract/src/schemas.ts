@@ -46,7 +46,6 @@ import { STYLE_MAX_VAR_LENGTH } from './style-registry.js';
 import { STYLE_MAX_CSS_BYTES } from './style-css.js';
 import { BUILTIN_STYLES } from './builtins/index.js';
 import { FormQuestionRowSchema, FormSectionRowSchema, FormSettingsSchema, FormStatusSchema } from './forms.js';
-import { OpRequestEntityFactsSchema } from './op-requests.js';
 import { EntityContextStorySchema, StoryContentSchema, StoryStateSchema } from './story.js';
 import { CraftContentSchema, CraftStateSchema, EntityContextCraftPageSchema } from './craft.js';
 import { TaskProgressSchema } from './progress.js';
@@ -237,9 +236,6 @@ export const CoreEntityKindSchema = z.enum([
   // is its door. `server` is registered with it and has no door in W6.
   'space_link',
   'server',
-  // Op requests (280, L5). Not in `CreatableEntityKind`: `opRequests.create`
-  // is its door.
-  'op_request',
   // Stories (283): roots by `contains`, the rest follows. Creatable through
   // the generic envelope.
   'story', 'mcp_server', 'tool',
@@ -755,8 +751,6 @@ export const EntityStateSchema: z.ZodType<EntityState> = z.lazy(() => z.union([
   // answers for them. `server` has no detail row until W8.
   z.object({ kind: z.literal('space_link') }).strict(),
   z.object({ kind: z.literal('server') }).strict(),
-  // 280 (L5) — an op request's op and status; the rest is `opRequests.get`'s.
-  OpRequestEntityFactsSchema,
   // 284 — a space style carries its FULL doc on state (spec §4.3: the push
   // event is how viewers repaint, so it must not need a fetch).
   z.object({
@@ -1191,9 +1185,6 @@ export const EntityContentSchema: z.ZodType<EntityContent> = z.lazy(() => z.unio
   // 250 (W6) — a space link's content is `spaceLinks.list`'s answer.
   z.object({ kind: z.literal('space_link') }).strict(),
   z.object({ kind: z.literal('server') }).strict(),
-  // 280 (L5) — the same facts as its state; params, input and outcome are
-  // `opRequests.get`'s answer.
-  OpRequestEntityFactsSchema,
   // 284 — a space style's content: its state plus the description.
   z.object({
     kind: z.literal('style'),
@@ -2910,7 +2901,7 @@ export const CreatableEntityKindSchema = acceptingKindAliases(z.union([
   // `form` likewise: `forms.create` writes its questions and requesting
   // session in the same call (FORMS-DESIGN §6). `credential` is human-only
   // and born under a SQL guard from credentials.space.* (W10a).
-  CoreEntityKindSchema.exclude(['message', 'member', 'work_session', 'project', 'interaction_profile', 'worktree', 'artifact', 'chat', 'container', 'form', 'credential', 'space_link', 'server', 'op_request', 'style']),
+  CoreEntityKindSchema.exclude(['message', 'member', 'work_session', 'project', 'interaction_profile', 'worktree', 'artifact', 'chat', 'container', 'form', 'credential', 'space_link', 'server', 'style']),
   CustomEntityKindSchema,
 ]));
 

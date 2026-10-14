@@ -1,6 +1,6 @@
 import { TOOL_CONTENT_SQL, TOOL_RUN_SQL, toolBindingActorIds, projectToolView, projectToolRun } from '../tools/projection.js';
 import { McpServerDefinitionSchema } from '@tm8/contract';
-import type { EffectiveSkills, OpRequestStatus, TaskLiveSession } from '@tm8/contract';
+import type { EffectiveSkills, TaskLiveSession } from '@tm8/contract';
 /**
  * Entity hydration for the event stream — the `EntityProjector` seam.
  *
@@ -372,9 +372,6 @@ interface SummaryRow {
   cred_owner_account_id: string | null;
   srv_name: string | null;
   srv_base_url: string | null;
-  opr_title: string | null;
-  opr_op: string | null;
-  opr_status: string | null;
   memory_statement: string | null;
   memory_mechanism: string | null;
   memory_subject_scope: string | null;
@@ -598,10 +595,6 @@ select
   -- row draws. servers holds no secret. MIRRORS entity-read.ts.
   srv.name             as srv_name,
   srv.base_url         as srv_base_url,
-  -- Op requests (L5, 280): title, op, status. MIRRORS entity-read.ts.
-  opr.title            as opr_title,
-  opr.op               as opr_op,
-  opr.status           as opr_status,
   wt.project_id      as wt_project_id,
   wt.branch          as wt_branch,
   wt.base_ref        as wt_base_ref,
@@ -679,7 +672,6 @@ left join public.styles stl           on e.kind = 'style' and stl.entity_id = e.
 left join public.forms frm            on frm.entity_id = e.id
 left join public.space_credentials scr on e.kind = 'credential' and scr.id = e.id
 left join public.servers srv          on e.kind = 'server' and srv.entity_id = e.id
-left join public.op_requests opr      on e.kind = 'op_request' and opr.entity_id = e.id
 left join public.containers ctr      on ctr.entity_id = e.id
 -- No container_runtime_state join, and no runtime_ref / host_spec columns.
 -- Usage is CONTENT, not summary state, and heartbeats deliberately emit no
@@ -1214,9 +1206,6 @@ export class PgEntityProjector implements EntityProjector {
       case 'space_link':
         // Never the target's name (P8) — MIRRORS entity-read.ts titleOf.
         return 'Space link';
-      case 'op_request':
-        // Its own title — MIRRORS entity-read.ts titleOf.
-        return r.opr_title ?? 'Op request';
       default:
         // Custom c:* kinds: no title column exists. `fields.title` is the
         // convention when the kind schema declares one.
@@ -1644,9 +1633,6 @@ export class PgEntityProjector implements EntityProjector {
         // link. MIRRORS entity-read.ts stateOf. Without this arm the default
         // below raises EntityKindDriftError for every space_link event.
         return { kind: r.kind };
-      case 'op_request':
-        // 280 (L5): which op, and where it is. MIRRORS entity-read.ts stateOf.
-        return { kind: 'op_request', op: r.opr_op ?? '', status: (r.opr_status ?? 'pending') as OpRequestStatus };
       case 'style':
         // 284: the full document, so a push repaints every viewer on the style
         // with no fetch (spec §4.3). MIRRORS entity-read.ts stateOf.

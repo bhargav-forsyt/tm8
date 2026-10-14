@@ -1,5 +1,5 @@
 -- =============================================================================
--- 324 — SPACE ADMINS ADD PROJECTS (task 01a13574-960a, audit doc 01a13570).
+-- 326 — SPACE ADMINS ADD PROJECTS (task 01a13574-960a, audit doc 01a13570).
 --
 -- Before this, every path that put a folder on the node behind a space's
 -- project was the gate's: `register_folder`, `grant_folder` and

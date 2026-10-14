@@ -431,7 +431,7 @@ async function projectSpaceList(cmd: CommandContext): Promise<ExitCode> {
  * folder granted to that Space (W11). A folder that belongs to another Space
  * is refused.
  *
- * `project add --working-dir <path> --name <name>` (migration 324) registers a
+ * `project add --working-dir <path> --name <name>` (migration 326) registers a
  * folder on the node instead, granting it to the Space in the same step. A
  * Space admin who is not a node admin may do so only inside an explicitly
  * configured TM8_PROJECT_ROOTS.

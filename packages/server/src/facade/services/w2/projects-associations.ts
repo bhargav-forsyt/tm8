@@ -918,7 +918,7 @@ export class W2ProjectsAssociationsService {
   };
 
   /**
-   * `spaces.projects.create` with `workingDir` (migration 324): a space admin
+   * `spaces.projects.create` with `workingDir` (migration 326): a space admin
    * registers a folder inside their allowed roots, grants it to the space and
    * names the project, in one step.
    *

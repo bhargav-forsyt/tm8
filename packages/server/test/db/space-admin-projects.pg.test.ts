@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 
-import { createW1ScratchDatabase, migrationFiles, type W1ScratchDatabase } from './w1-pg.js';
+import { createW1ScratchDatabase, MIGRATIONS_DIR, migrationFiles, REPO_ROOT, type W1ScratchDatabase } from './w1-pg.js';
 
 /**
- * 324 — `register_space_folder`: a space admin's door to a project folder
+ * 326 — `register_space_folder`: a space admin's door to a project folder
  * (task 01a13574). Space A: H is its owner (not a node admin), M a plain
  * member, N an admin who is also a node (gate) admin. Folder G is registered
  * on the node and granted nowhere. Every refusal is paired with a positive by
@@ -108,7 +110,7 @@ afterAll(async () => {
   await database?.destroy();
 }, 180_000);
 
-describe.sequential('324 register_space_folder', () => {
+describe.sequential('326 register_space_folder', () => {
   it('a space admin who is not a node admin registers, grants and names a new folder — untrusted, with remote and branch', async () => {
     const result = await register(ids.identityH, false, {
       path: pathFor('new'), name: 'Hello', repoUrl: 'https://github.com/octo/hello.git', branch: 'main',
@@ -160,5 +162,26 @@ describe.sequential('324 register_space_folder', () => {
                        where p.proname = 'register_space_folder' and a.grantee = 0) pub`,
     ));
     expect(grants.rows[0]).toEqual({ app: true, pub: false });
+  });
+});
+
+describe.sequential('326: the rollback', () => {
+  const up = readFileSync(join(MIGRATIONS_DIR, '326_space_admin_projects.sql'), 'utf8');
+  const down = readFileSync(join(REPO_ROOT, 'db', 'rollback', '326_space_admin_projects.down.sql'), 'utf8');
+  const run = (script: string): Promise<void> => database.transaction(async (client) => { await client.query(script); });
+  const shape = () => asOwner(async (c) => (await c.query<{ fn: boolean; col: boolean }>(
+    `select exists (select 1 from pg_proc where proname = 'register_space_folder') fn,
+            exists (select 1 from information_schema.columns
+                     where table_schema = 'public' and table_name = 'projects' and column_name = 'default_branch') col`,
+  )).rows[0]);
+
+  it('down drops the door and default_branch but keeps what a space admin registered; up restores both', async () => {
+    await run(down);
+    expect(await shape()).toEqual({ fn: false, col: false });
+    const kept = await asOwner((c) => c.query(`select 1 from public.projects where working_dir = $1`, [pathFor('new')]));
+    expect(kept.rowCount).toBe(1);
+    await run(up);
+    expect(await shape()).toEqual({ fn: true, col: true });
+    expect(await sqlstate(() => register(ids.identityH, false, { path: pathFor('after-up') }))).toBe('ok');
   });
 });

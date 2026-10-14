@@ -76,7 +76,6 @@ import { CONTAINER_COMMANDS } from './container.js';
 import { FORM_COMMANDS } from './form.js';
 import { LINK_COMMANDS } from './link.js';
 import { DISCOVERABILITY_COMMANDS } from './discoverability.js';
-import { REQUEST_COMMANDS } from './request.js';
 import { STYLE_COMMANDS } from './style.js';
 import { CREDENTIAL_COMMANDS } from './credential.js';
 
@@ -162,7 +161,6 @@ export const COMMANDS: CommandModule[] = [
   ...FORM_COMMANDS,
   ...LINK_COMMANDS,
   ...DISCOVERABILITY_COMMANDS,
-  ...REQUEST_COMMANDS,
   ...STYLE_COMMANDS,
   ...CREDENTIAL_COMMANDS,
 ];

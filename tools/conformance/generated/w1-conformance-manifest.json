@@ -1,5 +1,6 @@
 {
   "schemaVersion": "tm8.conformance.w1.v1",
+<<<<<<< HEAD
   "catalogDigest": "sha256:381097f7e4f0019af9129662a71adf09a873c6dfa0d9ba68e968b0ee32f3869e",
   "catalog": {
     "total": 377,
@@ -11,18 +12,40 @@
     "methods": {
       "GET": 125,
       "POST": 184,
+=======
+  "catalogDigest": "sha256:0c35a578ddc525df374434587736ad05da97965d77409b5118b976eb09e1e9b4",
+  "catalog": {
+    "total": 370,
+    "v1": 368,
+    "reserved": 2,
+    "http": 368,
+    "ws": 1,
+    "registerableV1Http": 366,
+    "methods": {
+      "GET": 122,
+      "POST": 180,
+>>>>>>> origin/main
       "PATCH": 21,
       "DELETE": 23,
       "PUT": 22,
       "WS": 2
     },
     "kinds": {
+<<<<<<< HEAD
       "read": 131,
       "command": 244,
       "stream": 2
     },
     "uniqueNames": 377,
     "uniqueBindings": 376
+=======
+      "read": 128,
+      "command": 240,
+      "stream": 2
+    },
+    "uniqueNames": 370,
+    "uniqueBindings": 369
+>>>>>>> origin/main
   },
   "reservedOperations": [
     "search.query",
@@ -771,41 +794,6 @@
         "operation": "entities.refs.remove",
         "method": "DELETE",
         "path": "/v2/entities/:id/refs/:refId",
-        "status": "registered",
-        "source": "server-router"
-      },
-      {
-        "operation": "opRequests.list",
-        "method": "GET",
-        "path": "/v2/spaces/:spaceId/op-requests",
-        "status": "registered",
-        "source": "server-router"
-      },
-      {
-        "operation": "opRequests.create",
-        "method": "POST",
-        "path": "/v2/spaces/:spaceId/op-requests",
-        "status": "registered",
-        "source": "server-router"
-      },
-      {
-        "operation": "opRequests.get",
-        "method": "GET",
-        "path": "/v2/op-requests/:requestId",
-        "status": "registered",
-        "source": "server-router"
-      },
-      {
-        "operation": "opRequests.approve",
-        "method": "POST",
-        "path": "/v2/op-requests/:requestId/approve",
-        "status": "registered",
-        "source": "server-router"
-      },
-      {
-        "operation": "opRequests.deny",
-        "method": "POST",
-        "path": "/v2/op-requests/:requestId/deny",
         "status": "registered",
         "source": "server-router"
       },
@@ -3043,7 +3031,11 @@
         "projects.unlink"
       ]
     },
+<<<<<<< HEAD
     "unimplementedV1Http": 345
+=======
+    "unimplementedV1Http": 338
+>>>>>>> origin/main
   },
   "schemas": {
     "additive": {
@@ -4580,91 +4572,6 @@
           "entities",
           "refs",
           "remove"
-        ],
-        "inputSchemaRef": null,
-        "resultSchemaRef": null,
-        "invocationSyntax": null,
-        "actionDiscoverable": true,
-        "reason": null,
-        "publicComposite": null
-      },
-      {
-        "operation": "opRequests.list",
-        "noun": "request",
-        "exposure": "public",
-        "helpRef": "tm8://help/operation/opRequests.list",
-        "intentTags": [
-          "op",
-          "requests",
-          "list"
-        ],
-        "inputSchemaRef": null,
-        "resultSchemaRef": null,
-        "invocationSyntax": null,
-        "actionDiscoverable": true,
-        "reason": null,
-        "publicComposite": null
-      },
-      {
-        "operation": "opRequests.create",
-        "noun": "request",
-        "exposure": "public",
-        "helpRef": "tm8://help/operation/opRequests.create",
-        "intentTags": [
-          "op",
-          "requests",
-          "create"
-        ],
-        "inputSchemaRef": null,
-        "resultSchemaRef": null,
-        "invocationSyntax": null,
-        "actionDiscoverable": true,
-        "reason": null,
-        "publicComposite": null
-      },
-      {
-        "operation": "opRequests.get",
-        "noun": "request",
-        "exposure": "public",
-        "helpRef": "tm8://help/operation/opRequests.get",
-        "intentTags": [
-          "op",
-          "requests",
-          "get"
-        ],
-        "inputSchemaRef": null,
-        "resultSchemaRef": null,
-        "invocationSyntax": null,
-        "actionDiscoverable": true,
-        "reason": null,
-        "publicComposite": null
-      },
-      {
-        "operation": "opRequests.approve",
-        "noun": "request",
-        "exposure": "public",
-        "helpRef": "tm8://help/operation/opRequests.approve",
-        "intentTags": [
-          "op",
-          "requests",
-          "approve"
-        ],
-        "inputSchemaRef": null,
-        "resultSchemaRef": null,
-        "invocationSyntax": null,
-        "actionDiscoverable": true,
-        "reason": null,
-        "publicComposite": null
-      },
-      {
-        "operation": "opRequests.deny",
-        "noun": "request",
-        "exposure": "public",
-        "helpRef": "tm8://help/operation/opRequests.deny",
-        "intentTags": [
-          "op",
-          "requests",
-          "deny"
         ],
         "inputSchemaRef": null,
         "resultSchemaRef": null,
@@ -10540,45 +10447,6 @@
         },
         "migration": {
           "strategy": "space-link-kinds"
-        }
-      },
-      "op_request": {
-        "kind": "op_request",
-        "entityKind": true,
-        "route": {
-          "strategy": "collection",
-          "slug": "op-requests"
-        },
-        "collection": {
-          "strategy": "typed-collection"
-        },
-        "projection": {
-          "strategy": "universal-typed"
-        },
-        "capabilities": {
-          "profile": "op-request-lifecycle",
-          "genericCreate": false,
-          "genericPatch": false,
-          "genericMove": false,
-          "genericHierarchy": false,
-          "genericDeleteRestore": false,
-          "genericPoints": false,
-          "messages": true,
-          "reactions": false,
-          "connections": false,
-          "lifecycleOperations": [
-            "opRequests.list",
-            "opRequests.get",
-            "opRequests.create",
-            "opRequests.approve",
-            "opRequests.deny"
-          ]
-        },
-        "menu": {
-          "strategy": "not-addressable"
-        },
-        "migration": {
-          "strategy": "op-request-detail"
         }
       },
       "tool": {

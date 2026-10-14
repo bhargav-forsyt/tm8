@@ -328,7 +328,7 @@ export class W2ProjectFolderUploadService {
       project = await this.resolveProject(ctx, gateClaims, state, materialized.workingDir);
       await this.deps.db.rpc(gateClaims, 'grant_folder', [state.spaceId, project.id, null]);
     } else {
-      // A space admin's door (migration 324): register + grant + name, and an
+      // A space admin's door (migration 326): register + grant + name, and an
       // untrusted folder unless a node admin says otherwise.
       project = await this.registerForSpaceAdmin(claims, state, materialized.workingDir);
     }

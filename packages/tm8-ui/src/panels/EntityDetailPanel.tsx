@@ -16,7 +16,7 @@ import type {
   TrackingPrMergeResult,
   WorkSessionInteractionProfileProjection,
 } from '@tm8/contract';
-import type { OpRequestsOps, SessionLiveness } from '../data/seam';
+import type { SessionLiveness } from '../data/seam';
 import { useMobileSurface } from '../mobile';
 import type { ContentSurface } from '../routes';
 import type { ActionContext, ActionRef, ContentBlockRef, KindConfig, StateOption } from '../domain';
@@ -487,7 +487,7 @@ export interface EntityDetailPanelProps {
    * only the task half gets a reader panel whose `Edit` is
    * disabled-with-reason, which is the honest report of what it wired.
    */
-  commands?: ({ tools?: import("../tools/port").ToolPort; skills?: SkillPort; managed?: ManagedPort; opRequests?: OpRequestsOps } & AuthoringCommands & Partial<DocCommands> & Partial<ArtifactPreviewCommands> & Partial<HeaderCommands>) | null;
+  commands?: ({ tools?: import("../tools/port").ToolPort; skills?: SkillPort; managed?: ManagedPort } & AuthoringCommands & Partial<DocCommands> & Partial<ArtifactPreviewCommands> & Partial<HeaderCommands>) | null;
   /** A save landed. The durable event carries only a summary, so the host
       must receive this result to reconcile heavy detail fields such as the
       task description into its detail cache. */
