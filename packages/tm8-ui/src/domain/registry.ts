@@ -22,7 +22,7 @@
  * stays as the fallback a string-only surface can print. No component changed
  * shape to receive it, exactly as promised.
  */
-import { normalizeKindAlias, type CoreEntityKind, type EntityKind } from '@tm8/contract';
+import { normalizeKindAlias, type CoreEntityKind, type CustomEntityKind, type EntityKind } from '@tm8/contract';
 import type {
   ActionRef,
   AssignControl,
@@ -2862,24 +2862,91 @@ const FALLBACK = BY_KIND.get(CUSTOM_KIND_FALLBACK) as KindConfig;
  */
 export function getKind(kind: string): KindConfig {
   // `design` (renamed `craft` by 322) still resolves until KIND_ALIAS_UNTIL.
-  return BY_KIND.get(normalizeKindAlias(kind)) ?? FALLBACK;
+  return BY_KIND.get(normalizeKindAlias(kind)) ?? CUSTOM_BY_KIND.get(kind) ?? FALLBACK;
+}
+
+// -- the space's custom kinds, learned at runtime ----------------------------
+//
+// The rows above are static, so a `c:*` kind the space created (`tm8 kind
+// create`) used to exist only behind a hand-typed `k/c-{name}` address: every
+// list that enumerates kinds — the Home rail, the Work rail, the kind
+// switchers, the mobile drawer — reads `collectionKinds()`, which never named
+// one. `registerCustomKinds` adds one row per custom kind, each the `c:*`
+// fallback row with its own kind, label and slug, and bumps a version that
+// `useCustomKindsVersion` re-renders on.
+let CUSTOM: readonly KindConfig[] = [];
+let CUSTOM_BY_KIND: ReadonlyMap<string, KindConfig> = new Map();
+let customVersion = 0;
+const customListeners = new Set<() => void>();
+
+/** `c:incident_report` → `Incident report`. */
+function customKindLabel(kind: string): string {
+  const words = kind.slice(2).replace(/[_-]+/g, ' ').trim();
+  return words.length === 0 ? FALLBACK.label : words[0]!.toUpperCase() + words.slice(1);
+}
+
+/** One registry row for a custom kind: the fallback archetype, addressed. */
+function customKindRow(kind: CustomEntityKind, icon: string | null | undefined): KindConfig {
+  const label = customKindLabel(kind);
+  return {
+    ...FALLBACK,
+    kind,
+    label,
+    labelPlural: label.endsWith('s') ? label : `${label}s`,
+    ...(icon ? { icon, chip: { ...FALLBACK.chip, glyph: icon } } : {}),
+    slug: `c-${kind.slice(2)}`,
+  };
+}
+
+/**
+ * Replace the registered custom kinds with this space's. Takes the
+ * `entityKinds.list` rows as-is: core rows and anything not `c:{name}` are
+ * ignored, so the caller never filters. A no-op when nothing changed.
+ */
+export function registerCustomKinds(defs: readonly { kind: string; icon?: string | null }[]): void {
+  const rows = defs
+    .filter((def): def is { kind: CustomEntityKind; icon?: string | null } =>
+      def.kind.startsWith('c:') && def.kind.length > 2 && def.kind !== CUSTOM_KIND_FALLBACK && !BY_KIND.has(def.kind))
+    .map((def) => customKindRow(def.kind, def.icon))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const same = rows.length === CUSTOM.length
+    && rows.every((row, i) => row.kind === CUSTOM[i]!.kind && row.icon === CUSTOM[i]!.icon);
+  if (same) return;
+  CUSTOM = rows;
+  CUSTOM_BY_KIND = new Map(rows.map((row) => [row.kind, row]));
+  customVersion += 1;
+  for (const listener of customListeners) listener();
+}
+
+/** Subscribe to custom-kind registration (for `useSyncExternalStore`). */
+export function subscribeCustomKinds(listener: () => void): () => void {
+  customListeners.add(listener);
+  return () => customListeners.delete(listener);
+}
+
+/** Bumps on every registration that changed the set. */
+export function customKindsVersion(): number {
+  return customVersion;
 }
 
 /** Every row, fallback included. */
 export function allKinds(): KindConfig[] {
-  return [...KINDS];
+  return [...KINDS, ...CUSTOM];
 }
 
 /** Rows the list-panel kind selector offers: `strategy === 'collection'`. */
 export function collectionKinds(): KindConfig[] {
-  return KINDS.filter((row) => row.strategy === 'collection' && row.kind !== CUSTOM_KIND_FALLBACK);
+  return [
+    ...KINDS.filter((row) => row.strategy === 'collection' && row.kind !== CUSTOM_KIND_FALLBACK),
+    ...CUSTOM,
+  ];
 }
 
 /** Slug → row, for the `k/{slug}` route and `origin` validation. */
 export function kindBySlug(slug: string): KindConfig | null {
   // An old `k/designs` link lands on crafts until KIND_ALIAS_UNTIL.
   const wanted = slug === 'designs' ? 'crafts' : slug;
-  return KINDS.find((row) => row.slug === wanted) ?? null;
+  return KINDS.find((row) => row.slug === wanted) ?? CUSTOM.find((row) => row.slug === wanted) ?? null;
 }
 
 /** The `c:{name}` → `c-{name}` slug for a custom kind, collision-checked by callers. */

@@ -1588,7 +1588,8 @@ export interface SettingsHome {
 export interface KindConfig {
   /** This kind supports direct MCP catalog equipment editing. Server permissions still decide access. */
   mcpEquipment?: boolean;
-  kind: CoreEntityKind | CustomKindFallback;
+  /** A core kind, the `c:*` fallback row, or a registered custom kind (`registerCustomKinds`). */
+  kind: CoreEntityKind | CustomKindFallback | CustomEntityKind;
   label: string;
   labelPlural: string;
   /**

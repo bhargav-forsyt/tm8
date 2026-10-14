@@ -115,6 +115,7 @@ import { REFERENCE_KINDS } from '../domain/launch-selection';
 import { useLaunchPort } from './useLaunchPort';
 import { useTheme } from '../theme/useTheme';
 import { useStyleSync } from '../theme/useStyleSync';
+import { useCustomKindsSync } from '../data/custom-kinds';
 import { StylePicker } from '../theme/StylePicker';
 import { StyleEditorHost } from '../theme/StyleEditorHost';
 import { AccountMenu, AuthFlow, authTokenFor, noteServerOrigin, signOut, useAuthActions } from '../auth';
@@ -599,6 +600,9 @@ export function GateApp(props: GateAppProps = {}) {
   /* Styles (spec v8 §1.6, §3.6): the viewer's prefs, the space default and the
      live style events. One owner for both shells, like the theme above. */
   useStyleSync(data.seam, data.spaceId || null, data.viewerActor?.id ?? null);
+  /* The space's `c:*` kinds join the registry, so the Home and Work rails,
+     the kind switchers and the drawer list them (registerCustomKinds). */
+  useCustomKindsSync(data.seam, data.spaceId);
   /**
    * THE MENU RAIL STARTS COLLAPSED, and remembers what the viewer did next.
    *

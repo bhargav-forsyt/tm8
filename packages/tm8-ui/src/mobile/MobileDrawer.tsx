@@ -84,6 +84,7 @@ import { VIEW_PRESENTATION, type MenuTarget } from '../shell';
 import type { EntityKind, MenuViewRef } from '@tm8/contract';
 import { useMobileSurface } from './surface';
 import './mobile-drawer.css';
+import { useCustomKindsVersion } from '../data/custom-kinds';
 
 /** What the shell hands each row so it can say whether it is unread. */
 export type CountsFor = (kind: string) => { total: number; unseen: number } | undefined;
@@ -245,6 +246,7 @@ export interface MobileDrawerProps {
 }
 
 export function MobileDrawer(props: MobileDrawerProps) {
+  useCustomKindsVersion();
   const { sheetHost } = useMobileSurface();
   const { activeTarget, navigateTo, onDismiss } = props;
 

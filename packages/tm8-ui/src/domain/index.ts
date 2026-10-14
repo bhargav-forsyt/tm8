@@ -76,11 +76,14 @@ export {
   RESERVED_SLUGS,
   allKinds,
   collectionKinds,
+  customKindsVersion,
   getKind,
   isReservedSlug,
   kindBySlug,
   kindOfSlug,
+  registerCustomKinds,
   slugOfKind,
+  subscribeCustomKinds,
 } from './registry';
 
 export { KIND_ART, SURFACE_ART, SURFACE_LABEL, VIEW_ART, type KindArt } from './kind-art';
