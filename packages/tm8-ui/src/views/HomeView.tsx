@@ -89,6 +89,8 @@ import { usePanelPrimaries } from './usePanelPrimaries';
 import { useRowLifecycle } from './useRowLifecycle';
 import { useSessionStart } from './useSessionStart';
 import { useNewContainerSheet } from './useNewContainerSheet';
+import { useAddProjectSheet } from './useAddProjectSheet';
+import { AddProjectSheet, addProjectPort } from '../projects';
 import type { GateData } from './useGateData';
 
 /* ---------------------------------------------------------------------------
@@ -456,12 +458,20 @@ export function HomeView(props: HomeViewProps) {
   /* MEMOISED because `birthFor` below depends on it: `composeListActions`
      builds a fresh object every call, and an always-changing dependency turns
      that `useCallback` into a no-op. */
+  /* THE PROJECTS LIST'S BIRTH SHEET (task 01a13574): Add project — a
+     folder, an upload or a GitHub clone. See `useAddProjectSheet`. */
+  const addProject = useAddProjectSheet({
+    spaceId: data.spaceId,
+    available: Boolean(data.seam.spaceProjects),
+  });
+  const addProjectSeamPort = useMemo(() => addProjectPort(data.seam, data.spaceId), [data.seam, data.spaceId]);
   const listActions = useMemo(
     () =>
       composeListActions([
         { onAction: sessionStart.onAction, wiredActions: sessionStart.wiredActions },
         { onAction: chatAbout.onAction, wiredActions: chatAbout.wiredActions },
         { onAction: newContainer.onAction, wiredActions: newContainer.wiredActions },
+        { onAction: addProject.onAction, wiredActions: addProject.wiredActions },
       ]),
     [
       sessionStart.onAction,
@@ -470,6 +480,8 @@ export function HomeView(props: HomeViewProps) {
       chatAbout.wiredActions,
       newContainer.onAction,
       newContainer.wiredActions,
+      addProject.onAction,
+      addProject.wiredActions,
     ],
   );
   const rowLifecycle = useRowLifecycle({
@@ -1058,6 +1070,27 @@ export function HomeView(props: HomeViewProps) {
                 }))}
               onCreate={newContainer.create}
               onCancel={newContainer.close}
+            />
+          </div>
+        </div>
+      )}
+      {addProject.isOpen && addProjectSeamPort && (
+        <div className="pn-ncs-scrim" role="presentation" onClick={addProject.close}>
+          <div
+            className="pn-ncs-host"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add project"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <AddProjectSheet
+              nodeLabel="this node"
+              port={addProjectSeamPort}
+              onAdded={(id) => {
+                addProject.close();
+                if (id) ((id: EntityId) => navStore.getState().openCenter(id))(id as EntityId);
+              }}
+              onCancel={addProject.close}
             />
           </div>
         </div>

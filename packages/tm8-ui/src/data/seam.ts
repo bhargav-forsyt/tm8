@@ -242,6 +242,10 @@ import type {
   ProjectFileHistory,
   ProjectCreateInput,
   ProjectDirectoryListing,
+  ProjectCloneInput,
+  ProjectCloneJob,
+  SpaceProject,
+  SpaceProjectCreateInput,
   ProjectFileAttachInput,
   ProjectFileReadResult,
   ProjectFileListing,
@@ -789,6 +793,19 @@ export interface Seam {
      * is how onboarding finds that project to link instead of dead-ending.
      */
     listProjects(): Promise<ProjectResource[]>;
+  };
+  /**
+   * Adding a project to an EXISTING space from its Projects list (task
+   * 01a13574): browse the folders this viewer may use for that space, register
+   * one (`spaces.projects.create` with `workingDir`), or clone a GitHub
+   * repository as a job (`spaces.projects.clone` + `cloneJobs.get`). Optional
+   * for the same reason `projectSetup` is: a fixture seam has no node disk.
+   */
+  spaceProjects?: {
+    directories(spaceId: SpaceId, path?: string): Promise<ProjectDirectoryListing>;
+    add(spaceId: SpaceId, input: SpaceProjectCreateInput): Promise<SpaceProject>;
+    clone(spaceId: SpaceId, input: ProjectCloneInput): Promise<ProjectCloneJob>;
+    cloneJob(spaceId: SpaceId, jobId: string): Promise<ProjectCloneJob>;
   };
   /**
    * Reading an ALREADY-CONNECTED project folder, for the same reason

@@ -2325,13 +2325,34 @@ const ROWS: Record<OperationName, Row> = {
   },
   'spaces.projects.create': {
     cmd: ['project', 'add'],
-    syn: 'tm8 project add <folder-id> [--name <name>] [--space <space-id>] [--mutation-id <id>]',
-    sum: "Name the Space's project on a folder granted to that Space",
+    syn: 'tm8 project add <folder-id> [--name <name>] | --working-dir <absolute-path> --name <name> [--ensure-working-dir] [--trust trusted|untrusted]  [--space <space-id>] [--mutation-id <id>]',
+    sum: "Name the Space's project on a folder granted to that Space, or register a folder on the node for it",
     authz: 'space',
     input: 'bound',
     notes: [
       'requires the Space owner/admin capability; a folder granted to another Space is refused: this folder belongs to another space',
+      '--working-dir registers and grants a folder in one step; a Space admin who is not a node admin may do so only inside an explicitly configured TM8_PROJECT_ROOTS, and only untrusted',
     ],
+  },
+  'spaces.projects.clone': {
+    cmd: ['project', 'clone'],
+    syn: 'tm8 project clone <github-repo> --dest <absolute-parent> [--dir <name>] [--name <name>] [--branch <branch>] [--trust trusted|untrusted] [--space <space-id>] [--mutation-id <id>]',
+    sum: "Clone a GitHub repository onto the node as a job and add it as one of the Space's projects",
+    authz: 'space',
+    input: 'bound',
+    notes: [
+      'answers 202 with the job at once; poll it with tm8 project clone-status <job-id>',
+      "credential order: the caller's GitHub login, then the Space's GitHub credential, then the node token where node policy allows it; the token never reaches the remote URL or a log",
+      'a Space admin who is not a node admin may clone only inside an explicitly configured TM8_PROJECT_ROOTS',
+    ],
+  },
+  'spaces.projects.cloneJobs.get': {
+    cmd: ['project', 'clone-status'],
+    syn: 'tm8 project clone-status <job-id> [--space <space-id>]',
+    sum: 'Read one clone job: queued, cloning, registering, succeeded (with the project) or failed (with why)',
+    authz: 'space',
+    input: 'none',
+    notes: ["only the job's own caller can read it; anyone else gets not_found"],
   },
   'gate.folders.list': {
     cmd: ['project', 'folders'],
@@ -2347,7 +2368,10 @@ const ROWS: Record<OperationName, Row> = {
     sum: 'Register a folder inside TM8_PROJECT_ROOTS, optionally granting it to one Space',
     authz: 'server',
     input: 'bound',
-    notes: ['gate (node) admins only; a folder is granted to at most one Space'],
+    notes: [
+      'gate (node) admins only; a folder is granted to at most one Space',
+      'a Space admin (or an agent session acting for one) uses tm8 project add --working-dir or tm8 project clone instead',
+    ],
   },
   'projects.unlink': {
     cmd: ['project', 'unlink'],
@@ -4327,7 +4351,8 @@ export const CATALOG_DIGEST =
   // Re-measured for the MW W4 merge of origin/main (+execution.gitCheckouts|gitCheckoutDiff) — RECOMPUTED, not adjusted.
   // Re-measured for Craft L3 (+workspace.crafts.list|get|command) — RECOMPUTED, not adjusted.
   // Re-measured after the request noun's removal (-5 rows) — RECOMPUTED, not adjusted.
-  'sha256:0c35a578ddc525df374434587736ad05da97965d77409b5118b976eb09e1e9b4';
+  // Re-measured for Projects add (+spaces.projects.clone|cloneJobs.get, 01a13574) on main 638f6069e — RECOMPUTED, not adjusted.
+  'sha256:cd50377655dfb62a17167c1983cb44d13a7c54a535e1207fee1afc8bf416da29';
 
 export const GRAMMAR_VERSION = '2';
 

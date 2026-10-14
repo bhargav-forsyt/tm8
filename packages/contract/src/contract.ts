@@ -5866,11 +5866,65 @@ export interface SpaceProject {
   updatedAt: string;
 }
 
-/** POST /v2/spaces/:spaceId/projects/create — a space admin names the space's project on a folder granted to it. */
+/**
+ * POST /v2/spaces/:spaceId/projects/create — a space admin names the space's
+ * project. Exactly one of:
+ *   - `folderId`: a folder already granted to the space;
+ *   - `workingDir`: a folder on the node, registered and granted in the same
+ *     step (migration 326). For a space admin who is not a node admin the path
+ *     must lie inside an explicitly configured `TM8_PROJECT_ROOTS`.
+ */
 export interface SpaceProjectCreateInput extends CommandContext {
-  folderId: ProjectId;
-  /** Defaults to the folder's name. */
+  folderId?: ProjectId;
+  workingDir?: string;
+  /** With `workingDir`: create it when it is one missing child of an allowed directory. */
+  ensureWorkingDir?: boolean;
+  /** With `workingDir`. Only a node admin may register a folder `trusted`. */
+  trust?: ProjectTrustLevel;
+  /** Defaults to the folder's name; required with `workingDir`. */
   name?: string;
+}
+
+/** POST /v2/spaces/:spaceId/projects/clone — clone a GitHub repository onto the node as a job. */
+export interface ProjectCloneInput extends CommandContext {
+  /** `https://github.com/owner/repo(.git)`, `github.com/owner/repo` or `owner/repo`. Never with credentials in it. */
+  repoUrl: string;
+  /** An existing directory inside the caller's allowed project roots. */
+  destinationParent: string;
+  /** The one new directory created beneath `destinationParent`; defaults to the repository name. */
+  directoryName?: string;
+  /** The space's project name; defaults to the repository name. */
+  name?: string;
+  /** Check out this branch instead of the remote's default. */
+  branch?: string;
+  /** Only a node admin may register the clone `trusted`. */
+  trust?: ProjectTrustLevel;
+}
+
+export type ProjectCloneJobStatus = 'queued' | 'cloning' | 'registering' | 'succeeded' | 'failed';
+
+/** Whose GitHub credential the clone used: the caller's, the space's, the node's, or none (public). */
+export type ProjectCloneCredentialSource = 'member' | 'space' | 'node' | 'none';
+
+export interface ProjectCloneJob {
+  id: string;
+  spaceId: SpaceId;
+  /** The normalized remote recorded on the project; never carries a credential. */
+  repoUrl: string;
+  directoryName: string;
+  /** Present only for a gate (node) admin, as with every folder path. */
+  workingDir?: string;
+  status: ProjectCloneJobStatus;
+  credentialSource: ProjectCloneCredentialSource | null;
+  /** The branch checked out from the remote's HEAD, once the clone has landed. */
+  defaultBranch: string | null;
+  /** The space's project, once `succeeded`. */
+  project: SpaceProject | null;
+  /** Why it `failed`; credential material is redacted before it is stored. */
+  error: { code: string; message: string } | null;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
 }
 
 export interface GateFolderGrant {

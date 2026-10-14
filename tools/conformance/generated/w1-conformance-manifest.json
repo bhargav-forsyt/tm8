@@ -1,28 +1,28 @@
 {
   "schemaVersion": "tm8.conformance.w1.v1",
-  "catalogDigest": "sha256:0c35a578ddc525df374434587736ad05da97965d77409b5118b976eb09e1e9b4",
+  "catalogDigest": "sha256:cd50377655dfb62a17167c1983cb44d13a7c54a535e1207fee1afc8bf416da29",
   "catalog": {
-    "total": 370,
-    "v1": 368,
+    "total": 372,
+    "v1": 370,
     "reserved": 2,
-    "http": 368,
+    "http": 370,
     "ws": 1,
-    "registerableV1Http": 366,
+    "registerableV1Http": 368,
     "methods": {
-      "GET": 122,
-      "POST": 180,
+      "GET": 123,
+      "POST": 181,
       "PATCH": 21,
       "DELETE": 23,
       "PUT": 22,
       "WS": 2
     },
     "kinds": {
-      "read": 128,
-      "command": 240,
+      "read": 129,
+      "command": 241,
       "stream": 2
     },
-    "uniqueNames": 370,
-    "uniqueBindings": 369
+    "uniqueNames": 372,
+    "uniqueBindings": 371
   },
   "reservedOperations": [
     "search.query",
@@ -1380,6 +1380,20 @@
         "operation": "spaces.projects.create",
         "method": "POST",
         "path": "/v2/spaces/:spaceId/projects/create",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "spaces.projects.clone",
+        "method": "POST",
+        "path": "/v2/spaces/:spaceId/projects/clone",
+        "status": "registered",
+        "source": "server-router"
+      },
+      {
+        "operation": "spaces.projects.cloneJobs.get",
+        "method": "GET",
+        "path": "/v2/spaces/:spaceId/projects/clone-jobs/:jobId",
         "status": "registered",
         "source": "server-router"
       },
@@ -2994,7 +3008,7 @@
         "projects.unlink"
       ]
     },
-    "unimplementedV1Http": 338
+    "unimplementedV1Http": 340
   },
   "schemas": {
     "additive": {
@@ -5980,6 +5994,42 @@
           "spaces",
           "projects",
           "create"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "spaces.projects.clone",
+        "noun": "space",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/spaces.projects.clone",
+        "intentTags": [
+          "spaces",
+          "projects",
+          "clone"
+        ],
+        "inputSchemaRef": null,
+        "resultSchemaRef": null,
+        "invocationSyntax": null,
+        "actionDiscoverable": true,
+        "reason": null,
+        "publicComposite": null
+      },
+      {
+        "operation": "spaces.projects.cloneJobs.get",
+        "noun": "space",
+        "exposure": "public",
+        "helpRef": "tm8://help/operation/spaces.projects.cloneJobs.get",
+        "intentTags": [
+          "spaces",
+          "projects",
+          "clone",
+          "jobs",
+          "get"
         ],
         "inputSchemaRef": null,
         "resultSchemaRef": null,

@@ -153,7 +153,7 @@ import type {
   ProjectFolderUploadEntry, ProjectFolderUploadFileGrant, ProjectFolderUploadGrant,
   ProjectFolderUploadInitInput, ProjectFolderUploadResult,
   ProjectLinkInput, ProjectResource,
-  SpaceProject, SpaceProjectCreateInput, GateFolder, GateFolderGrant, GateFolderCreateInput, GateFolderCreateResult,
+  SpaceProject, SpaceProjectCreateInput, ProjectCloneInput, ProjectCloneJob, GateFolder, GateFolderGrant, GateFolderCreateInput, GateFolderCreateResult,
   ProjectTrustLevel, ProjectUpdateInput, ProposeInteractionProfileInput,
   PullInput, PullState, ReactionInput, RemoveMessageAttachmentsInput,
   RetireInteractionProfileInput, SavedView, SavedViewInput, SendHandoffInput,
@@ -3758,8 +3758,47 @@ export const SpaceProjectSchema: z.ZodType<SpaceProject> = z.object({
 
 export const SpaceProjectCreateInputSchema: z.ZodType<SpaceProjectCreateInput> = z.object({
   ...commandContextShape,
-  folderId: ProjectIdSchema,
+  folderId: ProjectIdSchema.optional(),
+  workingDir: z.string().min(1).max(4096).optional(),
+  ensureWorkingDir: z.boolean().optional(),
+  trust: ProjectTrustLevelSchema.optional(),
   name: z.string().trim().min(1).max(200).optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.folderId === undefined) === (value.workingDir === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'name exactly one of folderId or workingDir' });
+  }
+  if (value.workingDir === undefined && (value.ensureWorkingDir !== undefined || value.trust !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'ensureWorkingDir and trust apply only with workingDir' });
+  }
+  if (value.workingDir !== undefined && value.name === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'name is required with workingDir' });
+  }
+});
+
+export const ProjectCloneInputSchema: z.ZodType<ProjectCloneInput> = z.object({
+  ...commandContextShape,
+  repoUrl: z.string().trim().min(1).max(2048),
+  destinationParent: z.string().min(1).max(4096),
+  directoryName: z.string().trim().min(1).max(255).optional(),
+  name: z.string().trim().min(1).max(200).optional(),
+  branch: z.string().trim().min(1).max(255).optional(),
+  trust: ProjectTrustLevelSchema.optional(),
+}).strict();
+
+export const ProjectCloneJobSchema: z.ZodType<ProjectCloneJob> = z.object({
+  id: z.string().uuid(),
+  spaceId: SpaceIdSchema,
+  repoUrl: z.string(),
+  directoryName: z.string(),
+  workingDir: z.string().optional(),
+  status: z.enum(['queued', 'cloning', 'registering', 'succeeded', 'failed']),
+  credentialSource: z.enum(['member', 'space', 'node', 'none']).nullable(),
+  defaultBranch: z.string().nullable(),
+  project: SpaceProjectSchema.nullable(),
+  error: z.object({ code: z.string(), message: z.string() }).strict().nullable(),
+  createdAt: IsoTimestamp,
+  updatedAt: IsoTimestamp,
+  finishedAt: IsoTimestamp.nullable(),
 }).strict();
 
 export const GateFolderGrantSchema: z.ZodType<GateFolderGrant> = z.object({

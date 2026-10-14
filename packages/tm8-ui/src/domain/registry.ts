@@ -1584,7 +1584,11 @@ const ROWS: readonly KindConfig[] = [
     chip: { glyph: '⬢', tintBy: 'none' },
     card: { fields: ['projectVersion', 'activityAt', 'createdBy'] },
     list: baseList({
+      /* NOT `quickCreate`: the node refuses a generic create for a project.
+         The birth verb is `add-project` — local folder, upload or GitHub clone
+         (task 01a13574). */
       quickCreate: false,
+      quickStart: 'add-project',
       tile: { badges: [{ source: 'projectVersion' }] },
     }),
     panel: {

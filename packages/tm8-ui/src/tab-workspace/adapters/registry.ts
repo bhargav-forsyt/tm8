@@ -10,6 +10,7 @@ import { getKind, type KindArt } from '../../domain';
 import { WORKSPACE_KINDS, type KindId } from '../runtime/types';
 import { draftBodyFor, type DraftHostProps } from './draft';
 import { FormDraftBody } from './FormDraftBody';
+import { ProjectDraftBody } from './ProjectDraftBody';
 
 export interface KindAdapter {
   kind: KindId;
@@ -30,11 +31,11 @@ export interface KindAdapter {
 
 /**
  * Kinds with no generic create that still have their own creation door,
- * hosted in a draft tab (Spec A §9): the launch sheet, the chat start and the
+ * hosted in a draft tab (Spec A §9): the launch sheet, the chat start, the
  * form builder (`forms.create`, `FormDraftBody`; a node without the op says
- * so in the draft body).
+ * so in the draft body) and the Add project sheet (`ProjectDraftBody`).
  */
-const OWN_DOOR_KINDS: ReadonlySet<KindId> = new Set(['work_session', 'chat', 'form']);
+const OWN_DOOR_KINDS: ReadonlySet<KindId> = new Set(['work_session', 'chat', 'form', 'project']);
 
 function creatabilityOf(kind: KindId, nounPlural: string): KindAdapter['creatable'] {
   if (creatableKind(kind as EntityKind) || OWN_DOOR_KINDS.has(kind)) return true;
@@ -54,7 +55,7 @@ export function getKindAdapter(kind: KindId): KindAdapter {
     icon: config.iconArt,
     body: config.panel.fullView ? 'fullView' : 'panel',
     creatable: creatabilityOf(kind, config.labelPlural),
-    draftBody: kind === 'form' ? FormDraftBody : draftBodyFor(kind),
+    draftBody: kind === 'form' ? FormDraftBody : kind === 'project' ? ProjectDraftBody : draftBodyFor(kind),
     /* The entity chat's own answer (domain registry `applyChatAbout`): every
        kind whose panel carries the `chat-about` verb — all but chat and
        message. A channel is a legal `about` subject, so it chats too. */

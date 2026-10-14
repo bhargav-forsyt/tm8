@@ -423,6 +423,12 @@ export function createRealSeam(options: RealSeamOptions): RealSeam {
       linkProject: (spaceId, input) => ops.linkProject(spaceId, input),
       listProjects: () => ops.projects(),
     },
+    spaceProjects: {
+      directories: (spaceId, path) => ops.spaceProjectDirectories(spaceId, path),
+      add: (spaceId, input) => ops.addSpaceProject(spaceId, input),
+      clone: (spaceId, input) => ops.cloneSpaceProject(spaceId, input),
+      cloneJob: (spaceId, jobId) => ops.spaceProjectCloneJob(spaceId, jobId),
+    },
     projectFiles: {
       list: (projectId, path) => ops.projectFiles(projectId, path),
       read: (projectId, path) => ops.readProjectFile(projectId, path),
