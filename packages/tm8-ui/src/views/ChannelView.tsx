@@ -24,6 +24,7 @@ import type { ContentSurface } from '../routes';
 import { conversationSurfaceFor } from './conversationSurface';
 import './channel-view.css';
 import { debugSurfaceFor } from './debugSurface';
+import { watchLiveFor } from './watchLive';
 import { sessionStatsSurfaceFor } from './sessionStatsSurface';
 import { sessionContextSurfaceFor } from './sessionContextSurface';
 import { gitSurfaceFor } from './gitSurface';
@@ -257,6 +258,7 @@ export function ChannelView({
       pinRefusal="Pinning lives in the Workspace — this channel keeps the entity beside its feed already"
       liveness={data.livenessOf(selectedId)}
       debugSurface={debugSurfaceFor(data.seam, selectedId, data.livenessOf)}
+      onWatchLive={watchLiveFor(data.seam, data.reconcileCommand, setSelectedId)}
       sessionStatsSurface={sessionStatsSurfaceFor(data.seam, selectedId)}
       sessionContextSurface={sessionContextSurfaceFor(data.seam, selectedId, data.livenessOf)}
       gitSurface={gitSurfaceFor(data.seam, selectedId, data.livenessOf)}

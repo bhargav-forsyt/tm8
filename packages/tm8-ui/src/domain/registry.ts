@@ -823,6 +823,9 @@ const ROWS: readonly KindConfig[] = [
        * the verb without the list anyway.
        */
       primaries: ['run'],
+      /* An agent testing this task live writes `live: <command>`; the panel
+         lights a blinking Watch live beside Run. */
+      liveScreen: true,
       // Git UI wave: tasks carry the git section (tracked PRs, provenance,
       // gate honesty). A registry field, so the panel never asks the kind.
       gitSection: true,

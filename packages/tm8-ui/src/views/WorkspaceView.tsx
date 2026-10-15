@@ -65,6 +65,7 @@ import { openEntityAndMarkRead } from './open-entity';
 import { conversationSurfaceFor } from './conversationSurface';
 import { channelFeedPortFromGateData } from './channel-feed-port';
 import { debugSurfaceFor } from './debugSurface';
+import { watchLiveFor } from './watchLive';
 import { sessionStatsSurfaceFor } from './sessionStatsSurface';
 import { sessionContextSurfaceFor } from './sessionContextSurface';
 import { gitSurfaceFor } from './gitSurface';
@@ -523,6 +524,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
                     }
                     liveness={data.livenessOf(id)}
                     debugSurface={debugSurfaceFor(data.seam, id, data.livenessOf)}
+                    onWatchLive={watchLiveFor(data.seam, data.reconcileCommand, openEntity)}
                     sessionStatsSurface={sessionStatsSurfaceFor(data.seam, id)}
                     sessionContextSurface={sessionContextSurfaceFor(data.seam, id, data.livenessOf)}
                     gitSurface={gitSurfaceFor(data.seam, id, data.livenessOf)}

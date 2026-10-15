@@ -29,6 +29,7 @@ import { panelSessionControlsFor, usePanelPrimaries } from '../views/usePanelPri
 import type { Seam, SessionLiveness } from '../data/seam';
 import { GraphView, type GraphFrameHosts, type GraphTimelineStep } from './GraphView';
 import { debugSurfaceFor } from '../views/debugSurface';
+import { watchLiveFor } from '../views/watchLive';
 import { sessionStatsSurfaceFor } from '../views/sessionStatsSurface';
 import { sessionContextSurfaceFor } from '../views/sessionContextSurface';
 import { gitSurfaceFor } from '../views/gitSurface';
@@ -254,6 +255,7 @@ export function GraphScreen(props: GraphScreenProps) {
       pinRefusal="Pinning lives in the Workspace — this view keeps the panel beside the graph already"
       liveness={data.livenessOf(selectedId)}
       debugSurface={debugSurfaceFor(data.seam, selectedId, data.livenessOf)}
+      onWatchLive={watchLiveFor(data.seam, data.reconcileCommand, (id) => setSelectedId(id))}
       sessionStatsSurface={sessionStatsSurfaceFor(data.seam, selectedId)}
       sessionContextSurface={sessionContextSurfaceFor(data.seam, selectedId, data.livenessOf)}
       gitSurface={gitSurfaceFor(data.seam, selectedId, data.livenessOf)}
