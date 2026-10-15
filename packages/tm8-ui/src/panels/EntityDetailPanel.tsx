@@ -64,6 +64,7 @@ import {
 import { ConnectionsTab } from './detail/tabs';
 import { CatchBoundary } from './detail/CatchBoundary';
 import { HeaderSection } from './detail/HeaderSection';
+import { LiveScreenButton, liveCommandOf } from './detail/LiveScreenButton';
 import {
   BinIcon, EntityControlStrip, RestoreIcon, RowAction, RowSharingControl, stripHasLiveControl,
   type ControlHost, type ControlSubject,
@@ -383,6 +384,12 @@ export interface EntityDetailPanelProps {
   /** Viewer-local presentation state for the work-session Content panes. */
   contentSurface?: ContentSurface | null;
   viewerMemberId?: string | null;
+  /**
+   * WATCH LIVE — open a terminal for the viewer with a task's live-test command
+   * on their clipboard (`LiveScreenButton`). Absent ⇒ no button, even on a task
+   * an agent is testing: a host that cannot open a terminal must not offer one.
+   */
+  onWatchLive?: (detail: EntityDetail, command: string) => void;
   /**
    * The CONVERSATION surface — composed by the host via `conversationSurfaceFor`
    * and mounted by two structurally different arms: the session panel's
@@ -1106,6 +1113,15 @@ export function EntityDetailPanel(props: EntityDetailPanelProps) {
     ? withPrimaries(supportedPrimaries.filter((ref) => commonRefs.includes(ref)))
     : null;
   const flowInCommonBar = flowRef !== null && commonRefs.includes(flowRef);
+  /* WATCH LIVE rides beside Run — in the embedded host's bottom bar when Run
+     moved there, else in the kind bar. */
+  const liveCommand = props.onWatchLive ? liveCommandOf(detail, config.panel.liveScreen) : null;
+  const liveButton = liveCommand && props.onWatchLive ? (
+    <LiveScreenButton command={liveCommand} onWatch={(command) => props.onWatchLive?.(detail, command)} />
+  ) : null;
+  const liveInCommonBar = Boolean(
+    embedded?.commonVerbsSlot && commonBarConfig && (commonBarConfig.panel.primaries?.length ?? 0) > 0 && !oneSurface,
+  );
 
   const flowSurface = (
           flowRef && resolveAction(flowRef).flow === 'merge-pr' && mergePr && mergeSubject ? (
@@ -1228,6 +1244,7 @@ export function EntityDetailPanel(props: EntityDetailPanelProps) {
           props={controlHost}
         />
       ) : null}
+      {liveInCommonBar ? null : liveButton}
       <ActionBar
         barRef={flowInCommonBar ? undefined : actionBarRef}
         config={barConfig}
@@ -1341,6 +1358,8 @@ export function EntityDetailPanel(props: EntityDetailPanelProps) {
   const commonBar =
     embedded?.commonVerbsSlot && commonBarConfig && (commonBarConfig.panel.primaries?.length ?? 0) > 0 && !oneSurface
       ? createPortal(
+          <>
+          {liveButton}
           <ActionBar
             barRef={flowInCommonBar ? actionBarRef : undefined}
             config={commonBarConfig}
@@ -1352,7 +1371,8 @@ export function EntityDetailPanel(props: EntityDetailPanelProps) {
             openFlow={flowRef}
             onFlow={props.launch || mergePr ? setFlowRef : undefined}
             flowSurface={flowInCommonBar ? flowSurface : null}
-          />,
+          />
+          </>,
           embedded.commonVerbsSlot,
         )
       : null;

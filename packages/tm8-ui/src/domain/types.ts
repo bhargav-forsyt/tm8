@@ -1368,6 +1368,11 @@ export interface PanelConfig {
    */
   gitSection?: boolean;
   /**
+   * WATCH LIVE — the panel offers `◉ Watch live` when the entity's description
+   * carries a `live: <command>` line (`panels/detail/LiveScreenButton.tsx`).
+   */
+  liveScreen?: boolean;
+  /**
    * THE PAGE LAYOUT of the embedded body (task 01a1163a, scope settled with
    * the owner in form 01a1164f): `'two-column'` puts the writing in a
    * wide main column and every property in a sticky rail beside it.

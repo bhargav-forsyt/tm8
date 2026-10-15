@@ -40,6 +40,7 @@ import { useChatCounts } from '../entity-chat';
 import type { RowLifecycle } from './useRowLifecycle';
 import { mergePrPortFor } from './mergePrPort';
 import { debugSurfaceFor } from './debugSurface';
+import { watchLiveFor } from './watchLive';
 import { sessionStatsSurfaceFor } from './sessionStatsSurface';
 import { sessionContextSurfaceFor } from './sessionContextSurface';
 import { gitSurfaceFor } from './gitSurface';
@@ -152,6 +153,7 @@ export function AuxEntityPanel({ host, entityId, onOpenEntity, onClose, panelHos
       pinRefusal="Pinning lives in the Workspace"
       liveness={data.livenessOf(entityId)}
       debugSurface={debugSurfaceFor(data.seam, entityId, data.livenessOf)}
+      onWatchLive={watchLiveFor(data.seam, data.reconcileCommand, onOpenEntity)}
       sessionStatsSurface={sessionStatsSurfaceFor(data.seam, entityId)}
       sessionContextSurface={sessionContextSurfaceFor(data.seam, entityId, data.livenessOf)}
       gitSurface={gitSurfaceFor(data.seam, entityId, data.livenessOf)}

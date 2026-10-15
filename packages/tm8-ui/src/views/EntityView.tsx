@@ -93,6 +93,7 @@ import { conversationSurfaceFor } from './conversationSurface';
 import { channelFeedPortFromGateData } from './channel-feed-port';
 import './entity-view.css';
 import { debugSurfaceFor } from './debugSurface';
+import { watchLiveFor } from './watchLive';
 import { sessionStatsSurfaceFor } from './sessionStatsSurface';
 import { sessionContextSurfaceFor } from './sessionContextSurface';
 import { gitSurfaceFor } from './gitSurface';
@@ -856,6 +857,7 @@ export function EntityView(props: EntityViewProps) {
         },
       }, 'discussion')}
       debugSurface={detail ? debugSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
+      onWatchLive={watchLiveFor(data.seam, data.reconcileCommand, (id) => setAux({ sort: 'entity', id }))}
       sessionStatsSurface={detail ? sessionStatsSurfaceFor(data.seam, selectedId) : undefined}
       sessionContextSurface={detail ? sessionContextSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
       gitSurface={detail ? gitSurfaceFor(data.seam, selectedId, data.livenessOf) : undefined}
