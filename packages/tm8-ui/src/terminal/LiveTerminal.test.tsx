@@ -74,6 +74,7 @@ const sizes = vi.hoisted(() => ({
 
 vi.mock('@xterm/xterm', () => ({ Terminal: xterm.FakeTerminal }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit = vi.fn(); } }));
+vi.mock('@xterm/addon-image', () => ({ ImageAddon: class {} }));
 vi.mock('./pty/ptyTransport.js', () => ({
   ptyTransport: {
     onSize: (handler: NonNullable<typeof transport.sizeHandler>) => {

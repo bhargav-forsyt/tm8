@@ -11,6 +11,7 @@ import { uploadClipboardFile } from './clipboardUpload.js';
 import { copyToClipboardOrWarn } from './domUtils.js';
 import { notifyUser } from './notifications.js';
 import { attachOsc52Clipboard } from './osc52.js';
+import { createInlineImageAddon } from './inlineImages.js';
 import { ptyTransport } from './pty/ptyTransport.js';
 import { mintPtyAttachGrant } from './pty/ptyGrant.js';
 import { describePtyAttachRefusal } from './pty/ptyAttachRefusal.js';
@@ -379,6 +380,9 @@ export const LiveTerminal = forwardRef<LiveTerminalHandle, LiveTerminalProps>(fu
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
+    // Inline images (IIP/SIXEL) so a program can stream real frames — an
+    // agent's browser screen — through the PTY. Limits in inlineImages.ts.
+    term.loadAddon(createInlineImageAddon());
     applyTerminalPadding(term, xterm.options.padding, appliedPaddingRef);
     patchXtermRenderServiceDimensions(term);
     termRef.current = term;
