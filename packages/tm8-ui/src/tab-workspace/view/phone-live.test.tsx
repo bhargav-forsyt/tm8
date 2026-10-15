@@ -1,0 +1,137 @@
+// @vitest-environment jsdom
+/**
+ * PHONE LIVE: the strip's 📱 pops a phone up, starts a terminal for the viewer
+ * inside it and types the test command — only one the viewer pressed Start on.
+ */
+import { forwardRef, useImperativeHandle } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import type { EntityDetail } from '@tm8/contract';
+import { ActionStrip, EmbeddedWorkspace, EntityChromeContext, embeddedTab, useEmbeddedRuntime, useEntityChromeValue } from '../embed';
+import type { WorkspaceGateHandles } from './context';
+import { commandForDevice } from './PhoneLive';
+
+const sent: string[] = [];
+const outputHandlers: Array<(id: string, data: string) => void> = [];
+
+vi.mock('../../terminal', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  isLiveTerminalEnabled: () => true,
+  LiveTerminal: forwardRef<{ send(data: string): void }, { sessionId: string }>(function FakeTerminal({ sessionId }, ref) {
+    useImperativeHandle(ref, () => ({ send: (data: string) => sent.push(`${sessionId}:${data}`) }));
+    return <div data-testid="fake-terminal">{sessionId}</div>;
+  }),
+}));
+vi.mock('../../terminal/pty/ptyTransport.js', () => ({
+  ptyTransport: {
+    onOutput: (handler: (id: string, data: string) => void) => {
+      outputHandlers.push(handler);
+      return () => outputHandlers.splice(outputHandlers.indexOf(handler), 1);
+    },
+  },
+}));
+
+const COMMAND = '/w/bin/jm-live iphone shopping';
+
+function task(description: string): EntityDetail {
+  return {
+    id: 'task-1',
+    kind: 'task',
+    spaceId: 'space-phone',
+    title: 'App tests',
+    category: 'active',
+    content: { description },
+    counters: { messages: 0 },
+    deletedAt: null,
+  } as unknown as EntityDetail;
+}
+
+let started = 0;
+const startTerminal = vi.fn(async () => ({ entity: { id: `term-${++started}` } }));
+const terminate = vi.fn(async () => ({}));
+
+function gateFor(d: EntityDetail) {
+  return {
+    data: {
+      detailOf: () => d,
+      messagesOf: () => undefined,
+      reconcileCommand: () => undefined,
+      seam: { commands: { startTerminal, terminate } },
+    },
+  } as unknown as WorkspaceGateHandles;
+}
+
+function Strip({ d }: { d: EntityDetail }) {
+  const runtime = useEmbeddedRuntime('viewer-phone', 'space-phone');
+  const chrome = useEntityChromeValue(null);
+  const tab = embeddedTab(runtime, d.id, d.kind);
+  return (
+    <EmbeddedWorkspace runtime={runtime} gate={gateFor(d)}>
+      <EntityChromeContext.Provider value={chrome}>
+        <ActionStrip tab={tab} />
+      </EntityChromeContext.Provider>
+    </EmbeddedWorkspace>
+  );
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  sent.length = 0;
+  outputHandlers.length = 0;
+  started = 0;
+  startTerminal.mockClear();
+  terminate.mockClear();
+});
+afterEach(cleanup);
+
+describe('commandForDevice', () => {
+  it('swaps the device word, and leaves a command without one alone', () => {
+    expect(commandForDevice(COMMAND, 'android')).toBe('/w/bin/jm-live android shopping');
+    expect(commandForDevice('/w/bin/jm-live pixel', 'iphone')).toBe('/w/bin/jm-live iphone');
+    expect(commandForDevice('npm test', 'android')).toBe('npm test');
+  });
+});
+
+describe('the phone button', () => {
+  it('blinks green while the task streams a test', () => {
+    const view = render(<Strip d={task(`Testing.\nlive: ${COMMAND}`)} />);
+    expect(view.getByTestId('tws-phone-live').getAttribute('data-live')).toBe('true');
+    cleanup();
+    const quiet = render(<Strip d={task('Testing.')} />);
+    expect(quiet.getByTestId('tws-phone-live').getAttribute('data-live')).toBeNull();
+  });
+
+  it('the first time, shows the task command and runs nothing until Start', async () => {
+    const view = render(<Strip d={task(`live: ${COMMAND}`)} />);
+    fireEvent.click(view.getByTestId('tws-phone-live'));
+    const dialog = view.getByTestId('phone-live');
+    expect((view.getByTestId('phone-live-command') as HTMLTextAreaElement).value).toBe(COMMAND);
+    expect(dialog.textContent).toContain('From the task');
+    expect(startTerminal).not.toHaveBeenCalled();
+
+    fireEvent.click(view.getByTestId('phone-live-start'));
+    await waitFor(() => expect(view.getByTestId('fake-terminal').textContent).toBe('term-1'));
+    expect(window.localStorage.getItem('tm8.phoneLive.command')).toBe(COMMAND);
+    act(() => outputHandlers.forEach((h) => h('term-1', '$ ')));
+    await waitFor(() => expect(sent).toEqual([`term-1:${COMMAND}\r`]));
+  });
+
+  it('once confirmed, starts at once; Android restarts as Android; closing ends the terminal', async () => {
+    window.localStorage.setItem('tm8.phoneLive.command', COMMAND);
+    const view = render(<Strip d={task('')} />);
+    fireEvent.click(view.getByTestId('tws-phone-live'));
+    await waitFor(() => expect(view.getByTestId('fake-terminal').textContent).toBe('term-1'));
+    act(() => outputHandlers.forEach((h) => h('term-1', '$ ')));
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    fireEvent.click(view.getByTestId('phone-live-android'));
+    await waitFor(() => expect(view.getByTestId('fake-terminal').textContent).toBe('term-2'));
+    expect(terminate).toHaveBeenCalledWith('term-1', expect.objectContaining({ force: true }));
+    act(() => outputHandlers.forEach((h) => h('term-2', '$ ')));
+    await waitFor(() => expect(sent[1]).toBe('term-2:/w/bin/jm-live android shopping\r'));
+
+    fireEvent.click(view.getByTestId('phone-live-close'));
+    expect(view.queryByTestId('phone-live')).toBeNull();
+    expect(terminate).toHaveBeenCalledWith('term-2', expect.objectContaining({ force: true }));
+  });
+});

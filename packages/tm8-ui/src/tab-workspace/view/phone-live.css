@@ -1,0 +1,152 @@
+/* PHONE LIVE (PhoneLive.tsx) — the strip's phone button and the phone it pops up. */
+.tws-astrip-phone[data-live='true'] { color: var(--pn-run); background: var(--pn-run-soft); }
+.tws-astrip-phone__dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pn-run);
+  animation: phl-blink 1s steps(2, start) infinite;
+}
+@keyframes phl-blink { to { visibility: hidden; } }
+
+.phl-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--pn-scrim);
+}
+.phl {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-height: 96vh;
+}
+.phl-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.phl-devices {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--pn-card);
+  border: 1px solid var(--pn-line);
+}
+.phl-device,
+.phl-text,
+.phl-close {
+  border: 0;
+  background: transparent;
+  color: var(--pn-ink-2);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.phl-device { padding: 4px 14px; border-radius: 999px; }
+.phl-device[aria-checked='true'] { background: var(--pn-run); color: var(--pn-card); }
+.phl-text { margin-left: auto; padding: 4px 10px; border-radius: 999px; background: var(--pn-card); }
+.phl-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--pn-card);
+}
+.phl-text:hover,
+.phl-close:hover { color: var(--pn-ink); }
+.phl-devices + .phl-close { margin-left: auto; }
+
+/* The phone: a dark bezel, a notch (iPhone) or a punch-hole (Android), the
+   screen, and the home bar. The screen is the terminal, edge to edge. */
+.phl-phone {
+  position: relative;
+  box-sizing: border-box;
+  width: min(400px, 92vw);
+  height: min(820px, calc(96vh - 90px));
+  padding: 44px 12px 26px;
+  border-radius: 52px;
+  background: black;
+  box-shadow: 0 0 0 2px color-mix(in srgb, black 70%, white), 0 24px 60px var(--pn-scrim);
+}
+.phl-phone--android { border-radius: 34px; padding-top: 34px; }
+.phl-notch {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  width: 110px;
+  height: 24px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: color-mix(in srgb, black 80%, white);
+}
+.phl-phone--android .phl-notch { width: 12px; height: 12px; top: 12px; }
+.phl-home {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  width: 120px;
+  height: 4px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: color-mix(in srgb, black 40%, white);
+}
+.phl-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--pn-card);
+  display: flex;
+  flex-direction: column;
+}
+.phl-screen > * { flex: 1; min-height: 0; }
+
+.phl-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px 16px;
+  color: var(--pn-ink);
+}
+.phl-setup > * { flex: none; }
+.phl-label { font-weight: 600; }
+.phl-command {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--pn-line);
+  border-radius: 8px;
+  background: var(--pn-card);
+  color: var(--pn-ink);
+  font-family: var(--pn-mono, monospace);
+  resize: vertical;
+}
+.phl-note { margin: 0; color: var(--pn-ink-3); }
+.phl-screen > .phl-note { display: flex; align-items: center; justify-content: center; }
+.phl-note--error { color: var(--pn-danger, var(--pn-ink)); }
+.phl-start {
+  align-self: flex-start;
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--pn-run);
+  color: var(--pn-card);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.phl-start:disabled { opacity: 0.5; cursor: default; }
+.phl-foot { margin: 0; color: white; opacity: 0.85; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tws-astrip-phone__dot { animation: none; }
+}
