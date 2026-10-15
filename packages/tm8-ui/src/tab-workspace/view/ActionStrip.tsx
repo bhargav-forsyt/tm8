@@ -25,6 +25,7 @@ import { useEntityChrome } from '../adapters/entity';
 import { getKindAdapter } from '../adapters/registry';
 import type { EntityTabRecord, SideSection } from '../runtime/types';
 import { openSideSection, sidePatch } from './sideSection';
+import { PhoneLiveButton } from './PhoneLive';
 import { useWorkspace, useWorkspaceState } from './context';
 import './content.css';
 
@@ -383,6 +384,8 @@ export function ActionStrip({ tab, linkUrl }: ActionStripProps) {
         </div>
 
         <div className="tws-astrip-cluster">
+          {/* The live phone screen (PhoneLive.tsx): green and blinking while the task streams a test. */}
+          {detail && detail.deletedAt == null && gate.data.seam?.commands ? <PhoneLiveButton detail={detail} /> : null}
           {/* Run, from the panel's own bar (flows and refusals unchanged). */}
           <div ref={chrome?.setCommonVerbsSlot} className="tws-astrip-verbs tws-astrip-common" data-testid="tws-astrip-common" />
         </div>
