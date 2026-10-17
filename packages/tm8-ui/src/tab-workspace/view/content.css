@@ -154,8 +154,52 @@
   border: 0;
   background: none;
 }
-.tws-astrip-stats-source {
+/* THE TOKEN READING (task 01a14b00): the context chip in its own middle
+   section, between the kind's icons and the shared ones, one figure per line.
+   Two groups — occupancy (used, %) over freshness (cache, age) — with room
+   between them. Its details card opens to the left, centred on it. */
+.tws-astrip-section--stats:not(:has(.pn-context)) {
   display: none;
+}
+.tws-astrip-stats .pn-context {
+  position: relative;
+  display: flex;
+}
+.cv2-root .tws-astrip-stats .pn-context__num {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 36px;
+  height: auto;
+  padding: var(--pn-space-2) 0;
+  line-height: 14px;
+  font-size: 10px;
+  white-space: nowrap;
+  border-color: var(--pn-line);
+}
+.tws-astrip-stats .pn-context__line[data-line='0'] {
+  color: var(--pn-ink);
+  font-size: 11px;
+  font-weight: 600;
+}
+.tws-astrip-stats .pn-context__line[data-line='1'] {
+  color: var(--pn-ink-2);
+}
+.tws-astrip-stats .pn-context__line[data-line='2'] {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--pn-line);
+}
+.tws-astrip-stats .pn-context__sep {
+  display: none;
+}
+.cv2-root .tws-astrip-stats .pn-context__details {
+  top: 50%;
+  bottom: auto;
+  transform: translateY(-50%);
+  right: calc(100% + var(--pn-space-2) + 2px);
+  max-width: none;
 }
 
 /* Every control in the strip: 28x28, centred, 14px icons. */
