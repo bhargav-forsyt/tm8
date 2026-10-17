@@ -16,7 +16,7 @@
  * and "Browse MCPs" render disabled WITH the reason rather than as live rows
  * that swallow the press.
  */
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, ReactNode } from 'react';
 import type { TriggerOption } from '../../rich-input';
 import { ComposerIcon } from './ComposerIcons';
 import { ComposerPopover } from './ComposerPopover';
@@ -31,6 +31,11 @@ export interface AddToTurnMenuProps {
   onBrowseSkills?: () => void;
   disabled?: boolean;
   testId?: string;
+  /** One more section, folded under `extraLabel` (the compact composer's Coordinator team). */
+  extra?: ReactNode;
+  extraLabel?: string;
+  /** Present ⇒ the connectors picker (or its load failure) in place of the no-catalog note. */
+  connectors?: ReactNode;
 }
 
 export function AddToTurnMenu({
@@ -41,6 +46,9 @@ export function AddToTurnMenu({
   onBrowseSkills,
   disabled = false,
   testId = 'tch-add',
+  extra,
+  extraLabel,
+  connectors,
 }: AddToTurnMenuProps) {
   const filesReason = 'uploading isn’t wired on this surface — this chat was mounted without an attachment port';
   const pick = (accept: string | undefined, close: () => void) => {
@@ -62,8 +70,8 @@ export function AddToTurnMenu({
       badge={enabledSkills.length}
       disabled={disabled}
       title="add to this turn — files, images, skills"
-      menuWidth={272}
-      menuHeight={360}
+      menuWidth={extra ? 380 : 272}
+      menuHeight={extra ? 520 : 360}
       fitViewport
       className="tch-attach"
       trigger={<ComposerIcon name="plus" />}
@@ -135,9 +143,19 @@ export function AddToTurnMenu({
           ) : (
             <p className="tch-pickmenu__note">No skills are published in this space.</p>
           )}
-          <p className="tch-addmenu__foot" role="note">
-            MCP servers: this node exposes no MCP catalog to chat yet.
-          </p>
+          {extra ? (
+            <details className="tch-addmenu__extra" data-testid={`${testId}-extra`}>
+              <summary className="tch-addmenu__head tch-addmenu__head--sticky">{extraLabel}</summary>
+              {extra}
+            </details>
+          ) : null}
+          {connectors ? (
+            <div className="tch-addmenu__connectors" data-testid={`${testId}-connectors`}>{connectors}</div>
+          ) : (
+            <p className="tch-addmenu__foot" role="note">
+              MCP servers: this node exposes no MCP catalog to chat yet.
+            </p>
+          )}
         </div>
       )}
     </ComposerPopover>
