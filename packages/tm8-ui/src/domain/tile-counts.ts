@@ -15,12 +15,12 @@ import type { EntityCounters } from '@tm8/contract';
  * HONESTY RULES, both directions of nothing (inherited from 108):
  *   · zero draws NOTHING — a count exists to say something is here;
  *   · ABSENT draws nothing either, and is a DIFFERENT fact from zero. Absence
- *     is "this server never counted", which is the normal state right now:
- *     `prs`, `artifacts` and `drawings` are not on `EntityCounters` yet — they
- *     arrive with the auto-linking work in task 01a14655-e507. So every
- *     counter is read through `countOf` below, which trusts the TYPE of what
- *     it finds rather than the shape of the interface, and a row whose counts
- *     are all absent has no second line at all.
+ *     is "this server never counted": a node older than migration 329 sends
+ *     no `prs`, `artifacts` or `drawings`, and one older than 108 sends no
+ *     `docs` or `memories`. So every counter is read through `countOf` below,
+ *     which trusts the TYPE of what it finds rather than the shape of the
+ *     interface, and a row whose counts are all absent has no second line at
+ *     all.
  *
  * This lives in `domain/` because the kind words are the point (§15.2: no
  * component knows a kind) — the renderer draws whatever this answers and
@@ -31,8 +31,9 @@ export interface TileLinkGroup {
   id: string;
   /**
    * The key on `EntityCounters` this group's number is read from. A STRING,
-   * not a keyof: three of the five are not on the interface yet, and this
-   * module's whole job is to survive that honestly.
+   * not a keyof: a swapped-in group (Files) may name a counter the interface
+   * does not declare yet, and this module's whole job is to survive that
+   * honestly.
    */
   counter: string;
   /**
@@ -65,8 +66,8 @@ export interface TileLinkCount {
 }
 
 /**
- * THE DEFENSIVE READ. `counters` is typed `EntityCounters`, and three of the
- * five keys are not declared on it — so this reads the object as a bag and
+ * THE DEFENSIVE READ. `counters` is typed `EntityCounters`, but a group may
+ * name a key it does not declare — so this reads the object as a bag and
  * accepts only a finite positive integer. A string, a null, a NaN or a
  * negative number from a node mid-rollout is treated as ABSENT, which draws
  * nothing, rather than as a count the reader would have to disbelieve.
@@ -78,10 +79,24 @@ function countOf(counters: EntityCounters, key: string): number | null {
   return n > 0 ? n : null;
 }
 
-/** The counts line's content, in `TILE_LINK_GROUPS` order, zeros and absences dropped. */
-export function tileLinkCountsOf(counters: EntityCounters): TileLinkCount[] {
+/**
+ * The groups this client knows the server does NOT count yet (no column on
+ * `entity_counters`). The viewer can still choose them — the choice is kept —
+ * and the settings menu says plainly that nothing will show until they are
+ * counted. Empty since migration 329 counted PRs, artifacts and drawings; a
+ * group swapped in ahead of its column (Files) goes here.
+ */
+export const UNCOUNTED_LINK_GROUPS: ReadonlySet<string> = new Set();
+
+/**
+ * The counts line's content, in `TILE_LINK_GROUPS` order, zeros and absences
+ * dropped — and any group the viewer turned off (`hidden`, by group id: the
+ * List settings menu's per-link switches, Subhang 2026-10-17).
+ */
+export function tileLinkCountsOf(counters: EntityCounters, hidden?: ReadonlySet<string>): TileLinkCount[] {
   const out: TileLinkCount[] = [];
   for (const group of TILE_LINK_GROUPS) {
+    if (hidden?.has(group.id)) continue;
     const count = countOf(counters, group.counter);
     if (count !== null) out.push({ group, count });
   }
@@ -93,6 +108,6 @@ export function tileLinkCountsOf(counters: EntityCounters): TileLinkCount[] {
  * the element, because a JSX element is truthy even when it renders null and
  * the tile's own geometry (29px vs ~43px) depends on the answer.
  */
-export function hasTileLinkCounts(counters: EntityCounters): boolean {
-  return TILE_LINK_GROUPS.some((group) => countOf(counters, group.counter) !== null);
+export function hasTileLinkCounts(counters: EntityCounters, hidden?: ReadonlySet<string>): boolean {
+  return TILE_LINK_GROUPS.some((group) => !hidden?.has(group.id) && countOf(counters, group.counter) !== null);
 }
