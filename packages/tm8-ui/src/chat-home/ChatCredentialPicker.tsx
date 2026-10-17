@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ChatCredentialSelection, EntityId, SpaceId } from '@tm8/contract';
 import { ComposerSelect, type ComposerSelectOption } from './ComposerSelect';
 import type { ChatHomePort } from './types';
+import { PickRow } from './composer/MenuRows';
 
 export function credentialValue(selection: ChatCredentialSelection): string {
   return selection.credentialId ? `space:${selection.credentialId}` : selection.source;
@@ -12,9 +13,11 @@ export function credentialSelection(value: string): ChatCredentialSelection {
     : { source: value as ChatCredentialSelection['source'] };
 }
 
-export function ChatCredentialPicker({ port, spaceId, value, onChange, disabled, backendKeyOnly }: {
+export function ChatCredentialPicker({ port, spaceId, value, onChange, disabled, backendKeyOnly, inline = false }: {
   port: ChatHomePort; spaceId: SpaceId | string; value: ChatCredentialSelection;
   onChange: (selection: ChatCredentialSelection) => void; disabled: boolean; backendKeyOnly: boolean;
+  /** A labelled native select, for a host that is itself a popover (the composer's settings). */
+  inline?: boolean;
 }) {
   const portRef = useRef(port); portRef.current = port;
   const [credentials, setCredentials] = useState<readonly { id: string; label: string }[]>([]);
@@ -44,6 +47,18 @@ export function ChatCredentialPicker({ port, spaceId, value, onChange, disabled,
   // A saved reference remains visible if it is later revoked or unreadable.
   if (value.credentialId && !credentials.some(row => row.id === value.credentialId)) {
     options.push({ id: credentialValue(value), label: 'Selected space credential', disabledReason: 'Unavailable or no longer accessible' });
+  }
+  if (inline) {
+    return (
+      <PickRow label="Credentials" ariaLabel="Chat credentials" testId="tch-credentials"
+        choices={options.map(option => ({
+          id: option.id, label: option.label,
+          ...(option.hint ? { hint: option.hint } : {}),
+          ...(option.disabledReason ? { disabledReason: option.disabledReason } : {}),
+        }))}
+        value={credentialValue(value)} onPick={next => onChange(credentialSelection(next))}
+        disabledReason={disabled ? 'credentials cannot change right now' : null} />
+    );
   }
   return <ComposerSelect label="Chat credentials" testId="tch-credentials" options={options}
     value={credentialValue(value)} onChange={next => onChange(credentialSelection(next))}
