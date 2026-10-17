@@ -353,57 +353,77 @@
 .cv2-root .tws-browser .tws-paneltop__spacer {
   flex: 1;
 }
-/* The pinned-only rail's New chat · New task (Subhang 2026-10-18, options
-   D + E): two black-and-white keycaps on the list header's 10px gutter. Chat
-   leads in solid ink, task follows outlined; both stand on a 3px ink base and
-   sink onto it when pressed. Black and white only — no brass, whatever the
-   style — and the ink flips in the dark theme. */
+/* The pinned-only rail's New chat · New task (Subhang 2026-10-18, option B
+   "paper tile", then joined and shrunk): one black-and-white paper tile split
+   into two halves by a hairline. Paper fill, a hairline edge all round and a
+   soft under-shadow; pressed, a half's shadow turns inward and its mark and
+   label sink a pixel. Black and white only — no brass, whatever the style —
+   and the ink flips in the dark theme. */
 .cv2-root .tws-browser .tws-quicknew {
   --tws-qn-ink: black;
   --tws-qn-paper: white;
+  --tws-qn-fill: var(--tws-qn-paper);
+  --tws-qn-shade: black;
+  --tws-qn-edge: color-mix(in srgb, var(--tws-qn-ink) 18%, transparent);
   flex: none;
   display: flex;
-  gap: 10px;
   margin: var(--pn-space-2) 10px 10px;
+  overflow: hidden;
+  background: var(--tws-qn-fill);
+  border: 1px solid var(--tws-qn-edge);
+  border-radius: 8px;
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--tws-qn-ink) 10%, transparent),
+    0 2px 6px -3px color-mix(in srgb, var(--tws-qn-shade) 30%, transparent);
 }
+/* Dark: the tile lifts a shade off the panel, and its shadows need more black
+   to read against it. */
 .cv2-root[data-theme='dark'] .tws-browser .tws-quicknew,
 [data-theme='dark'] .cv2-root .tws-browser .tws-quicknew {
   --tws-qn-ink: white;
   --tws-qn-paper: black;
+  --tws-qn-fill: color-mix(in srgb, var(--tws-qn-ink) 8%, var(--tws-qn-paper));
 }
 .cv2-root .tws-browser .tws-quicknew__btn {
   flex: 1 1 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
-  height: 32px;
+  height: 28px;
   padding: 0 var(--pn-space-2);
-  background: var(--tws-qn-paper);
-  border: 1.5px solid var(--tws-qn-ink);
-  border-radius: 9px;
-  box-shadow: 0 3px 0 var(--tws-qn-ink);
+  background: transparent;
+  border: 0;
   color: var(--tws-qn-ink);
   font: inherit;
+  font-size: var(--pn-fs-sm);
   font-weight: 600;
   cursor: pointer;
-  transition: transform 80ms ease, box-shadow 80ms ease, background-color 120ms ease;
+  transition:
+    box-shadow 120ms ease-out,
+    background-color 120ms ease;
 }
-/* The lead: solid ink, paper type. */
-.cv2-root .tws-browser .tws-quicknew__btn:first-child {
-  background: var(--tws-qn-ink);
-  color: var(--tws-qn-paper);
+.cv2-root .tws-browser .tws-quicknew__btn + .tws-quicknew__btn {
+  border-left: 1px solid var(--tws-qn-edge);
 }
-.cv2-root .tws-browser .tws-quicknew__btn:hover {
-  background: color-mix(in srgb, var(--tws-qn-ink) 8%, var(--tws-qn-paper));
-}
-.cv2-root .tws-browser .tws-quicknew__btn:first-child:hover {
-  background: color-mix(in srgb, var(--tws-qn-ink) 86%, var(--tws-qn-paper));
+.cv2-root .tws-browser .tws-quicknew__btn:hover:not([aria-disabled='true']) {
+  background: color-mix(in srgb, var(--tws-qn-ink) 4%, transparent);
 }
 .cv2-root .tws-browser .tws-quicknew__btn:active:not([aria-disabled='true']) {
-  transform: translateY(2px);
-  box-shadow: 0 1px 0 var(--tws-qn-ink);
+  background: color-mix(in srgb, var(--tws-qn-ink) 6%, transparent);
+  box-shadow: inset 0 1px 3px color-mix(in srgb, var(--tws-qn-shade) 22%, transparent);
+}
+.cv2-root[data-theme='dark'] .tws-browser .tws-quicknew__btn:active:not([aria-disabled='true']),
+[data-theme='dark'] .cv2-root .tws-browser .tws-quicknew__btn:active:not([aria-disabled='true']) {
+  background: color-mix(in srgb, var(--tws-qn-paper) 30%, transparent);
+  box-shadow: inset 0 1px 3px color-mix(in srgb, var(--tws-qn-shade) 70%, transparent);
+}
+.cv2-root .tws-browser .tws-quicknew__btn > span {
+  transition: transform 120ms ease-out;
+}
+.cv2-root .tws-browser .tws-quicknew__btn:active:not([aria-disabled='true']) > span {
+  transform: translateY(1px);
 }
 .cv2-root .tws-browser .tws-quicknew__btn[aria-disabled='true'] {
   opacity: 0.4;
@@ -419,12 +439,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Inside the tile's clip, so the ring is drawn inward. */
 .cv2-root .tws-browser .tws-quicknew__btn:focus-visible {
   outline: 2px solid var(--tws-qn-ink);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .cv2-root .tws-browser .tws-quicknew__btn {
+  .cv2-root .tws-browser .tws-quicknew__btn,
+  .cv2-root .tws-browser .tws-quicknew__btn > span {
     transition: none;
   }
 }
