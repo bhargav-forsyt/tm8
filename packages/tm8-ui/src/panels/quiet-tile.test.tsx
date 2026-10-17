@@ -10,6 +10,7 @@ import {
   memoryTokens,
   prTransplant,
   profileHouseStyle,
+  sessionLive,
   taskGuideLines,
   teamMemberForge,
 } from '../fixtures';
@@ -332,6 +333,100 @@ describe('the list header, one row', () => {
     expect(
       [...container.querySelectorAll('[role="menu"]')].filter((el) => el.closest('.lp__filterbar')).length,
     ).toBe(1);
+  });
+
+  /* THE PER-LINK SWITCHES IN EVERY LAYOUT (task 01a14af9): the default `⋯`
+     carries the same Links-on-rows section the rail's List settings does, and
+     a hidden link group is counted on its badge and cleared by its Reset. */
+  it('puts the Links-on-rows switches behind ⋯, counted in its badge and Reset', () => {
+    const { getByTestId } = render(
+      <EntityListPanel kind="task" rowsFor={rowsFor([taskGuideLines])} ctx={ctx} chrome="toolbar" />,
+    );
+    const trigger = getByTestId('list-more-trigger');
+    fireEvent.click(trigger);
+    const links = getByTestId('list-more-menu').querySelector<HTMLElement>('[data-testid="list-links-section"]')!;
+    expect(links).not.toBeNull();
+    const docs = links.querySelector<HTMLElement>('[data-link-group="docs"]')!;
+    expect(docs.getAttribute('aria-checked')).toBe('true');
+    expect(trigger.querySelector('.lp__chip-count')).toBeNull();
+
+    fireEvent.click(docs);
+    expect(
+      getByTestId('list-more-menu').querySelector('[data-link-group="docs"]')!.getAttribute('aria-checked'),
+    ).toBe('false');
+    expect(getByTestId('list-more-trigger').querySelector('.lp__chip-count')?.textContent).toBe('1');
+
+    fireEvent.click(getByTestId('list-more-clear-all'));
+    expect(
+      getByTestId('list-more-menu').querySelector('[data-link-group="docs"]')!.getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(getByTestId('list-more-trigger').querySelector('.lp__chip-count')).toBeNull();
+    /* A REAL press inside the `⋯` menu keeps it open: the funnel's own
+       outside-press dismiss used to close it on pointerdown, before the
+       option's click landed (jsdom's bare click never showed it). */
+    const docsOpt = getByTestId('list-more-menu').querySelector<HTMLElement>('[data-link-group="docs"]')!;
+    fireEvent.pointerDown(docsOpt);
+    fireEvent.mouseDown(docsOpt);
+    fireEvent.click(docsOpt);
+    expect(
+      getByTestId('list-more-menu').querySelector('[data-link-group="docs"]')!.getAttribute('aria-checked'),
+    ).toBe('false');
+    fireEvent.click(getByTestId('list-more-clear-all'));
+    /* The funnel does not repeat it in this layout. */
+    fireEvent.click(getByTestId('filter-trigger'));
+    expect(getByTestId('filter-menu').querySelector('[data-testid="list-links-section"]')).toBeNull();
+  });
+
+  /* THE CHAT LIST (task 01a14af9, part A/C): a chat's tile draws its counts
+     line, including the sessions it launched, and those sessions nest under it
+     as session tiles, read through `rowsForKind` with the bounded
+     `launchedBy` filter, and open as sessions. */
+  it('a chat tile shows its counts and nests the sessions it launched', () => {
+    const chat = withCounters(chatLaunchPlan, { docs: 1, prs: 1, sessions: 2 });
+    const launched = [1, 2].map((n) => ({
+      ...sessionLive,
+      id: `ses-launched-${n}`,
+      title: `Launched ${n}`,
+      parentId: null,
+      state: { ...sessionLive.state, launchedBy: chat.id },
+    })) as EntitySummary[];
+    const asked: unknown[] = [];
+    const rowsForKind = (kind: string) => (filter: QueryFilter) => {
+      asked.push({ kind, filter });
+      return kind === 'work_session' ? launched : [];
+    };
+    const onSelect = vi.fn();
+    const { container } = render(
+      <EntityListPanel
+        kind="chat"
+        rowsFor={rowsFor([chat])}
+        rowsForKind={rowsForKind}
+        ctx={ctx}
+        chrome="toolbar"
+        onSelect={onSelect}
+      />,
+    );
+    expect(asked).toContainEqual({ kind: 'work_session', filter: { launchedBy: [chat.id] } });
+    const counts = container.querySelector<HTMLElement>('.lp__tile-counts')!;
+    expect([...counts.querySelectorAll('[data-count-kind]')].map((el) => el.getAttribute('data-count-kind'))).toEqual([
+      'docs',
+      'prs',
+      'sessions',
+    ]);
+
+    /* Collapsed by default, like every tree; the chevron opens it. */
+    expect(container.querySelector('[data-testid="list-tile-children"]')).toBeNull();
+    const toggle = container.querySelector<HTMLElement>('[data-testid="list-tile"] [aria-expanded]')!;
+    fireEvent.click(toggle);
+    const children = container.querySelector<HTMLElement>('[data-testid="list-tile-children"]')!;
+    expect(children.textContent).toContain('Launched 1');
+    expect(children.textContent).toContain('Launched 2');
+
+    /* Drawn with the SESSION anatomy, and opened as a session. */
+    const child = children.querySelector<HTMLElement>('[data-session-node="ses-launched-1"]')!;
+    expect(child).not.toBeNull();
+    fireEvent.click(child);
+    expect(onSelect).toHaveBeenCalledWith('ses-launched-1', 'work_session');
   });
 
   it('search expands on the glyph, narrows the list, and Esc clears before it closes', () => {

@@ -105,7 +105,7 @@ import { TileProgressBar } from './list/TileProgressBar';
 import { PendingFormsChip, hasPendingFormsChip } from '../forms/PendingFormsChip';
 import { usePendingForms } from '../forms/pending';
 import { TileLinkCounts } from './list/TileLinkCounts';
-import { hasTileLinkCounts, treeParentOf } from '../domain';
+import { hasTileLinkCounts, launchedRowsFilter, treeParentOf } from '../domain';
 import { TILE_LINK_GROUPS, UNCOUNTED_LINK_GROUPS } from '../domain/tile-counts';
 import { TileSignal, UrgentMark, isUrgent, signalIsAvatar } from './list/TileSignal';
 import { SessionDetails } from './list/SessionDetails';
@@ -243,6 +243,11 @@ export interface EntityListPanelProps {
    * shell. `sort` absent ⇒ the server's own default.
    */
   rowsFor: (filter: QueryFilter, sort?: SortKey) => readonly EntitySummary[];
+  /**
+   * Rows of ANOTHER kind, for the rows this list's rows launched (331,
+   * `list.launches`: the chat list's sessions). Absent ⇒ nothing nests.
+   */
+  rowsForKind?: (kind: string) => (filter: QueryFilter, sort?: SortKey) => readonly EntitySummary[];
   /**
    * Paging truth for the SAME (filter, sort) the rows came from.
    *
@@ -450,7 +455,8 @@ export interface EntityListPanelProps {
    * Absent ⇒ `'chevron'`: every anatomy as before (Home, Work, Board).
    */
   rowLead?: 'chevron' | 'icon';
-  onSelect?: (id: string) => void;
+  /** `kind` is the ROW's kind: a nested launched row (331) is not the list's. */
+  onSelect?: (id: string, kind?: string) => void;
   onAction?: (ref: ActionRef, entityId: string) => void;
   /**
    * Which of the header verbs this host can actually PERFORM.
@@ -2430,7 +2436,13 @@ function FilterRow({
    */
   const { oneSurface, sheetHost } = useMobileSurface();
   const inSheet = oneSurface && sheetHost !== null;
-  useDismissable(!inSheet && picker !== null, barRef, useCallback(() => setPicker(null), [setPicker]));
+  /* EACH TRIGGER DISMISSES ITS OWN MENU. The funnel and the `⋯` are two
+     FilterRows over ONE `picker`; when both listened for any open picker, a
+     pointerdown inside the `⋯` menu was "outside" the funnel's bar, and the
+     funnel closed the `⋯` before the option's click landed. */
+  const mine =
+    picker !== null && (section === 'view' ? picker === 'view' : !merged || picker !== 'view');
+  useDismissable(!inSheet && mine, barRef, useCallback(() => setPicker(null), [setPicker]));
   const sort = config.list.sort;
   const current = sort.find((s) => s.key === sortKey) ?? sort[0];
   /* VIEW — which facts each row draws (row-view.ts). Only the facets this
@@ -2648,15 +2660,54 @@ function FilterRow({
   if (merged) {
     const defaultSort = sort.find((s) => s.default)?.key ?? sort[0]?.key;
     const sortChanged = current && current.key !== defaultSort ? 1 : 0;
+    /* WHICH LINKS A ROW SHOWS (Subhang 2026-10-17): one switch per group
+       on the counts line, in BOTH layouts — the rail's List settings and the
+       default `⋯` — over the same facet store. Off while the whole line is
+       off, and a group the server does not count yet says so rather than
+       looking broken. */
+    const linkGroupsHidden = hiddenLinkGroups(view.hidden).size;
+    const linksSection = viewFacets.some((spec) => spec.id === 'counts') ? (
+      <section className="lp__funnelsection" aria-label="Links on rows" data-testid="list-links-section">
+        <div className="t-eyebrow">Links on rows</div>
+        {TILE_LINK_GROUPS.map((group) => {
+          const facet = linkFacet(group.id);
+          const lineOn = view.shows('counts');
+          const on = lineOn && view.shows(facet);
+          const pending = UNCOUNTED_LINK_GROUPS.has(group.id);
+          const name = getKind(group.kind).labelPlural;
+          return (
+            <button
+              key={group.id}
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={on}
+              aria-disabled={!lineOn || undefined}
+              className={on ? 'lp__kindopt lp__kindopt--current' : 'lp__kindopt'}
+              data-link-group={group.id}
+              title={pending ? `${name} are not counted by the server yet, so rows show none for now` : name}
+              onClick={() => {
+                if (lineOn) view.toggle(facet);
+              }}
+            >
+              <span className="lp__optbox" aria-hidden data-on={on ? 'yes' : 'no'} />
+              <KindIcon kind={group.kind} size={14} />
+              <span className="lp__optlabel">{name}</span>
+              {pending ? <span className="lp__opthint">not counted yet</span> : null}
+            </button>
+          );
+        })}
+      </section>
+    ) : null;
+
     /* THE BADGE COUNTS WHAT IS NOT DEFAULT — in THIS trigger's own sections,
        so a hidden avatar never puts a number on the funnel and an active
        filter never puts one on the `⋯`. A badge that counts somebody else's
        state is a badge the reader cannot act on. */
     const changed =
       section === 'view'
-        ? hiddenFacetCount + sortChanged
+        ? hiddenFacetCount + sortChanged + linkGroupsHidden
         : activeFilterCount + selectedPeople.length + (lensSet ? 1 : 0) +
-          (allInOne ? hiddenFacetCount + sortChanged + listPrefs.changed + hiddenLinkGroups(view.hidden).size : 0);
+          (allInOne ? hiddenFacetCount + sortChanged + listPrefs.changed + linkGroupsHidden : 0);
 
     /* `⋯` and the funnel must not share a picker key, or opening one would
        read as the other being open. `view` is already in `ListPicker`. */
@@ -2678,6 +2729,7 @@ function FilterRow({
               {sortOptions}
             </section>
           ) : null}
+          {linksSection}
         </>
       ) : (
         <>
@@ -2746,41 +2798,7 @@ function FilterRow({
               ) : null}
             </section>
           ) : null}
-          {/* WHICH LINKS A ROW SHOWS (Subhang 2026-10-17): one switch per group
-              on the counts line. Off while the whole line is off, and a group
-              the server does not count yet says so rather than looking broken. */}
-          {allInOne && viewFacets.some((spec) => spec.id === 'counts') ? (
-            <section className="lp__funnelsection" aria-label="Links on rows" data-testid="list-links-section">
-              <div className="t-eyebrow">Links on rows</div>
-              {TILE_LINK_GROUPS.map((group) => {
-                const facet = linkFacet(group.id);
-                const lineOn = view.shows('counts');
-                const on = lineOn && view.shows(facet);
-                const pending = UNCOUNTED_LINK_GROUPS.has(group.id);
-                const name = getKind(group.kind).labelPlural;
-                return (
-                  <button
-                    key={group.id}
-                    type="button"
-                    role="menuitemcheckbox"
-                    aria-checked={on}
-                    aria-disabled={!lineOn || undefined}
-                    className={on ? 'lp__kindopt lp__kindopt--current' : 'lp__kindopt'}
-                    data-link-group={group.id}
-                    title={pending ? `${name} are not counted by the server yet, so rows show none for now` : name}
-                    onClick={() => {
-                      if (lineOn) view.toggle(facet);
-                    }}
-                  >
-                    <span className="lp__optbox" aria-hidden data-on={on ? 'yes' : 'no'} />
-                    <KindIcon kind={group.kind} size={14} />
-                    <span className="lp__optlabel">{name}</span>
-                    {pending ? <span className="lp__opthint">not counted yet</span> : null}
-                  </button>
-                );
-              })}
-            </section>
-          ) : null}
+          {allInOne ? linksSection : null}
         </>
       );
 
@@ -2819,7 +2837,7 @@ function FilterRow({
                   disabled={changed === 0}
                   onClick={() => {
                     if (section === 'view') {
-                      if (hiddenFacetCount > 0) view.reset();
+                      if (hiddenFacetCount > 0 || linkGroupsHidden > 0) view.reset();
                       if (defaultSort && current && current.key !== defaultSort) onSort(defaultSort);
                       return;
                     }
@@ -2827,7 +2845,7 @@ function FilterRow({
                     for (const actorId of selectedPeople) onTogglePerson(actorId);
                     if (lensSet) onLens(null);
                     if (allInOne) {
-                      if (hiddenFacetCount > 0 || hiddenLinkGroups(view.hidden).size > 0) view.reset();
+                      if (hiddenFacetCount > 0 || linkGroupsHidden > 0) view.reset();
                       if (defaultSort && current && current.key !== defaultSort) onSort(defaultSort);
                       if (listPrefs.changed > 0) listPrefs.reset();
                     }
@@ -4068,7 +4086,7 @@ function attentionIdsOf(
  * row at the wrong indent.
  */
 function TreeRows({
-  rows,
+  rows: listRows,
   props,
   config,
   attentionIds,
@@ -4091,6 +4109,21 @@ function TreeRows({
    * See `kit/useTreeDisclosure` for why the set is safe to persist and how the
    * selection is kept visible without being written to storage.
    */
+  /* THE ROWS THESE ROWS LAUNCHED (331): a chat's sessions, loaded for the
+     listed launchers and nested under them by `treeParentOf`. */
+  const launches = config.list.tree ? config.list.launches : undefined;
+  const launchedFilter = useMemo(
+    () => (launches ? launchedRowsFilter(listRows.map((row) => row.id)) : null),
+    [launches, listRows],
+  );
+  const launched =
+    launches && launchedFilter && props.rowsForKind
+      ? props.rowsForKind(launches)(launchedFilter as QueryFilter)
+      : NO_ROWS;
+  const rows = useMemo(
+    () => (launched.length === 0 ? listRows : [...listRows, ...launched.filter((row) => !listRows.some((r) => r.id === row.id))]),
+    [listRows, launched],
+  );
   const revealed = useMemo(() => ancestorPath(rows, props.selectedId), [rows, props.selectedId]);
   const leadMode = props.rowLead === 'icon';
   const disclosure = useTreeDisclosure(
@@ -4155,7 +4188,7 @@ function TreeRows({
               else event.currentTarget.parentElement?.closest<HTMLElement>('[role="treeitem"]')?.focus();
             } else if (event.key === 'Enter') {
               if (target !== event.currentTarget && !target.hasAttribute('data-lead-toggle')) return;
-              props.onSelect?.(node.row.id);
+              selectRow(props, node.row);
             } else {
               return;
             }
@@ -4185,7 +4218,8 @@ function TreeRows({
           row={node.row}
           depth={node.depth}
           props={props}
-          config={config}
+          /* A launched row (a chat's session) is drawn as ITS kind. */
+          config={node.row.kind === config.kind ? config : getKind(node.row.kind)}
           attention={attentionIds?.has(node.row.id) ?? false}
           childCount={node.children.length}
           expanded={!isCollapsed}
@@ -4273,6 +4307,16 @@ interface TileTreeNode {
  * parent roots its child instead of hiding it. The `seen` guard also keeps a
  * malformed parent cycle visible as roots rather than recursing forever.
  */
+/**
+ * Opens a row. A row of ANOTHER kind than the list's (a chat's launched
+ * session, 331) names its kind, so the host opens it as what it is; a row of
+ * the list's own kind is opened by id alone, as it always was.
+ */
+function selectRow(props: EntityListPanelProps, row: EntitySummary): void {
+  if (row.kind === props.kind) props.onSelect?.(row.id);
+  else props.onSelect?.(row.id, row.kind);
+}
+
 function buildTileTree(rows: readonly EntitySummary[], hierarchical: boolean): TileTreeNode[] {
   if (!hierarchical) return rows.map((row) => ({ row, children: [], depth: 0 }));
 
@@ -4873,7 +4917,7 @@ export function Tile({
         childCount={childCount}
         childrenExpanded={expanded}
         onToggleChildren={onToggleChildren}
-        onSelect={() => props.onSelect?.(row.id)}
+        onSelect={() => selectRow(props, row)}
         actions={(own) => (
           <RowActionCluster
             row={row}
@@ -4935,7 +4979,7 @@ export function Tile({
         childCount={childCount}
         childrenExpanded={expanded}
         onToggleChildren={onToggleChildren}
-        onSelect={() => props.onSelect?.(row.id)}
+        onSelect={() => selectRow(props, row)}
         status={{
           label: statusWord ?? 'no status',
           title: statusTitle,
@@ -5148,7 +5192,7 @@ export function Tile({
       data-details={detailsExpanded ? 'open' : undefined}
       data-streaming={streaming ? 'true' : 'false'}
     >
-      <div className="lp__tile-main" onClick={() => props.onSelect?.(row.id)}>
+      <div className="lp__tile-main" onClick={() => selectRow(props, row)}>
         {/*
           LINE 1 OF THE QUIET ROW (§6, approved 2026-10-16):
 
@@ -5218,7 +5262,7 @@ export function Tile({
             aria-current={selected ? 'true' : undefined}
             onClick={(event) => {
               event.stopPropagation();
-              props.onSelect?.(row.id);
+              selectRow(props, row);
             }}
           >
             {row.title}
