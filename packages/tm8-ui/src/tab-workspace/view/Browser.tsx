@@ -11,7 +11,7 @@
  * Every write goes through `workspace.browser.set`; nothing here touches tabs
  * or scope except a row click (`tabs.open`) and + New (`drafts.open`).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useAttentionOptional } from '../../attention';
 import { needsMeListSource } from '../../attention/needs-me';
 import type { EntityId } from '@tm8/contract';
@@ -23,6 +23,8 @@ import { useRowLifecycle } from '../../views/useRowLifecycle';
 import { useSessionStart } from '../../views/useSessionStart';
 import { useMarkEntitySeen } from '../../seen-entities/EntitySeen';
 import { EntityListPanel, type ListEmptyState, type ListFilterState } from '../../panels/EntityListPanel';
+import { requestLinkFocus } from '../../panels/list/linkFocus';
+import { sidePatch } from './sideSection';
 import { ListRootHeader, type ListRootOption } from '../../panels/ListRootHeader';
 import { useStore } from 'zustand';
 import { getBrowserSource } from '../adapters/browserSources';
@@ -33,8 +35,11 @@ import { workspaceCommands } from '@tm8/contract/workspace';
 
 const { EMPTY_BROWSER_KIND_STATE } = workspaceCommands.browser;
 import { WORKSPACE_KINDS, type KindId } from '../runtime/types';
-import { useWorkspace, useWorkspaceState } from './context';
+import { useShellFrame, useWorkspace, useWorkspaceState } from './context';
 import { useListCursor } from './listCursor';
+import { isNavigatorEnabled, isPinnedRailEnabled } from './navigatorFlag';
+import { VectorIcon } from '../../kit/VectorIcon';
+import { getRailStore } from '../runtime/railStore';
 import './browser.css';
 
 const BROWSER_ID = 'main';
@@ -115,9 +120,11 @@ export function Browser() {
   const { spaceId } = useWorkspace();
   const sources = useMemo(() => getBrowserSourceStore(spaceId), [spaceId]);
   const source = getBrowserSource(useStore(sources, (s) => s.source));
+  const pinnedRail = useMemo(() => isPinnedRailEnabled(), []);
   if (source) {
     return (
       <section className="tws-browser" aria-label={source.label} data-testid="tws-browser" data-source={source.id}>
+        {pinnedRail ? <PanelTop searchable /> : null}
         <source.Panel />
       </section>
     );
@@ -125,8 +132,114 @@ export function Browser() {
   return <EntityBrowser />;
 }
 
+/** The sidebar toggle: a panel outline with its left column drawn in. */
+const SIDEBAR_ART = ['M2.5 3.5h11v9h-11z', 'M6 3.5v9'];
+/** The ⌕ on `VectorIcon`'s 16×16 grid: a ring and its handle. */
+const SEARCH_ART = ['M7 2.75a4.25 4.25 0 1 1 0 8.5a4.25 4.25 0 1 1 0-8.5', 'M10.25 10.25L13.25 13.25'];
+
+/**
+ * THE PANEL'S TOP ROW (pinned-only rail, Subhang 2026-10-17):
+ *
+ *     Space: transfer-e2e-scratch-2 ▾    [⌕] [▯]
+ *
+ * The space switcher is the panel's title (the tm8 mark heads the rail). ⌕
+ * opens the app's own search — the palette `/` opens — never a box inline in
+ * the column; ▯ collapses the panel, leaving the rail.
+ */
+export function PanelTop({ searchable = false }: { searchable?: boolean }) {
+  /* The shell frame, not the workspace: the framed modes (Settings, …) draw
+     this same row with no Work runtime mounted. */
+  const { spaceId, gate } = useShellFrame();
+  const collapse = () => getRailStore(spaceId).getState().setCollapsed(true);
+  return (
+    <div className="tws-paneltop" data-testid="tws-paneltop">
+      <div
+        className="tws-paneltop__space"
+        data-testid="tws-paneltop-space"
+        /* ONE TARGET: the "Space:" word opens the same menu its name does. */
+        onClick={(event) => {
+          if ((event.target as HTMLElement).closest('.shell-switcher')) return;
+          event.currentTarget.querySelector<HTMLButtonElement>('.shell-switcher__trigger')?.click();
+        }}
+      >
+        <span className="tws-paneltop__label">Space:</span>
+        {isValidElement<{ collapsed?: boolean; quiet?: boolean }>(gate.switcherSlot)
+          ? cloneElement(gate.switcherSlot, { collapsed: false, quiet: true })
+          : gate.switcherSlot}
+      </div>
+      <span className="tws-paneltop__spacer" />
+      {searchable ? (
+        <button
+          type="button"
+          className="tws-icon-btn"
+          aria-label="Search"
+          title="Search  /"
+          aria-keyshortcuts="/"
+          data-testid="tws-paneltop-search"
+          onClick={() => gate.openPalette()}
+        >
+          <VectorIcon paths={SEARCH_ART} size={16} />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className="tws-icon-btn"
+        aria-label="Collapse panel"
+        title="Collapse panel"
+        data-testid="tws-paneltop-collapse"
+        onClick={collapse}
+      >
+        <VectorIcon paths={SIDEBAR_ART} size={16} />
+      </button>
+    </div>
+  );
+}
+
+/** ＋, on `VectorIcon`'s 16×16 grid (as the navigator's New). */
+const PLUS_ART = ['M8 3.25v9.5', 'M3.25 8h9.5'];
+/** The two kinds every list column can start, whatever it is listing. */
+const QUICK_NEW_KINDS: readonly KindId[] = ['chat', 'task'];
+
+/**
+ * NEW CHAT · NEW TASK (pinned-only rail, Subhang 2026-10-17): one row at the
+ * head of every list, side by side. Each opens the same draft the list's own
+ * ＋ opens for that kind; a kind the registry refuses dims with its reason.
+ */
+function QuickNew() {
+  const { dispatch } = useWorkspace();
+  return (
+    <div className="tws-quicknew" role="group" aria-label="New" data-testid="tws-quicknew">
+      {QUICK_NEW_KINDS.map((kind) => {
+        const adapter = getKindAdapter(kind);
+        const disabledReason = adapter.creatable === true ? null : adapter.creatable.disabledReason;
+        const label = `New ${adapter.noun.toLowerCase()}`;
+        return (
+          <button
+            key={kind}
+            type="button"
+            className="tws-quicknew__btn"
+            aria-disabled={disabledReason !== null || undefined}
+            title={disabledReason ?? label}
+            data-kind={kind}
+            data-testid={`tws-quicknew-${kind}`}
+            onClick={() => {
+              if (disabledReason !== null) return;
+              dispatch({ command: 'workspace.drafts.open', args: { kind }, source: 'click' });
+            }}
+          >
+            <span className="tws-quicknew__glyph" aria-hidden>
+              <VectorIcon paths={PLUS_ART} size={16} strokeWidth={1.6} />
+            </span>
+            <span className="tws-quicknew__label">{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function EntityBrowser() {
-  const { dispatch, gate } = useWorkspace();
+  const { dispatch, gate, store } = useWorkspace();
   const { data } = gate;
   const kind = useWorkspaceState((s) => s.browsers.main.kind);
   const kindState = useWorkspaceState((s) => s.browsers.main.perKind[kind]) ?? EMPTY_BROWSER_KIND_STATE;
@@ -152,6 +265,19 @@ function EntityBrowser() {
   /* Bumped to remount the panel with the current remembered state (Clear
      search, Retry); the kind is the other half of the key. */
   const [generation, setGeneration] = useState(0);
+  /*
+   * ＋ New AND THE KIND ▾ LEAVE THE TOOLBAR with the navigator on (§5): New is
+   * the first thing in the column (`NavNew`) and the kind is chosen in ONE
+   * place, the pins. Keeping the box here would put the ＋ twice on screen and
+   * a second kind picker over the same selection — the "one selection, two
+   * views of it" hazard `EntityListPanel`'s `selectorSlot` comment names.
+   *
+   * `workspace.drafts.open` is unchanged; only who draws the button moves.
+   */
+  const navigator = useMemo(() => isNavigatorEnabled(), []);
+  /* THE PINNED-ONLY RAIL (`tm8.ui.navigator = 'rail'`): New chat and New task
+     head every list, and the new box sits at the end of the one-row header. */
+  const pinnedRail = useMemo(() => isPinnedRailEnabled(), []);
 
   useEffect(() => data.ensureKind(kind), [data, kind]);
 
@@ -166,6 +292,16 @@ function EntityBrowser() {
     () => dispatch({ command: 'workspace.drafts.open', args: { kind }, source: 'click' }),
     [dispatch, kind],
   );
+  /* The kind menu's per-row ＋ (pinned-only rail): New for THAT kind, in one
+     press, refused with the registry's own reason where it cannot be made. */
+  const createKindDraft = useCallback(
+    (next: string) => dispatch({ command: 'workspace.drafts.open', args: { kind: next as KindId }, source: 'click' }),
+    [dispatch],
+  );
+  const createKindUnavailable = useCallback((next: string) => {
+    const creatable = getKindAdapter(next as KindId).creatable;
+    return creatable === true ? null : { cause: creatable.disabledReason, remedy: 'open its own screen to make one' };
+  }, []);
   const clearSearch = useCallback(() => {
     set({ query: '' });
     setGeneration((n) => n + 1);
@@ -174,6 +310,39 @@ function EntityBrowser() {
     data.ensureKind(kind);
     setGeneration((n) => n + 1);
   }, [data, kind]);
+
+  /**
+   * THE COUNTS LINE'S DOOR (design doc 01a1465d §6): a click on `◇1` opens
+   * the row's tab and its side column on LINKS, narrowed to that group —
+   * never rows expanded inline under the list, which is the relation
+   * accordion this replaced.
+   *
+   * The group is handed over through `requestLinkFocus` rather than through
+   * the tab patch, because it is a request and not a persisted preference —
+   * see `linkFocus.ts`. The ORDER matters: the request is filed before the
+   * tab opens, so the Links section has it on its very first render and the
+   * reader never sees the unfiltered list flash past.
+   *
+   * `toggle: false` on the patch. The default would CLOSE a column already
+   * showing Links, so clicking a second row's count while the panel was open
+   * would have shut it — a door that closes the room it is standing in.
+   */
+  const openLinks = useCallback(
+    (entityId: string, groupKind: string) => {
+      requestLinkFocus(entityId, groupKind);
+      const result = dispatch({ command: 'workspace.tabs.open', args: { kind, entityId }, source: 'click' });
+      if (result.status !== 'applied' || !result.tabId) return;
+      const tab = result.tabId;
+      const record = store.getState().tabs[tab];
+      if (!record || record.type !== 'entity') return;
+      dispatch({
+        command: 'workspace.tabs.setUi',
+        args: { tabId: tab, patch: sidePatch(record, 'links', true, false) },
+        source: 'click',
+      });
+    },
+    [dispatch, kind, store],
+  );
 
   /* A row click opens or focuses the entity's tab. A scope-hidden tab comes
      back as `requires_user_choice`, which RevealPrompt renders from
@@ -242,6 +411,10 @@ function EntityBrowser() {
       data-narrow={narrow || undefined}
       data-scrolled={scroll.scrolled || undefined}
     >
+      {pinnedRail ? (
+        <PanelTop searchable />
+      ) : null}
+      {pinnedRail ? <QuickNew /> : null}
       <div
         className="tws-browser-list"
         ref={listRef}
@@ -265,7 +438,8 @@ function EntityBrowser() {
           /* Row 1: the panel's own search, then the dotted new box —
              [+ | kind icon ▾]: the + creates the current kind, the icon
              half is the kind menu. */
-          toolbarEnd={
+          toolbarInline={pinnedRail}
+          toolbarEnd={navigator ? undefined : (
             <NewBox
               noun={noun}
               disabledReason={disabledReason}
@@ -283,10 +457,11 @@ function EntityBrowser() {
                   onPickKind={(next) => {
                     if (next !== kind) set({ kind: next });
                   }}
+                  {...(pinnedRail ? { onCreateKind: createKindDraft, createKindUnavailable } : {})}
                 />
               }
             />
-          }
+          )}
           {...source}
           members={data.members}
           ctx={ctx}
@@ -316,9 +491,14 @@ function EntityBrowser() {
              list is not scrolled to it. */
           selectedId={selectedId}
           onSelect={openRow}
+          onOpenLinks={openLinks}
           compact
           initialQuery={kindState.query}
           onQueryChange={onQueryChange}
+          /* No inline search in this layout: ⌕ is the app's search (the
+             palette), so the list draws no search row and is never left
+             narrowed by text nobody can see. */
+          {...(pinnedRail ? { query: '', searchInHost: true } : {})}
           initialFilters={kindState.filters}
           onFiltersChange={onFiltersChange}
           bodyRef={scroll.ref}

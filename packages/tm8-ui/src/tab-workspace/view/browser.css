@@ -249,6 +249,288 @@
   height: 36px;
   padding: var(--pn-space-1) var(--pn-space-2) 0 var(--tws-browser-inset);
 }
+/* The pinned-only rail's panel top row: Space: <name> ▾ · ⌕ · ▯. */
+.cv2-root .tws-browser .tws-paneltop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--pn-space-1);
+  box-sizing: border-box;
+  /* ON THE PANEL'S OWN SURFACE (Subhang 2026-10-17): no band fill, no
+     hairline — the title is part of the column, not a box above it. It sits
+     a little lower, and its edges are the widget's below: the stack's 10px
+     gutter on both sides. */
+  height: 44px;
+  margin: var(--pn-space-2) 10px 0;
+  padding: 0;
+  background: transparent;
+}
+/* The wordmark's text and the last icon's glyph sit ON the gutter: their
+   hover boxes hang outside it rather than pushing them in. */
+
+.cv2-root .tws-browser .tws-paneltop > .tws-icon-btn:last-child {
+  margin-right: -6px;
+}
+.cv2-root .tws-browser .tws-paneltop .tws-icon-btn {
+  width: var(--tws-band-ctl, 28px);
+  min-width: var(--tws-band-ctl, 28px);
+  height: var(--tws-band-ctl, 28px);
+}
+/* The panel's title is the space switcher (Subhang 2026-10-17): the space's
+   name at title size, its own popover listing every space. It takes what the
+   row leaves after the icons, and the name ellipsises first. */
+.cv2-root .tws-browser .tws-paneltop__space {
+  display: flex;
+  align-items: center;
+  gap: var(--pn-space-1);
+  flex: 0 1 auto;
+  min-width: 0;
+  /* "Space: tm8 ▾" reads as ONE line and is ONE hover target (Subhang
+     2026-10-17: inline, no box). The 6px pad gives the hover fill room; the
+     negative margin keeps "Space:" on the widget's left edge. */
+  height: 32px;
+  margin-left: -6px;
+  padding: 0 6px;
+  border-radius: var(--pn-r-sm);
+  cursor: pointer;
+}
+.cv2-root .tws-browser .tws-paneltop__space:hover,
+.cv2-root .tws-browser .tws-paneltop__space:has(.shell-switcher__trigger[aria-expanded='true']) {
+  background: var(--pn-hover);
+}
+/* The name is plain text: none of the switcher's own box, fill or shadow. */
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pn-space-1);
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--pn-ink);
+}
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__trigger:hover,
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__trigger:focus-visible {
+  background: none;
+}
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__trigger:focus-visible {
+  outline: 2px solid var(--pn-brand);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__space {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A ▾ you can see: the label's size, the muted ink. */
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__caret {
+  flex: none;
+  color: var(--pn-ink-3);
+  font-size: var(--pn-fs-label);
+  line-height: 1;
+}
+/* "Space:" — says what the name is: smaller than the name, muted, never
+   truncated. The NAME is the title (Subhang 2026-10-17). */
+.cv2-root .tws-browser .tws-paneltop__label {
+  flex: none;
+  color: var(--pn-ink-3);
+  font-size: var(--pn-fs-label);
+  font-weight: 500;
+}
+/* The switcher's own wrapper pads 6px over 4px for the header it was built
+   for; here it would sit the name a pixel below the row's centre line. */
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher {
+  padding: 0;
+}
+.cv2-root .tws-browser .tws-paneltop__space .shell-switcher__space {
+  font-size: 15px;
+  font-weight: 600;
+}
+.cv2-root .tws-browser .tws-paneltop__spacer {
+  flex: 1;
+}
+/* The pinned-only rail's New chat · New task: one row of two equal halves,
+   joined, in the navigator New button's look, on the list header's 10px
+   gutter. */
+.cv2-root .tws-browser .tws-quicknew {
+  flex: none;
+  display: flex;
+  margin: var(--pn-space-2) 10px var(--pn-space-1);
+}
+.cv2-root .tws-browser .tws-quicknew__btn {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: var(--pn-space-2);
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--pn-space-2);
+  background: var(--pn-card);
+  border: 1px solid var(--pn-line);
+  color: var(--pn-ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.cv2-root .tws-browser .tws-quicknew__btn:first-child {
+  border-radius: var(--pn-r-sm) 0 0 var(--pn-r-sm);
+}
+.cv2-root .tws-browser .tws-quicknew__btn + .tws-quicknew__btn {
+  border-left: 0;
+  border-radius: 0 var(--pn-r-sm) var(--pn-r-sm) 0;
+}
+.cv2-root .tws-browser .tws-quicknew__btn:hover {
+  background: var(--pn-hover);
+}
+.cv2-root .tws-browser .tws-quicknew__btn[aria-disabled='true'] {
+  color: var(--pn-ink-3);
+  cursor: default;
+}
+.cv2-root .tws-browser .tws-quicknew__glyph {
+  flex: none;
+  display: inline-flex;
+  color: var(--pn-brand);
+}
+.cv2-root .tws-browser .tws-quicknew__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cv2-root .tws-browser .tws-quicknew__btn:focus-visible {
+  outline: 2px solid var(--pn-brand);
+  outline-offset: -2px;
+}
+/* The new box's kind menu shows every row's ＋ at once, not on hover: the
+   column is a "make one of these" door as much as a switcher. A refused row's
+   ＋ stays faint and says why in its tooltip. */
+.cv2-root .tws-browser .lp__headtools .tch-rootopt__birth {
+  opacity: 0.7;
+}
+.cv2-root .tws-browser .lp__headtools .tch-rootitem:hover .tch-rootopt__birth:not([aria-disabled='true']),
+.cv2-root .tws-browser .lp__headtools .tch-rootopt__birth:focus-visible {
+  opacity: 1;
+}
+.cv2-root .tws-browser .lp__headtools .tch-rootopt__birth[aria-disabled='true'] {
+  opacity: 0.3;
+}
+/* The new box at the end of the kind's row: it keeps its own size and sits
+   on the right; the kind name is what ellipsises. */
+.cv2-root .tws-browser .lp__headtools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+/* The kind's row anchors the list-settings popover, so it hangs under the
+   row at the column's width (the popover rule above expects its row to be
+   the containing block). */
+.cv2-root .tws-browser .lp__head--stack {
+  position: relative;
+}
+/* The pinned-only rail's status words sit closer (4px apart, no side pad,
+   not 12px + 2px) so they keep fitting in a narrower column before the row
+   falls back to marks (Subhang 2026-10-17: "threshold even lower"). */
+.cv2-root .tws-browser .lp__head--stack ~ .lp__tierrow:not([data-marks]) {
+  gap: var(--pn-space-1);
+}
+.cv2-root .tws-browser .lp__head--stack ~ .lp__tierrow:not([data-marks]) .lp__tab {
+  padding: 0;
+  gap: 3px;
+}
+/* An alerting count (sessions' Interrupted) is WHITE on its red pill in both
+   themes — the column's muted count ink must not reach it. */
+.cv2-root .tws-browser .lp__tab .lp__tab-count--alert {
+  color: white;
+}
+/* Status tabs as marks when the column is too narrow for their words: each
+   tab is its status mark and its count, the row shares the width evenly. */
+.cv2-root .tws-browser .lp__tierrow[data-marks] {
+  justify-content: space-between;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+.cv2-root .tws-browser .lp__tab--mark {
+  flex: 1 1 0;
+  justify-content: center;
+  gap: var(--pn-space-1);
+  min-width: 0;
+}
+.cv2-root .tws-browser .lp__tab--mark .lp__tab-glyph {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+/* Group by (pinned-only rail): a quiet heading over each group's rows, on
+   the stack's 10px gutter — the name, then the count of rows on screen. */
+.cv2-root .tws-browser .lp__grouphead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: var(--pn-space-3) 10px var(--pn-space-1);
+  color: var(--pn-ink-3);
+  font-size: var(--pn-fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.cv2-root .tws-browser .lp__group:first-child .lp__grouphead {
+  margin-top: var(--pn-space-1);
+}
+.cv2-root .tws-browser .lp__groupcount {
+  font-family: var(--pn-mono);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--pn-ink-4);
+}
+/* The pinned-only rail's search line: the full search bar (28 high, one
+   focus ring on the wrapper, as the old toolbar row's), then the funnel and
+   the ⋯, on the stack's 10px gutter. */
+.cv2-root .tws-browser .lp__searchline {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: var(--pn-space-1) 10px 0;
+}
+.cv2-root .tws-browser .lp__searchline .lp__searchrow {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 var(--pn-space-2);
+  gap: var(--pn-space-1);
+  background: var(--pn-card);
+  border: 1px solid var(--pn-line);
+  border-radius: var(--pn-r-sm);
+}
+.cv2-root .tws-browser .lp__searchline .lp__searchrow:focus-within {
+  border-color: var(--pn-line-2);
+  outline: 2px solid var(--pn-brand);
+  outline-offset: -2px;
+}
+.cv2-root .tws-browser .lp__searchline .lp__searchinput,
+.cv2-root .tws-browser .lp__searchline .lp__searchinput:focus,
+.cv2-root .tws-browser .lp__searchline .lp__searchinput:focus-visible {
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  font-size: var(--pn-fs-label);
+}
+.cv2-root .tws-browser .lp__searchline .lp__searchinput::placeholder {
+  color: var(--pn-ink-3);
+}
+.cv2-root .tws-browser .lp__searchline .lp__searchrow-glyph {
+  color: var(--pn-ink-3);
+}
 .cv2-root .tws-browser .tch-rootbar {
   flex: none;
   margin: 0;
