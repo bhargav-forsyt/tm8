@@ -12,8 +12,9 @@ import './rich-input.css';
 export {
   activeTrigger,
   commitTrigger,
-  filterTriggerOptions,
+  rankTriggerOptions,
   type ActiveTrigger,
+  type RankedTriggerOption,
   type TriggerOption,
   type TriggerRange,
 } from './triggers';
@@ -41,7 +42,12 @@ export {
   type RichInputTriggerSpec,
   type StagedAttachment,
 } from './useRichInput';
-export { TriggerPopover } from './TriggerPopover';
+export {
+  TriggerPopover,
+  highlightMatch,
+  popoverWindow,
+  MAX_POPOVER_ROWS,
+} from './TriggerPopover';
 export { AttachmentChips } from './AttachmentChips';
 export { ComposerCard } from './ComposerCard';
 export { ProseField } from './ProseField';
