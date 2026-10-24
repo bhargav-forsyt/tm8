@@ -92,8 +92,9 @@ export function extractCodexRolloutIdentity(
 }
 
 /**
- * Locate the rollout belonging to `tm8SessionId` under `<home>/.codex/sessions`
- * and return its native session id, or null when none can be proven.
+ * Locate the rollout belonging to `tm8SessionId` under the Codex home — both
+ * `sessions` and `archived_sessions` — and return its native session id, or
+ * null when none can be proven.
  *
  * When several rollouts carry the marker (a session resumed before — each
  * `codex resume` writes a NEW rollout continuing the same conversation), the
@@ -125,22 +126,47 @@ export async function resolveCodexRollout(opts: {
   tm8SessionId: string;
   cwd?: string | null;
 }): Promise<CodexRollout | null> {
-  const root = join(opts.configDir ?? join(opts.home, '.codex'), 'sessions');
-  let entries: string[];
-  try {
-    entries = await readdir(root, { recursive: true });
-  } catch {
-    return null; // no ~/.codex/sessions — nothing to prove, refuse upstream
-  }
+  const configDir = opts.configDir ?? join(opts.home, '.codex');
+  // BOTH DIRECTORIES, because Codex MOVES a rollout as it ages.
+  //
+  // Only `sessions` was scanned, and Codex archives older rollouts into
+  // `archived_sessions` — so a conversation that was sitting intact on disk
+  // became permanently unresumable the moment Codex tidied it away. The
+  // refusal it produced, "no Codex rollout under ~/.codex/sessions could be
+  // proven to belong to session …", was accurate about where it had looked and
+  // wrong about what existed.
+  //
+  // Measured on one node, 2026-09-21: two sessions refused this way, both with
+  // their launch rollout present under `archived_sessions`, marker intact and
+  // inside the head window. Recovering them by hand is what proved the scan,
+  // not the data, was the problem.
+  //
+  // `sessions` stays FIRST only for readability; ordering here buys nothing,
+  // because the sort below decides the winner across the combined candidate
+  // set. A rollout is identified by its marker either way, so an archived
+  // candidate is neither privileged nor penalised by the directory it sits in.
+  const roots = [join(configDir, 'sessions'), join(configDir, 'archived_sessions')];
 
   const candidates: CodexRollout[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith('.jsonl')) continue;
-    const path = join(root, entry);
-    const head = await readHead(path, HEAD_WINDOW_BYTES);
-    if (head === null) continue;
-    const identity = extractCodexRolloutIdentity(head, opts.tm8SessionId);
-    if (identity !== null) candidates.push({ ...identity, path });
+  for (const root of roots) {
+    let entries: string[];
+    try {
+      entries = await readdir(root, { recursive: true });
+    } catch {
+      // A missing root is ordinary, not an error: a fresh CODEX_HOME has no
+      // `archived_sessions` until Codex first archives something. Keep going —
+      // returning here is what made the absence of ONE directory hide the
+      // contents of the other.
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.jsonl')) continue;
+      const path = join(root, entry);
+      const head = await readHead(path, HEAD_WINDOW_BYTES);
+      if (head === null) continue;
+      const identity = extractCodexRolloutIdentity(head, opts.tm8SessionId);
+      if (identity !== null) candidates.push({ ...identity, path });
+    }
   }
   if (candidates.length === 0) return null;
 

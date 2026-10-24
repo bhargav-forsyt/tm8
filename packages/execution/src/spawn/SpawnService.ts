@@ -2439,6 +2439,11 @@ export class SpawnService {
     // are captured lazily from the rollout here, then recorded write-once so
     // the scan never runs twice.
     let nativeSessionId = info.nativeSessionId;
+    // Hoisted so the refusal below can name the homes actually searched. A
+    // message that names a path the scan did not use is how the last one sent
+    // an operator looking in ~/.codex for a rollout that lived under a
+    // credentialed CODEX_HOME.
+    let configDirsTried: string[] = [];
     if (!nativeSessionId && launch.agentTool === 'codex') {
       const configDirs = [...new Set([
         ...(info.agentConfigDir ? [info.agentConfigDir] : []),
@@ -2448,6 +2453,7 @@ export class SpawnService {
           home: this.env.HOME ?? homedir(),
         }),
       ])];
+      configDirsTried = configDirs;
       for (const configDir of configDirs) {
         nativeSessionId = await resolveCodexNativeSessionId({
           home: this.env.HOME ?? homedir(),
@@ -2477,7 +2483,7 @@ export class SpawnService {
     if (!nativeSessionId) {
       throw new SpawnError(
         launch.agentTool === 'codex'
-          ? `no Codex rollout under ~/.codex/sessions could be proven to belong to session ${sessionId} — refusing to resume a different or fresh conversation`
+          ? `no Codex rollout under ${configDirsTried.join(' or ')} (sessions or archived_sessions) could be proven to belong to session ${sessionId} — refusing to resume a different or fresh conversation`
           : `work session ${sessionId} has no recorded native session id (spawned before resume support) — it cannot be resumed`,
         'conflict',
         { sessionId, agentTool: launch.agentTool },
