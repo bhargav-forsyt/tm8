@@ -1,0 +1,13 @@
+{
+  "name": "thebigpicture",
+  "owner": {
+    "name": "tm8"
+  },
+  "plugins": [
+    {
+      "name": "thebigpicture",
+      "source": "./",
+      "description": "One permanent architecture document and one living document per task, both evidence-backed and both project-agnostic."
+    }
+  ]
+}
